@@ -580,12 +580,12 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   if t and t > 0 then
     return (relPos / t + relVel - 0.5 * accel * t).normalized
   end
-  return relPos.normalized
+  return nil
 end
 
 function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTime, maxTime)
   local a = 0.25 * accel.sqrMagnitude
-  local b = -Vector3.Dot(relVel, accel)
+  local b = Vector3.Dot(relVel, accel)
   local c = relVel.sqrMagnitude - muzzle * muzzle + Vector3.Dot(relPos, accel)
   local d = 2 * Vector3.Dot(relPos, relVel)
   local e = relPos.sqrMagnitude
@@ -598,7 +598,7 @@ function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTi
       end
     end
   end
-  return t or 0
+  return t
 end
 
 function Targeting.AIPPN(gain, relPos, missileVel, targetVel, targetAccel)

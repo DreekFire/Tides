@@ -30,13 +30,15 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   if t and t > 0 then
     return (relPos / t + relVel - 0.5 * accel * t).normalized
   end
-  return relPos.normalized
+  return nil
 end
 
 -- Same as above, but returns the time from now at which intercept will occur
+-- wltrup's answer uses acceleration of the projectile while this takes the acceleration of the target
+-- which is why the signs are flipped
 function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTime, maxTime)
   local a = 0.25 * accel.sqrMagnitude
-  local b = -Vector3.Dot(relVel, accel)
+  local b = Vector3.Dot(relVel, accel)
   local c = relVel.sqrMagnitude - muzzle * muzzle + Vector3.Dot(relPos, accel)
   local d = 2 * Vector3.Dot(relPos, relVel)
   local e = relPos.sqrMagnitude
@@ -49,7 +51,7 @@ function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTi
       end
     end
   end
-  return t or 0
+  return t
 end
 
 --[[

@@ -21,3 +21,6 @@ In FtD:
 
 In Tides:
   idk probably too many to count I'm not good at this
+
+  MathUtil polynomial solvers have arguments named c0, c1, c2... but the order should be coefficients of higher powers first
+  The author of the original library (piqey) named them backwards
