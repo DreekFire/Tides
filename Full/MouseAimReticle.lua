@@ -340,9 +340,12 @@ function Steer(I)
   local pitchRate = r / wt
 
   local rollScale = Mathf.Min(1, Vector3.Angle(pointing, fw) / fullRollAngle)
-  local desiredRoll = rollScale * rollScale * MathUtil.angleOnPlane(Vector3.up, pointing, I:GetConstructForwardVector())
+  local trs = rollScale * rollScale
+  local pra = rollScale * rollScale * MathUtil.angleOnPlane(Vector3.up, pointing, I:GetConstructForwardVector())
   rollScale = Mathf.Min(1, pointVel.magnitude / fullRollRate)
-  desiredRoll = desiredRoll + rollScale * rollScale * MathUtil.angleOnPlane(Vector3.up, pointDel, I:GetConstructForwardVector())
+  local rra = rollScale * rollScale * MathUtil.angleOnPlane(Vector3.up, pointDel, I:GetConstructForwardVector())
+  trs = trs + rollScale * rollScale
+  local desiredRoll = (pra + rra) / Mathf.Max(1, trs) 
   if desiredRoll ~= desiredRoll then desiredRoll = 0 end
   local rollE = desiredRoll - I:GetConstructRoll()
   if rollE < -180 then
