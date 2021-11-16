@@ -72,12 +72,12 @@ local rollS  = {  P = 0.03,
   of the cockpit.
   the camera position in the chair is not centered. I suspect it was placed
   by hand. These values are simply my best guess.
-  Normally (-0.01, 1, 0.09) from the chair center, (-0.01, 1.7, 0.09) for elevated
+  Normally (-0.01, 1, 0.09) from the chair center, (-0.01, 1.68, 0.09) for elevated
 ]]--
-local chairOffset = Vector3(-0.005, 0, 0)
+local chairOffset = Vector3(-0.009, 0, 0)
 
 -- shifts crosshairs to compensate for non-centered images
-local hologramOffset = Vector3(-0.0015, -0.02, 0)
+local hologramOffset = Vector3(0, 0, 0)
 
 -- distance from camera to HUD
 local hudDistance = 0.4
@@ -272,7 +272,7 @@ function Sight(I, target)
           if not info.PlayerCurrentlyControllingIt then
             local diff = enemyPosition + rotation * (headLoc - info.LocalFirePoint)
             diff = MathUtil.clampCone(I:GetConstructForwardVector(), diff, maxFireAngle)
-            aimDir = invRot * diff
+            aimDir = invRot * optPointing
             pointing = optPointing
             BlockUtil.aimWeapon(I, wep, diff, 0)
             BlockUtil.fireWeapon(I, wep, 0)
