@@ -760,7 +760,7 @@ function CheckConstraints(I, direction, wepId, subObjId)
     local rot = I:GetSubConstructInfo(subObjId).localRotation
     direction = Quaternion.inverse(rot) * direction
   end
-  local azi = angleOnPlane(Vector3.forward, direction, Vector3.up)
+  local azi = MathUtil.angleOnPlane(Vector3.forward, direction, Vector3.up)
   local aziDir = direction
   aziDir.z = 0
   local elevation = Mathf.Atan2(direction.z, aziDir.magnitude)
