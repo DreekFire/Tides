@@ -1,0 +1,23 @@
+Known bugs:
+In FtD:
+  General:
+    Firing a short range laser combiner with an ACB makes it hit and destroy itself.
+    AMCCs and LWCs have trouble controlling nested turrets (if the innermost turret cannot currently aim to hit the target, the outer turrets will not attempt to rotate so that it can).
+
+  Lua:
+    Lua-controlled short range laser combiners cannot hit missiles (have not tested with regular laser combiners or projectile weapons).
+    Lua API for APS laser targeter and warp drive is outdated (no effect on warp drives, will set fuse time for laser target but shell doesn't actually explode).
+    Some functions (i.e. get resource zones or subconstructs) return userdata instead of a table.
+
+  Not bugs but things to be cautious of:
+    "unique ID of docked vehicle" for tractor beams is unrelated to the vehicle's actual ID.
+    Vector3.SignedAngle does not project the vectors to the plane first; i.e. the magnitude is exactly the same as Vector3.Angle, with only the sign determined by the normal.
+
+  Things I wish were added:
+    Inter-vehicle communication (other than my jank tractor-beam cube method)
+    More detailed missile info from munition warners (i.e. diameter)
+    Thrust vectoring control
+    Reading files
+
+In Tides:
+  idk probably too many to count I'm not good at this
