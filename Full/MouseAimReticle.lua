@@ -266,7 +266,7 @@ function Sight(I, target)
       if Vector3.Angle(fw, enemyPosition) < autoAimAngle
        and enemyPosition.magnitude < autoFireRange then
         local headLoc = invRot * (headPos - I:GetConstructPosition())
-        local optPointing = (enemyPosition - rotation * gunOffset).normalized
+        local optPointing = (enemyPosition + rotation * (headLoc - gunOffset)).normalized
         for i, wep in ipairs(mainWeps) do
           local info = BlockUtil.getWeaponInfo(I, wep)
           if not info.PlayerCurrentlyControllingIt then
