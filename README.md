@@ -3,11 +3,13 @@
 
 Project is heavily WIP, but I will try to keep the documentation up to date.
 
+I am currently rewriting many of my old Lua scripts to use this library, which will be uploaded in one batch.
+
 If you have any questions on how to use it, how it works, or how to program in general, contact me at Knife-Kun#3265 on Discord.
 
 ## Installation
 
-Unfortunately, FtD does not provide a nice way to import libraries. The easiest way to do it is to copy the content of `Header.lua` to the beginning of your lua script (outside of the Update function) and the content of `Tides.lua` or `Tides.min.lua` anywhere else in your script, such as the very end (again, outside of any functions). `Tides.min.lua` is minified. Do not attempt to try to read this. The same code is contained in separate files throughout the repository. I also used an automatic minifier for this so I'm not 100% sure it works ehe.
+Unfortunately, FtD does not provide a nice way to import libraries. The easiest way to do it is to copy the content of `Header.lua` to the beginning of your lua script (outside of the Update function) and the content of `Tides.lua` or `Tides.min.lua` anywhere else in your script, such as the very end (again, outside of any functions).
 
 If you wish to reduce the size of your code, you can remove any classes that you don't need.
 
@@ -15,7 +17,7 @@ If you wish to reduce the size of your code, you can remove any classes that you
 
 The classes in Tides are divided into four categories based on their level of abstraction and specialization.
 
-**Low Tide** contains Lua code for basic constructs that are generally useful in many applications, and does not contain any FtD-specific code.
+**Low Tide** contains Lua code for basic constructs that are generally useful in many applications. It contains some Unity-specific code but no FtD specific code.
 
 **Medium Tide** contains code which builds on the structures defined in Low, and is slightly more specific to the fields of programming that FtD uses. It contains some Unity-specific code but no FtD specific code.
 

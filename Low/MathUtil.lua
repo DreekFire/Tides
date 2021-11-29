@@ -1,3 +1,5 @@
+-- stat functions not yet included in Tides.lua
+
 local MathUtil = {}
 
 --[[
@@ -93,6 +95,133 @@ function MathUtil.range(a, b, c)
 end
 
 --[[
+  From MHebes' answer to StackOverflow question 35572435
+  Returns a shuffled copy of lst without modifying lst.
+  lst must not have holes (nil values followed by non-nil).
+  Arguments:
+    lst - list to shuffle
+  Returns:
+    s - shuffled list
+--]]
+function MathUtil.shuffle(lst)
+  local s = {}
+  for i = 1, #lst do s[i] = lst[i] end
+  for i = #lst, 2, -1 do
+    local j = math.random(i)
+    s[i], s[j] = s[j], s[i]
+  end
+  return s
+end
+
+function MathUtil.combine(a, b, fun)
+  if #a == #b then
+    local res = {}
+    for k, v in pairs(a) do
+      res[k] = fun(k, v, b[k])
+    end
+    return res
+  end
+end
+
+--[[
+
+]]
+function MathUtil.distribution()
+  return { n = 0 }
+end
+
+function MathUtil.updateDistribution(distr, sample)
+  distr.n = distr.n + 1
+  if distr.n == 1 then
+    distr.mean = sample
+    distr.covariance = {}
+    local d = #sample
+    for i = 1, d do
+      local cov = {}
+      for j = 1, d do
+        cov[j] = 0
+      end
+      distr.covariance[i] = cov
+    end
+  else
+    distr.mean = distr.mean + (1 / (distr.n + 1)) * sample
+    -- todo: update covariance using online covariance update algorithm on wikipedia
+    -- correctness of that algorithm was disputed by a mathoverflow user so double-check before using
+  end
+end
+
+function MathUtil.mean(distr)
+  return distr.mean
+end
+
+function MathUtil.covariance(distr)
+  return distr.cov
+end
+
+--[[
+  Returns:
+    z - a normally distributed random number
+--]]
+function MathUtil.normal()
+  local z, z1 = MathUtil.boxMuller()
+  return z
+end
+
+--[[
+  Arguments:
+    z - a z-score
+  Returns:
+    d - the standard normal probability density function at z
+]]
+function MathUtil.normalPDF(z)
+  return math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+end
+
+--[[
+  Arguments:
+    z - a z-score
+  Returns:
+    p - the p-value corresponding to that z-score. Approximately calculated using Zelen and Severo (1964) approximation
+--]]
+function MathUtil.normalCDF(z)
+  local b0 = 0.2316419
+  local b1 = 0.319381530
+  local b2 = -0.356563782
+  local b3 = 1.781477937
+  local b4 = -1.821255978
+  local b5 = 1.330274429
+  local t = 1 / (1 + b0 * z)
+  return 1 - MathUtil.normalPDF(z) * (b1 * t + b2 * t^2 + b3 * t^3 + b4 * t^4 + b5 * t^5)
+end
+
+--[[
+  Arguments:
+    p - a p-value
+  Returns:
+    z - the z-score corresponding to that p-value. Approximately calculated using Shore (1982) approximation
+--]]
+function MathUtil.inverseNorm(p)
+  local pRight = p >= 0.5 and p or -p
+  local z = 5.55556 * (1 - ((1 - pRight) / pRight) ^ 0.1186) -- Shore (1982) approximation for normal quantile
+  if p < 0.5 then z = -z end
+  return z
+end
+
+--[[
+  Returns:
+    z1, z2 - two normally distributed random numbers
+--]]
+function MathUtil.boxMuller()
+  local u1 = math.random()
+  local u2 = math.random() -- idk what algorithm math.random uses, but it might be an LCG since it's simple and common
+  u2 = math.random() -- it's also not very high-quality, which also describes LCGs. Box-Muller performs poorly when the
+  u2 = math.random() -- input comes from two consecutive numbers of an LCG, so we throw away values in between.
+  local r = math.sqrt(-2 * math.log(u1))
+  local theta = 2 * math.pi * u2
+  return r * math.cos(theta), r * math.sin(theta)
+end
+
+--[[
   Law of Cosines: a^2 = b^2 + c^2 - 2bc * cos(A)
   Law of Sines: a / sin(A) = b / sin(B) = c / sin(C)
 
@@ -111,7 +240,7 @@ end
 --]]
 function MathUtil.angleSSS(a, b, c)
   if (a + b < c) or (a + c < b) or (b + c < a) then return nil end
-  local A = Mathf.Acos((b * b + c * c - a * a) / (2 * b * c)) * Mathf.Rad2Deg
+  local A = math.deg(math.acos((b * b + c * c - a * a) / (2 * b * c))
   local B, C = MathUtil.angleSAS(b, A, c)
   return A, B ,C
 end
@@ -125,8 +254,8 @@ end
     c - the length of the third side
 --]]
 function MathUtil.sideSAS(a, C, b)
-  local csq = a * a + b * b - 2 * a * b * Mathf.Cos(C * Mathf.Deg2Rad)
-  return Mathf.Sqrt(csq)
+  local csq = a * a + b * b - 2 * a * b * math.cos(math.rad(C))
+  return math.sqrt(csq)
 end
 
 --[[
@@ -163,7 +292,7 @@ end
 --]]
 function MathUtil.sideSSA(a, b, A)
   local q0 = b * b - a * a
-  local q1 = -2 * b * Mathf.Cos(A * Mathf.Deg2Rad)
+  local q1 = -2 * b * math.cos(math.rad(A))
   local c1, c2 = MathUtil.solveQuadratic(q0, q1, 1)
   if c1 < c2 then return c1, c2 end
   return c2, c1
@@ -214,7 +343,7 @@ end
     b - the side opposite angle B
 --]]
 function MathUtil.sideLoSin(a, A, B)
-  return a * Mathf.Sin(B * Mathf.Deg2Rad) / Mathf.Sin(A * Mathf.Deg2Rad)
+  return a * math.sin(math.rad(B)) / math.sin(math.rad(A))
 end
 
 --[[
@@ -226,7 +355,7 @@ end
     B - the angle opposite side b
 --]]
 function MathUtil.angleLoSin(a, b, A)
-  return Mathf.Asin(b * Mathf.Sin(A * Mathf.Deg2Rad) / a) * Mathf.Rad2Deg
+  return math.deg(math.asin(b * math.sin(math.rad(A)) / a))
 end
 
 --[[
@@ -239,7 +368,7 @@ end
         magnitude as v1 which is closest to v2
 ]]--
 function MathUtil.clampCone(v1, v2, angle)
-  local offAngle = Mathf.Min(angle, Vector3.Angle(v1, v2))
+  local offAngle = math.min(angle, Vector3.Angle(v1, v2))
   local axis = Vector3.Cross(v1, v2)
   return Quaternion.AngleAxis(offAngle, axis) * v1
 end

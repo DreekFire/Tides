@@ -72,4 +72,12 @@ WIP
 function Nav.aStar()
 
 end
+
+function Nav.marchingSquares()
+
+end
+
+function Nav.visGraph()
+
+end
 --]]
