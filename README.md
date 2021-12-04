@@ -25,7 +25,16 @@ The classes in Tides are divided into four categories based on their level of ab
 
 **Full** contains complete examples. Currently, there is one example, which is the mouse aim demonstrator.
 
-Features of the mouse aim demonstrator include:
-Mouse control of aircraft
-Manual and auto aim (slot 1 for manual, 2 for auto)
-Targeting, lock-on, and lead reticule (default lead reticule mode is "trailing," which shows where you will hit if you fire now)
+1. Mouse Aim Aircraft:
+* Mouse control of aircraft
+* Manual and auto aim (slot 1 for manual, 2 for auto)
+* Targeting, lock-on, and lead reticule (default lead reticule mode is "trailing," which shows where you will hit if you fire now)
+
+2. Vehicle Missile Interceptor:
+* Drone that rams incoming huge missiles
+* Spreads out arms mounted on spinblocks prior to collision
+* Rolls to rotate arms into place, using information about which arms have already been destroyed (thump missiles only take out one arm at a time, allowing 5 uses)
+
+3. Ship Identification (WIP):
+* Uses target prioritization cards to measure stats of enemy ships
+* Compares stats to table of known ships to identify them
