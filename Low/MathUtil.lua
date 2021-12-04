@@ -293,7 +293,8 @@ end
 function MathUtil.sideSSA(a, b, A)
   local q0 = b * b - a * a
   local q1 = -2 * b * math.cos(math.rad(A))
-  local c1, c2 = MathUtil.solveQuadratic(q0, q1, 1)
+  local c1, c2 = MathUtil.solveQuadratic(1, q1, q0)
+  if not c2 then return c1, c2 end
   if c1 < c2 then return c1, c2 end
   return c2, c1
 end
@@ -304,8 +305,8 @@ end
     b - the length of another side
     A - the angle opposite side a
   Returns:
-    B1, C1 - the first possibility for the second and third side
-    B2, C2 - the second possibility for the second and third side
+    B1, C1 - the first possibility for the second and third angle
+    B2, C2 - the second possibility for the second and third angle
 --]]
 function MathUtil.angleSSA(a, b, A)
   local c1, c2 = MathUtil.sideSSA(a, b, A)

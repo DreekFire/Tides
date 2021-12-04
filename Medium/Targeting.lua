@@ -3,9 +3,13 @@ local Targeting = {}
 
 -- Returns the direction in which the weapon should fire to hit a target
 -- Assumes both target and projectile travel in a straight line (i.e. no gravity)
-function Targeting.firstOrderTargeting(relPos, targetVel, muzzleVel)
+-- Also use this for TPG guidance on missiles
+function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
   local targetAngle = Vector3.Angle(-relPos, targetVel)
-  local firingAngle = MathUtil.angleSSA(muzzleVel.magnitude, targetVel.magnitude, targetAngle)
+  local b1, c1, b2, c2 = MathUtil.angleSSA(muzzle, targetVel.magnitude, targetAngle)
+  if not b1 then return nil end
+  local firingAngle = b2 or b1
+  if not firingAngle then return nil end
   return (Quaternion.AngleAxis(firingAngle, Vector3.Cross(relPos, targetVel)) * relPos).normalized
 end
 
@@ -106,9 +110,4 @@ function Targeting.ATPN(gain, relPos, missileVel, targetVel, targetAccel)
   local orthoAccel = Vector3.ProjectOnPlane(targetAccel, relPos)
 
   return gain * closingRate * losMotion + 0.5 * gain * targetAccel
-end
-
-function Targeting.accelToDirection(fwd, latax, time)
-  local rotVec = Vector3.Cross(fwd, latax) / fwd.sqrMagnitude * time * Mathf.Rad2Deg
-  return Quaternion.AngleAxis(rotVec.magnitude, rotVec) * fwd
 end

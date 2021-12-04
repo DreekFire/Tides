@@ -27,6 +27,7 @@ In Tides:
   MathUtil polynomial solvers have arguments named c0, c1, c2... but the order should be coefficients of higher powers first
 
 Future Plans:
+  Add a way to reset PIDs
   IK for mech movement
   Event scheduling for animations
   Pathfinding for navigation:

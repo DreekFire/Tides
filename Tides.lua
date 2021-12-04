@@ -192,8 +192,9 @@ end
 
 function MathUtil.sideSSA(a, b, A)
   local q0 = b * b - a * a
-  local q1 = -2 * b * Mathf.Cos(A * Mathf.Deg2Rad)
-  local c1, c2 = MathUtil.solveQuadratic(q0, q1, 1)
+  local q1 = -2 * b * math.cos(math.rad(A))
+  local c1, c2 = MathUtil.solveQuadratic(1, q1, q0)
+  if not c2 then return c1, c2 end
   if c1 < c2 then return c1, c2 end
   return c2, c1
 end
@@ -569,9 +570,12 @@ function Nav.cylToCart(coords)
   return Vector3(x, y, z)
 end
 
-function Targeting.firstOrderTargeting(relPos, targetVel, muzzleVel)
+function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
   local targetAngle = Vector3.Angle(-relPos, targetVel)
-  local firingAngle = MathUtil.angleSSA(muzzleVel.magnitude, targetVel.magnitude, targetAngle)
+  local b1, c1, b2, c2 = MathUtil.angleSSA(muzzle, targetVel.magnitude, targetAngle)
+  if not b1 then return nil end
+  local firingAngle = b2 or b1
+  if not firingAngle then return nil end
   return (Quaternion.AngleAxis(firingAngle, Vector3.Cross(relPos, targetVel)) * relPos).normalized
 end
 
