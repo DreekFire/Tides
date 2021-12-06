@@ -32,7 +32,7 @@ end
 function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange, maxRange)
   local t = Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minRange / muzzle, maxRange / muzzle)
   if t and t > 0 then
-    return (relPos / t + relVel - 0.5 * accel * t).normalized
+    return (relPos / t + relVel + 0.5 * accel * t).normalized
   end
   return nil
 end

@@ -288,7 +288,7 @@ end
     A - the angle opposite side a
   Returns:
     c1, c2 - both possibilities for the length of the third side.
-              one or both may be nil
+              one or both may be nil. c1 may be negative
 --]]
 function MathUtil.sideSSA(a, b, A)
   local q0 = b * b - a * a
