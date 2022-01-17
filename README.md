@@ -23,7 +23,7 @@ The classes in Tides are divided into four categories based on their level of ab
 
 **High Tide** contains code that is narrowly applicable to applications in FtD and similar fields. It contains FtD-specific code.
 
-**Full** contains complete examples. Currently, there is one example, which is the mouse aim demonstrator.
+**Full** contains complete examples. Currently, there are 3 examples:
 
 1. Mouse Aim Aircraft:
 * Mouse control of aircraft

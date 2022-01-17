@@ -264,15 +264,14 @@ function Sight(I, target)
     if not b then minTTT = a
     elseif a > 0 and (a < b or b < 0) then minTTT = a
     elseif b > 0 and (b < a or a < 0) then minTTT = b end
-    minTTT = minTTT or 0
+    minTTT = minTTT / 2 or 0
     a, b = MathUtil.solveQuadratic(-0.5 * accel.magnitude, muzzle - relVel.magnitude, -relPos.magnitude)
     local maxTTT
     if not b then maxTTT = a
     elseif a > 0 and (a < b or b < 0) then maxTTT = a
     elseif b > 0 and (b < a or a < 0) then maxTTT = b end
     maxTTT = maxTTT or (1/0) --infinity
-    local t = Targeting.secondOrderTargetingTime(I, relPos + gunOffset, relVel, accel, muzzle, minTTT, maxTTT)
-    if t then I:LogToHud(t) end
+    local t = Targeting.secondOrderTargetingTime(relPos + gunOffset, relVel, accel, muzzle, minTTT, maxTTT)
     lockOffset = invRot * relPos / Mathf.Abs(Vector3.Dot(relPos, fw)) * (hudDistance - offset.z)
     if t then
       local enemyPosition = relPos + t * relVel + 0.5 * t * t * accel
