@@ -2,11 +2,13 @@
 -- seconds to record target movements for
 local targetTrackTime = 10
 -- number of locations to track per enemy (todo: support tracking multiple projectiles)
-local numOrigins = 5
--- muzzle velocity of weapon (todo: support multiple weapons)
-local muzzleVelocity = -1
+local numOrigins = 6
+-- time between switching targets
+local originSwitchTime = 3
 -- maximum time to remember origin points
 local maxStaleness = 5
+-- muzzle velocity of weapon (todo: support multiple weapons)
+local muzzleVelocity = -1
 
 local projectilePos
 local times
@@ -15,8 +17,10 @@ local currentLine
 local lastFrameTime
 local inited
 local prevTime
+local lastOrigin
+local lastOriginSwitchTime
 
-local EPSILON_P = 0.1
+local EPSILON_P = 0.01
 local TICKS_PER_S = 40
 
 local BlockUtil = {}
@@ -137,12 +141,16 @@ function Update(I)
   local target = I:GetTargetInfo(0, 0)
   if target and target.Valid then
     local enemy = enemies[target.Id]
-    while enemy.origins.size > 0 and I:GetTimeSinceSpawn() - enemy.originTimes[1] > maxStaleness do
-      RingBuffer.pop(enemy.origins)
-      RingBuffer.pop(enemy.originTimes)
+    local fp = lastOrigin
+    if not lastOriginSwitchTime or I:GetTimeSinceSpawn() - lastOriginSwitchTime > originSwitchTime then
+      while enemy.origins.size > 0 and I:GetTimeSinceSpawn() - enemy.originTimes[1] > maxStaleness do
+        RingBuffer.pop(enemy.origins)
+        RingBuffer.pop(enemy.originTimes)
+      end
+      if enemy.origins.size == 0 then return end
+      fp = enemy.origins[math.random(1, enemy.origins.size)]
+      lastOriginSwitchTime = I:GetTimeSinceSpawn()
     end
-    if enemy.origins.size == 0 then return end
-    local fp = enemy.origins[math.random(1, enemy.origins.size)]
     if fp then
       local aim
       if muzzleVelocity < 0 then
