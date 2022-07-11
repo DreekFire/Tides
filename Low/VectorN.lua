@@ -1,5 +1,4 @@
-local VectorN = {}
-VectorN.mt = getmetatable({})
+VectorN.mt = getmetatable({}) or {}
 VectorN.mt.__add = function(a, b)
   local aInt = type(a) == "int"
   local bInt = type(b) == "int"

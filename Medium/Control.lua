@@ -1,5 +1,4 @@
 -- dependencies: Accumulator, LinkedList
-local Control = {}
 
 function Control.PID(kP, kI, kD, IDecay, IWindow, period)
   local pid = {}

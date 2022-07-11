@@ -1,5 +1,4 @@
 -- dependencies: LinkedList
-local Accumulator = {}
 -- Accumulation is the discrete time equivalent to integration
 
 --[[

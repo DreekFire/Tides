@@ -1,5 +1,3 @@
-local Graph = {}
-
 --[[
 WIP
 function Graph.Graph()

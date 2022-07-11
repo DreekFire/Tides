@@ -1,4 +1,3 @@
-local Differ = {}
 -- Differ is short for differencer and is the discrete time equivalent of taking the derivative
 
 --[[

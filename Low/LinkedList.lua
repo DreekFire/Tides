@@ -1,4 +1,3 @@
-local LinkedList = {}
 -- A LinkedList is a chain of elements where each element contains a reference to the next one in the list.
 -- This is a doubly linked list so each element also contains a reference to the previous element.
 

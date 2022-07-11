@@ -1,5 +1,3 @@
-local Nav = {}
-
 --[[
   Arguments:
     gCoords - a point in global coordinates

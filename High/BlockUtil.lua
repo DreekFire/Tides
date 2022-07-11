@@ -1,5 +1,3 @@
-local BlockUtil = {}
-
 --[[
   Arguments:
     I - the variable passed to Update

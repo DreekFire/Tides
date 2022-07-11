@@ -1,5 +1,3 @@
-local Combat = {}
-
 --[[
   Arguments:
     I - the variable passed to Update
@@ -37,14 +35,14 @@ end
   Returns:
     valid - whether or not the direction is within the firing constraints
 --]]
-function CheckConstraints(I, direction, wepId, subObjId)
+function Combat.CheckConstraints(I, direction, wepId, subObjId)
   local con
   if subObjId then
     con = I:GetWeaponConstraintsOnSubConstruct(subObjId, wepId)
   else
     con = I:GetWeaponConstraints(wepId)
   end
-  local fore = I:GetConstructForwardVEctor()
+  local fore = I:GetConstructForwardVector()
   local up = I:GetConstructUpVector()
   local constructRot = Quaternion.LookRotation(fore, up)
   direction = Quaternion.Inverse(constructRot) * direction

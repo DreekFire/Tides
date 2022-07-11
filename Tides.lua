@@ -1,3 +1,16 @@
+-- dependencies: LinkedList
+-- Accumulation is the discrete time equivalent to integration
+
+--[[
+  Arguments:
+    window - the time period over which to accumulate values
+    decay - the rate at which values decay. Values are multiplied
+            by decay^t, where t is their age in seconds.
+            lower decay means value decays faster, giving recent
+            values more importance.
+  Returns:
+    acc - an accumulator struct
+]]--
 function Accumulator.Accumulator(window, decay)
   local acc = {}
   acc.decay = decay
@@ -11,9 +24,28 @@ function Accumulator.Accumulator(window, decay)
   return acc
 end
 
+--[[
+  Updates the accumulator by giving it a new value,
+  and returns the state of the accumulator.
+
+  Arguments:
+    acc - the accumulator struct to update
+    value - the value to accumulate
+    time - the time over which the value is observed.
+           essentially weights the value.
+           set to 1 for unweighted average.
+  Returns:
+    value - the total accumulated value
+    weight - the total time, affected by decay.
+             value / weight will give an average
+             of the values accumulated.
+]]--
 function Accumulator.update(acc, value, time)
   local decayFac = Mathf.Pow(acc.decay, time)
   if not acc.value then
+    -- instead of setting it to some initial value like 0
+    -- initializing here lets us be flexible with the type of value
+    -- for example, accumulate vectors instead of real numbers
     acc.value = value * time
   else
     acc.value = acc.value * decayFac
@@ -36,10 +68,30 @@ function Accumulator.update(acc, value, time)
   return acc.value, acc.weight
 end
 
+--[[
+  Returns the state of the accumulator without
+  giving it a new value. Does not change the state
+  of the accumulator.
+
+  Arguments:
+    acc - the accumulator struct to update
+  Returns:
+    value - the total accumulated value
+    weight - the total time, affected by decay.
+             value / weight will give an average
+             of the values accumulated.
+]]--
 function Accumulator.get(acc)
   return acc.value, acc.weight
 end
+-- Differ is short for differencer and is the discrete time equivalent of taking the derivative
 
+--[[
+  Arguments:
+    initial - the initial value of the differ
+  Returns:
+    differ - a differ struct
+]]--
 function Differ.Differ(initial)
   local differ = {}
   differ.lastVal = initial
@@ -47,6 +99,18 @@ function Differ.Differ(initial)
   return differ
 end
 
+--[[
+  Updates the differ by giving it a new value,
+  and returns the change between the new value
+  and the old value stored by the differ.
+
+  Arguments:
+    differ - the differ struct to update
+    value - the new value
+  Returns:
+    diff - value minus the previous value
+           stored by the differ
+]]--
 function Differ.update(differ, value)
   if differ.lastVal then
     differ.diff = value - differ.lastVal
@@ -56,10 +120,33 @@ function Differ.update(differ, value)
   return differ.diff
 end
 
+--[[
+  Returns the state of the differ without
+  giving it a new value. Does not change the state
+  of the differ.
+
+  Arguments:
+    differ - the differ struct to update
+  Returns:
+    diff - the previous change observed
+           by the differ
+]]--
 function Differ.get(differ)
   return differ.diff
 end
+--[[
+WIP
+function Graph.Graph()
+  local g = {
+    verts = {}
+  }
+  return g
+end
+]]--
+-- A LinkedList is a chain of elements where each element contains a reference to the next one in the list.
+-- This is a doubly linked list so each element also contains a reference to the previous element.
 
+-- Creates a new linked list.
 function LinkedList.LinkedList()
   local llelem = {}
   llelem.value = nil
@@ -68,6 +155,7 @@ function LinkedList.LinkedList()
   return llelem
 end
 
+-- Adds value to the front of lst.
 function LinkedList.pushFront(lst, value)
   local llelem = {}
   llelem.value = value
@@ -75,6 +163,7 @@ function LinkedList.pushFront(lst, value)
   LinkedList.connect(lst, llelem)
 end
 
+-- Adds value to the back of lst.
 function LinkedList.pushBack(lst, value)
   local llelem = {}
   llelem.value = value
@@ -82,31 +171,41 @@ function LinkedList.pushBack(lst, value)
   LinkedList.connect(llelem, lst)
 end
 
+-- Removes and returns the value at the front of lst.
+-- Returns nil if empty.
 function LinkedList.popFront(lst)
   local val = lst.next.value
   LinkedList.connect(lst, lst.next.next)
   return val
 end
 
+-- Removes and returns the value at the back of lst.
+-- Returns nil if empty.
 function LinkedList.popBack(lst)
   local val = lst.prev.value
   LinkedList.connect(lst.prev.prev, lst)
   return val
 end
 
+-- Returns the value at the front of lst. Does not remove it.
+-- Returns nil if empty.
 function LinkedList.peekFront(lst)
   return lst.next.val
 end
 
+-- Returns the value at the back of lst. Does not remove it.
+-- Returns nil if empty.
 function LinkedList.peekBack(lst)
   return lst.prev.val
 end
 
+-- Joins two list elements. Internal use, you probably don't need this.
 function LinkedList.connect(e1, e2)
   e1.next = e2
   e2.prev = e1
 end
 
+-- Converts a linked list into a lua list (a table with numeric keys).
 function LinkedList.toArray(lst)
   local i = 1
   local arr = {}
@@ -117,13 +216,42 @@ function LinkedList.toArray(lst)
   end
   return arr
 end
-
+--[[
+  Arguments:
+    from - a vector
+    to - another vector
+    planeNormal - the normal vector to a plane
+  Returns:
+    signedAngle - the angle between the projections
+                  of from and to onto the plane
+                  normal to planeNormal, where
+                  clockwise (looking from the
+                  direction of planeNormal) is
+                  positive.
+                  Differs from Vector3.SignedAngle
+                  because that function does not
+                  project the vectors onto the plane.
+--]]
 function MathUtil.angleOnPlane(from, to, planeNormal)
   local f = Vector3.ProjectOnPlane(from, planeNormal)
   local t = Vector3.ProjectOnPlane(to, planeNormal)
   return Vector3.SignedAngle(f, t, planeNormal)
 end
 
+--[[
+  Arguments:
+    set - an iterator or table
+    comp (optional) - a comparison function which
+                        takes 2 arguments and
+                        returns true if the first
+                        argument is less than the
+                        second and false otherwise.
+                        Uses < operator if empty
+  Returns:
+    min - the minimum value in set
+            if there are multiple
+            then it returns the first
+--]]
 function MathUtil.min(set, comp)
   local min = nil
   comp = comp or function(a, b) return a < b end
@@ -135,6 +263,9 @@ function MathUtil.min(set, comp)
   return min
 end
 
+--[[
+  Same as min but returns the maximum
+--]]
 function MathUtil.max(set, comp)
   local max = nil
   comp = comp or function(a, b) return a < b end
@@ -146,6 +277,19 @@ function MathUtil.max(set, comp)
   return max
 end
 
+--[[
+  This function comes in 3 variants
+  Returns:
+    range(stop):
+      equivalent to range(0, stop, 1)
+
+    range(start, stop):
+      equivalent to range(start, stop, 1)
+
+    range(start, stop, step):
+      iter - an iterator that goes from start to
+              stop - 1 in increments of step
+--]]
 function MathUtil.range(a, b, c)
   local start, stop = a, b
   local step
@@ -164,18 +308,179 @@ function MathUtil.range(a, b, c)
   end, nil, start - step
 end
 
+--[[
+  From MHebes' answer to StackOverflow question 35572435
+  Returns a shuffled copy of lst without modifying lst.
+  lst must not have holes (nil values followed by non-nil).
+  Arguments:
+    lst - list to shuffle
+  Returns:
+    s - shuffled list
+--]]
+function MathUtil.shuffle(lst)
+  local s = {}
+  for i = 1, #lst do s[i] = lst[i] end
+  for i = #lst, 2, -1 do
+    local j = math.random(i)
+    s[i], s[j] = s[j], s[i]
+  end
+  return s
+end
+
+function MathUtil.combine(a, b, fun)
+  if #a == #b then
+    local res = {}
+    for k, v in pairs(a) do
+      res[k] = fun(k, v, b[k])
+    end
+    return res
+  end
+end
+
+--[[
+
+]]
+function MathUtil.distribution()
+  return { n = 0 }
+end
+
+function MathUtil.updateDistribution(distr, sample)
+  distr.n = distr.n + 1
+  if distr.n == 1 then
+    distr.mean = sample
+    distr.covariance = {}
+    local d = #sample
+    for i = 1, d do
+      local cov = {}
+      for j = 1, d do
+        cov[j] = 0
+      end
+      distr.covariance[i] = cov
+    end
+  else
+    distr.mean = distr.mean + (1 / (distr.n + 1)) * sample
+    -- todo: update covariance using online covariance update algorithm on wikipedia
+    -- correctness of that algorithm was disputed by a mathoverflow user so double-check before using
+  end
+end
+
+function MathUtil.mean(distr)
+  return distr.mean
+end
+
+function MathUtil.covariance(distr)
+  return distr.cov
+end
+
+--[[
+  Returns:
+    z - a normally distributed random number
+--]]
+function MathUtil.normal()
+  local z, z1 = MathUtil.boxMuller()
+  return z
+end
+
+--[[
+  Arguments:
+    z - a z-score
+  Returns:
+    d - the standard normal probability density function at z
+]]
+function MathUtil.normalPDF(z)
+  return math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+end
+
+--[[
+  Arguments:
+    z - a z-score
+  Returns:
+    p - the p-value corresponding to that z-score. Approximately calculated using Zelen and Severo (1964) approximation
+--]]
+function MathUtil.normalCDF(z)
+  local b0 = 0.2316419
+  local b1 = 0.319381530
+  local b2 = -0.356563782
+  local b3 = 1.781477937
+  local b4 = -1.821255978
+  local b5 = 1.330274429
+  local t = 1 / (1 + b0 * z)
+  return 1 - MathUtil.normalPDF(z) * (b1 * t + b2 * t^2 + b3 * t^3 + b4 * t^4 + b5 * t^5)
+end
+
+--[[
+  Arguments:
+    p - a p-value
+  Returns:
+    z - the z-score corresponding to that p-value. Approximately calculated using Shore (1982) approximation
+--]]
+function MathUtil.inverseNorm(p)
+  local pRight = p >= 0.5 and p or -p
+  local z = 5.55556 * (1 - ((1 - pRight) / pRight) ^ 0.1186) -- Shore (1982) approximation for normal quantile
+  if p < 0.5 then z = -z end
+  return z
+end
+
+--[[
+  Returns:
+    z1, z2 - two normally distributed random numbers
+--]]
+function MathUtil.boxMuller()
+  local u1 = math.random()
+  local u2 = math.random() -- idk what algorithm math.random uses, but it might be an LCG since it's simple and common
+  u2 = math.random() -- it's also not very high-quality, which also describes LCGs. Box-Muller performs poorly when the
+  u2 = math.random() -- input comes from two consecutive numbers of an LCG, so we throw away values in between.
+  local r = math.sqrt(-2 * math.log(u1))
+  local theta = 2 * math.pi * u2
+  return r * math.cos(theta), r * math.sin(theta)
+end
+
+--[[
+  Law of Cosines: a^2 = b^2 + c^2 - 2bc * cos(A)
+  Law of Sines: a / sin(A) = b / sin(B) = c / sin(C)
+
+  a, b, c are lengths of sides in a triangle,
+  A, B, C are the angles opposite the corresponding side
+
+  All angles are in degrees.
+--]]
+
+--[[
+  Arguments:
+    a, b, c - side lengths of a triangle
+  Returns:
+    A, B, C - the angles opposite sides a, b, and c, respectively
+                nil if the triangle is invalid
+--]]
 function MathUtil.angleSSS(a, b, c)
   if (a + b < c) or (a + c < b) or (b + c < a) then return nil end
-  local A = Mathf.Acos((b * b + c * c - a * a) / (2 * b * c)) * Mathf.Rad2Deg
+  local A = math.deg(math.acos((b * b + c * c - a * a) / (2 * b * c)))
   local B, C = MathUtil.angleSAS(b, A, c)
   return A, B ,C
 end
 
+--[[
+  Arguments:
+    a - the length of a side
+    C - the included angle
+    b - the length of another side
+  Returns:
+    c - the length of the third side
+--]]
 function MathUtil.sideSAS(a, C, b)
-  local csq = a * a + b * b - 2 * a * b * Mathf.Cos(C * Mathf.Deg2Rad)
-  return Mathf.Sqrt(csq)
+  local csq = a * a + b * b - 2 * a * b * math.cos(math.rad(C))
+  return math.sqrt(csq)
 end
 
+--[[
+  Arguments:
+    a - the length of a side
+    C - the included angle
+    b - the length of another side
+  Returns:
+    A, B - the angles opposite sides a and b, respectively
+            nil if undefined (a == b and C == 0)
+--]]
 function MathUtil.angleSAS(a, C, b)
   local c = MathUtil.sideSAS(a, C, b)
   if MathUtil.isZero(c) then return nil end
@@ -190,6 +495,15 @@ function MathUtil.angleSAS(a, C, b)
   return A, B
 end
 
+--[[
+  Arguments:
+    a - the length of a side
+    b - the length of another side
+    A - the angle opposite side a
+  Returns:
+    c1, c2 - both possibilities for the length of the third side.
+              one or both may be nil. c1 may be negative
+--]]
 function MathUtil.sideSSA(a, b, A)
   local q0 = b * b - a * a
   local q1 = -2 * b * math.cos(math.rad(A))
@@ -199,6 +513,15 @@ function MathUtil.sideSSA(a, b, A)
   return c2, c1
 end
 
+--[[
+  Arguments:
+    a - the length of a side
+    b - the length of another side
+    A - the angle opposite side a
+  Returns:
+    B1, C1 - the first possibility for the second and third angle
+    B2, C2 - the second possibility for the second and third angle
+--]]
 function MathUtil.angleSSA(a, b, A)
   local c1, c2 = MathUtil.sideSSA(a, b, A)
   if not c1 then return nil end
@@ -208,6 +531,15 @@ function MathUtil.angleSSA(a, b, A)
   return B1, C1, B2, C2
 end
 
+--[[
+  Arguments:
+    A - an angle in the triangle
+    B - another angle in the triangle
+    a - the side opposite angle A
+  Returns:
+    B1, C1 - the first possibility for the second and third side
+    B2, C2 - the second possibility for the second and third side
+--]]
 function MathUtil.sideAAS(A, B, a)
   local C = 180 - A - B
   local b = MathUtil.sideLoSin(A, B, a)
@@ -215,16 +547,43 @@ function MathUtil.sideAAS(A, B, a)
   return b, c
 end
 
+-- there is no angleAAS because you can just subtract A and B from 180
+
+--[[
+  Arguments:
+    a - one side in the triangle
+    A - the angle opposite side a
+    B - another angle in the triangle
+  Returns:
+    b - the side opposite angle B
+--]]
 function MathUtil.sideLoSin(a, A, B)
-  return a * Mathf.Sin(B * Mathf.Deg2Rad) / Mathf.Sin(A * Mathf.Deg2Rad)
+  return a * math.sin(math.rad(B)) / math.sin(math.rad(A))
 end
 
+--[[
+  Arguments:
+    a - one side in the triangle
+    b - another side in the triangle
+    A - the angle opposite side a
+  Returns:
+    B - the angle opposite side b
+--]]
 function MathUtil.angleLoSin(a, b, A)
-  return Mathf.Asin(b * Mathf.Sin(A * Mathf.Deg2Rad) / a) * Mathf.Rad2Deg
+  return math.deg(math.asin(b * math.sin(math.rad(A)) / a))
 end
 
+--[[
+  Arguments:
+    v1 - the vector which defines the axis of the cone
+    v2 - the vector to clamp
+    angle - the angle of the cone in degrees
+  Returns:
+    v - the vector within angle of v1 with the same
+        magnitude as v1 which is closest to v2
+]]--
 function MathUtil.clampCone(v1, v2, angle)
-  local offAngle = Mathf.Min(angle, Vector3.Angle(v1, v2))
+  local offAngle = math.min(angle, Vector3.Angle(v1, v2))
   local axis = Vector3.Cross(v1, v2)
   return Quaternion.AngleAxis(offAngle, axis) * v1
 end
@@ -440,39 +799,131 @@ function MathUtil.solveQuartic(c0, c1, c2, c3, c4)
 
   return s0, s1, s2, s3
 end
+--[[
+  A ringbuffer is an efficient FIFO buffer in the form of a circular
+  array. This allows for fast removal from the ends (though the
+  convention is that removal occurs from the head and addition occurs
+  at the tail) and fast access of random elements in the array.
+]]--
 
+-- Creates a new ring buffer with specified capacity.
 function RingBuffer.RingBuffer(capacity)
   local rb = {}
   rb.buf = {}
   rb.capacity = capacity
-  rb.tail = 1
+  rb.size = 0
   rb.head = 1
+  local mt = getmetatable(rb) or {}
+  mt.__index = RingBuffer.get
+  setmetatable(rb, mt)
   return rb
 end
 
+-- Checks whether a RingBuffer is full
 function RingBuffer.isFull(rb)
-  return (rb.head - rb.tail) % rb.capacity == 1
+  return rb.size >= rb.capacity
 end
 
-function RingBuffer.isEmpty(rb)
-  return rb.head == rb.tail
+-- Sets the size of the RingBuffer
+-- Equivalent to filling beginning with nils
+function RingBuffer.setSize(rb, size)
+  rb.size = size
 end
 
+-- Adds a value to the tail of the RingBuffer.
 function RingBuffer.push(rb, value)
-  rb.buf[rb.tail] = value
-  if RingBuffer.isFull(rb) then
+  rb.buf[(rb.head + rb.size - 1) % rb.capacity + 1] = value
+  if rb.size == rb.capacity then
     rb.head = rb.head % rb.capacity + 1
+  else
+    rb.size = rb.size + 1
   end
-  rb.tail = rb.tail % rb.capacity + 1
 end
 
+-- Removes and returns a value from the head of the RingBuffer.
+-- Returns nil if empty.
 function RingBuffer.pop(rb)
-  if RingBuffer.isEmpty(rb) then return nil end
+  if rb.size == 0 then return nil end
   local val = rb.buf[rb.head]
   rb.buf[rb.head] = nil
   rb.head = rb.head % rb.capacity + 1
+  rb.size = rb.size - 1
   return val
 end
+
+-- Gets a value at a particular index in the RingBuffer
+function RingBuffer.get(rb, idx)
+  if type(idx) ~= "number" or math.floor(idx) ~= idx then return nil end
+  if idx < 1 or idx > rb.size then return nil end
+  return rb.buf[(rb.head + idx - 2) % rb.capacity + 1]
+end
+VectorN.mt = getmetatable({}) or {}
+VectorN.mt.__add = function(a, b)
+  local aInt = type(a) == "int"
+  local bInt = type(b) == "int"
+  if not aInt and bInt then return b + a end
+  if aInt and not bInt then
+    return MathUtil.combine(a, b, function(k, x, y) return a + y end)
+  else
+    return MathUtil.combine(a, b, function(k, x, y) return x + y end)
+  end
+end
+
+VectorN.mt.__sub = function(a, b)
+  return a + (-b)
+end
+
+VectorN.mt.__mul = function(a, b)
+  local aInt = type(a) == "int"
+  local bInt = type(b) == "int"
+  if not aInt and bInt then return b * a end
+  if aInt and not bInt then
+    local res = {}
+    for k, v in pairs(b) do
+      res[k] = a * v
+    end
+    return res
+  else
+    return MathUtil.combine(a, b, function(k, x, y) return x * y end)
+  end
+end
+
+VectorN.mt.__div = function(a, b)
+  local aInt = type(a) == "int"
+  local bInt = type(b) == "int"
+  if not aInt and bInt then return a * (1 / b) end
+  if aInt and not bInt then
+    local res = {}
+    for k, v in pairs(b) do
+      res[k] = a / v
+    end
+    return res
+  else
+    return MathUtil.combine(a, b, function(k, x, y) return x / y end)
+  end
+end
+
+VectorN.mt.__unm = function(a)
+  local res = {}
+  for k, v in pairs(a) do
+    res[k] = -v
+  end
+  return res
+end
+
+function VectorN.VectorN(lst)
+  local vec = {}
+  for k, v in pairs(lst) do
+    if type(v) == "table" then
+      vec[k] = VectorN.VectorN(v)
+    else
+      vec[k] = v
+    end
+  end
+  setmetatable(vec, VectorN.mt)
+  return vec
+end
+-- dependencies: Accumulator, LinkedList
 
 function Control.PID(kP, kI, kD, IDecay, IWindow, period)
   local pid = {}
@@ -489,7 +940,8 @@ end
 function Control.processPID(ctrl, e, time)
   e = ctrl.period and (e + ctrl.period / 2) % ctrl.period - ctrl.period / 2 or e
   local p = ctrl.kP * e
-  local i = ctrl.kI * Accumulator.update(ctrl.Iacc, e, time)
+  local i, wt = ctrl.kI * Accumulator.update(ctrl.Iacc, e, time)
+  i = i / wt
   local d = ctrl.kD * (e - (ctrl.lastError or e)) / time
   ctrl.lastError = e
   return p + i + d
@@ -528,24 +980,47 @@ function Control.processFF(ctrl, target, time)
   end
   return response
 end
-
+--[[
+  Arguments:
+    gCoords - a point in global coordinates
+    pos - the reference position in global coordinates
+    orient - the rotation of the reference frame.
+             Can be obtained using Quaternion.LookRotation(I:GetConstructForwardVector(), I:GetConstructUpVector())
+  Returns:
+    lCoords - the point in local coordinates
+]]--
 function Nav.toLocal(gCoords, pos, orient)
   local relCoords = gCoords - pos
   return Quaternion.Inverse(orient) * relCoords
 end
 
+--[[
+  Arguments:
+    lCoords - a point in local coordinates
+    pos - the reference position in global coordinates
+    orient - the rotation of the reference frame.
+             Can be obtained using Quaternion.LookRotation(I:GetConstructForwardVector(), I:GetConstructUpVector())
+  Returns:
+    gCoords - the point in global coordinates
+]]--
 function Nav.toGlobal(lCoords, pos, orient)
   local relCoords = orient * lCoords
   return relCoords + pos
 end
 
+-- Converts Cartesian coordinates to polar coordinates
+-- Returns a vector3 with elements (radius, azimuth, elevation)
 function Nav.cartToPol(coords)
   local r = coords.magnitude
+  -- clockwise is positive
   local theta = Vector3.SignedAngle(Vector3.forward, coords, Vector3.up)
+  -- zero is horizontal, up is positive
   local phi = 90 - Vector3.Angle(Vector3.up, coords)
   return Vector3(r, theta, phi)
 end
 
+-- Converts Cartesian coordinates to cylindrical coordinates
+-- Returns a vector3 with elements (radius, azimuth, height)
 function Nav.cartToCyl(coords)
   local coordsH = Vector3(coords.x, 0, coords.z)
   local rho = coordsH.magnitude
@@ -554,6 +1029,7 @@ function Nav.cartToCyl(coords)
   return Vector3(rho, phi, z)
 end
 
+-- Converts polar coordinates to cartesian coordinates
 function Nav.polToCart(coords)
   local r, theta, phi = coords.x, coords.y, coords.z
   local x = Mathf.Sin(theta) * Mathf.Cos(phi)
@@ -562,6 +1038,7 @@ function Nav.polToCart(coords)
   return r * Vector3(x, y, z)
 end
 
+-- Converts cylindrical coordinates to cartesian coordinates
 function Nav.cylToCart(coords)
   local rho, phi, zCyl = coords.x, coords.y, coords.z
   local x = rho * Mathf.Sin(phi)
@@ -570,23 +1047,67 @@ function Nav.cylToCart(coords)
   return Vector3(x, y, z)
 end
 
-function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
-  local targetAngle = Vector3.Angle(-relPos, targetVel)
-  local b1, c1, b2, c2 = MathUtil.angleSSA(muzzle, targetVel.magnitude, targetAngle)
-  if not b1 then return nil end
-  local firingAngle = b2 or b1
-  if not firingAngle then return nil end
-  return (Quaternion.AngleAxis(firingAngle, Vector3.Cross(relPos, targetVel)) * relPos).normalized
+--[[
+WIP
+function Nav.aStar()
+
 end
 
+function Nav.marchingSquares()
+
+end
+
+function Nav.visGraph()
+
+end
+--]]
+-- dependencies: MathUtil
+
+-- Returns the direction in which the weapon should fire to hit a target
+-- Assumes both target and projectile travel in a straight line (i.e. no gravity)
+-- targetVel should be relative to the gun for projectiles, absolute for missiles
+-- Also use this for TPG guidance on missiles
+function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
+  local closest = relPos - Vector3.Project(relPos, targetVel)
+  local timeAlongLine = Vector3.Dot(targetVel, relPos - closest) / targetVel.sqrMagnitude
+  -- by pythagorean theorem, intercept time t occurs when
+  --   (t + timeAlongLine)^2 + closest.sqrMagnitude = (muzzle * t)^2
+  local a, b = MathUtil.solveQuadratic(timeAlongLine - muzzle * muzzle,
+                                                2 * timeAlongLine,
+                                                closest.sqrMagnitude + timeAlongLine * timeAlongLine)
+  local interceptTime = nil
+  if a and a >= 0 then interceptTime = a end
+  if b and b >= 0 and b < a then interceptTime = b end
+  return interceptTime and (relPos + interceptTime * targetVel).normalized or nil
+end
+
+-- math from wltrup's answer to math.stackexchange.com question number 1419643
+--[[
+  Arguments:
+    relPos - position of the target relative to own vehicle
+    relVel - velocity of the target relative to own vehicle
+    accel - acceleration of the target relative to the projectile (absolute target accel - gravity)
+    muzzle - muzzle velocity of the projectile
+    minRange - the minimum distance of intercept (see return values)
+    maxRange - the maximum distance of intercept (see return values)
+  Returns:
+    If there exists an intercept point between minRange and maxRange, returns the
+    direction the weapon should point to hit the target at that intercept point.
+    Range is measured in effective range, which is how far the projectile would've
+    traveled if gravity didn't exist.
+    Otherwise, returns the direction to the target.
+--]]
 function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange, maxRange)
   local t = Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minRange / muzzle, maxRange / muzzle)
   if t and t > 0 then
-    return (relPos / t + relVel - 0.5 * accel * t).normalized
+    return (relPos / t + relVel + 0.5 * accel * t).normalized
   end
   return nil
 end
 
+-- Same as above, but returns the time from now at which intercept will occur
+-- wltrup's answer uses acceleration of the projectile while this takes the acceleration of the target
+-- which is why the signs are flipped
 function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTime, maxTime)
   local a = 0.25 * accel.sqrMagnitude
   local b = Vector3.Dot(relVel, accel)
@@ -605,6 +1126,17 @@ function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTi
   return t
 end
 
+--[[
+  Modified version of IPPN guidance law from
+  "An Improvement in Three-Dimensional Pure
+  Proportional Navigation Guidance",
+  by Hyo-Sang Shin and Ke-Bo Li
+  with added acceleration term for augmentation.
+  I have no idea if this is better than IPPN alone
+  or even theoretically correct because I do not
+  know how to perform the relevant mathematical
+  analyses.
+--]]
 function Targeting.AIPPN(gain, relPos, missileVel, targetVel, targetAccel)
   local relVel = targetVel - missileVel
   local closingRate = Vector3.Dot(-relVel, relPos.normalized)
@@ -622,6 +1154,19 @@ function Targeting.AIPPN(gain, relPos, missileVel, targetVel, targetAccel)
   return accelMag * accelDir
 end
 
+--[[
+  Augmented True Proportional Navigation
+  guidance law which FTD missiles use
+  when APN guidance is equipped
+  (if my understanding is correct)
+
+  True proportional guidance commands
+  acceleration perpendicular to line of
+  sight between missile and target
+  instead of perpendicular to missile
+  velocity like pure proportional
+  guidance does.
+--]]
 function Targeting.ATPN(gain, relPos, missileVel, targetVel, targetAccel)
   local relVel = targetVel - missileVel
   local closingRate = -Vector3.Dot(relVel, relPos.normalized)
@@ -634,12 +1179,23 @@ function Targeting.ATPN(gain, relPos, missileVel, targetVel, targetAccel)
 
   return gain * closingRate * losMotion + 0.5 * gain * targetAccel
 end
+--[[
+  Arguments:
+    I - the variable passed to Update
+    name - the name of the weapons to search for
+           can be set by pressing shift-N in build mode
+    count - the number of blocks to search for
+    mode - whether to search for weapons on the main hull
+           or on subconstructs:
+           0 = hull, 1 = subconstructs, 2 = both
+  Returns:
+    weapons - a list of tables with elements subIdx and wpnIdx
+              subIdx is the ID of the subconstruct the weapon
+              is mounted on
+              wpnIdx is the index of the weapon
 
-function Targeting.accelToDirection(fwd, latax, time)
-  local rotVec = Vector3.Cross(fwd, latax) / fwd.sqrMagnitude * time * Mathf.Rad2Deg
-  return Quaternion.AngleAxis(rotVec.magnitude, rotVec) * fwd
-end
-
+  NOTE: returns a list even if you specify count = 1
+]]--
 function BlockUtil.getWeaponsByName(I, name, count, mode)
   if DEBUG then I:Log("searching for "..name) end
   local subcs = I:GetAllSubConstructs()
@@ -673,13 +1229,23 @@ function BlockUtil.getWeaponsByName(I, name, count, mode)
   return weapons
 end
 
+--[[
+  Arguments:
+    I - the variable passed to Update
+    name - the name of the subconstructs to search for
+           can be set by pressing shift-N in build mode
+    count - the number of blocks to search for
+  Returns:
+    subobjs - a list of subconstruct IDs where each ID
+              corresponds to a subconstruct with a matching name
+]]--
 function BlockUtil.getSubConstructsByName(I, name, count)
 	if DEBUG then I:Log("searching for "..name) end
   local subcs = I:GetAllSubConstructs()
   local subobjs = {}
   count = count or -1
   local c = count
-  for idx=1, #subcs do
+  for idx=1, #subcs do -- for some reason not an actual table so can't use pairs
     local sub = subcs[idx]
     if c == 0 then break end
     if I:GetSubConstructInfo(sub).CustomName == name then
@@ -692,6 +1258,18 @@ function BlockUtil.getSubConstructsByName(I, name, count)
   return subobjs
 end
 
+--[[
+  Arguments:
+    I - the variable passed to Update
+    type - the type of block to search for
+           see help menu in lua block for list
+    name - the name of the subconstructs to search for
+           can be set by pressing shift-N in build mode
+    count - the number of blocks to search for
+  Returns:
+    comps - a list of block indices where each index
+              corresponds to a block with a matching name
+]]--
 function BlockUtil.getBlocksByName(I, name, type, count)
 	if DEBUG then I:Log("searching for "..name) end
   local comps = {}
@@ -709,6 +1287,20 @@ function BlockUtil.getBlocksByName(I, name, type, count)
   return comps
 end
 
+--[[
+  FtD's lua API has different functions depending on whether the weapon is on
+  a subconstruct or not, resulting in duplicated code. This condenses them
+  into one function.
+
+  Arguments:
+    I - the variable passed to Update
+    weapon - a table containing subIdx and wpnIdx fields
+             subIdx is the subconstruct identifier of the subconstruct the
+               weapon is on, or nil if it is on the main hull
+             wpnIdx is the weapon index
+  Returns:
+    info - the weapon info for the specified weapon
+]]--
 function BlockUtil.getWeaponInfo(I, weapon)
   local info
   if weapon.subIdx then
@@ -719,6 +1311,7 @@ function BlockUtil.getWeaponInfo(I, weapon)
   return info
 end
 
+-- See getWeaponInfo for arguments
 function BlockUtil.aimWeapon(I, weapon, dir, slot)
   if weapon.subIdx then
     I:AimWeaponInDirectionOnSubConstruct(weapon.subIdx, weapon.wpnIdx, dir.x, dir.y, dir.z, slot)
@@ -727,6 +1320,7 @@ function BlockUtil.aimWeapon(I, weapon, dir, slot)
   end
 end
 
+-- See getWeaponInfo for arguments
 function BlockUtil.fireWeapon(I, weapon, slot)
   if weapon.subIdx then
     I:FireWeaponOnSubConstruct(weapon.subIdx, weapon.wpnIdx, slot)
@@ -734,7 +1328,17 @@ function BlockUtil.fireWeapon(I, weapon, slot)
     I:FireWeapon(weapon.wpnIdx, slot)
   end
 end
-
+--[[
+  Arguments:
+    I - the variable passed to Update
+    mainframe - the mainframe index to use
+    priorityFunc (optional) - a function that takes I and a
+                                target and returns its priority.
+                                Uses AI priority if empty
+  Returns:
+    target - the highest priority target
+    priority - the priority of that target
+--]]
 function Combat.pickTarget(I, mainframe, priorityFunc)
   priorityFunc = priorityFunc or function(_, tar) return tar.Priority end
   local target, priority
@@ -749,14 +1353,26 @@ function Combat.pickTarget(I, mainframe, priorityFunc)
   return target
 end
 
-function CheckConstraints(I, direction, wepId, subObjId)
+--[[
+  Arguments:
+    I - the variable passed to Update
+    direction - the global direction of fire
+    wepId - the ID of the weapon
+    subObjId (optional) - if the weapon is on a subobject,
+                            the ID of the subobject. If it
+                            is on nested subobjects, the one
+                            directly connected to the weapon
+  Returns:
+    valid - whether or not the direction is within the firing constraints
+--]]
+function Combat.CheckConstraints(I, direction, wepId, subObjId)
   local con
   if subObjId then
     con = I:GetWeaponConstraintsOnSubConstruct(subObjId, wepId)
   else
     con = I:GetWeaponConstraints(wepId)
   end
-  local fore = I:GetConstructForwardVEctor()
+  local fore = I:GetConstructForwardVector()
   local up = I:GetConstructUpVector()
   local constructRot = Quaternion.LookRotation(fore, up)
   direction = Quaternion.Inverse(constructRot) * direction

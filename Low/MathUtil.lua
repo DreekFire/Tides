@@ -1,7 +1,3 @@
--- stat functions not yet included in Tides.lua
-
-local MathUtil = {}
-
 --[[
   Arguments:
     from - a vector
@@ -240,7 +236,7 @@ end
 --]]
 function MathUtil.angleSSS(a, b, c)
   if (a + b < c) or (a + c < b) or (b + c < a) then return nil end
-  local A = math.deg(math.acos((b * b + c * c - a * a) / (2 * b * c))
+  local A = math.deg(math.acos((b * b + c * c - a * a) / (2 * b * c)))
   local B, C = MathUtil.angleSAS(b, A, c)
   return A, B ,C
 end

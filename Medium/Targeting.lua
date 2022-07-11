@@ -1,16 +1,21 @@
 -- dependencies: MathUtil
-local Targeting = {}
 
 -- Returns the direction in which the weapon should fire to hit a target
 -- Assumes both target and projectile travel in a straight line (i.e. no gravity)
+-- targetVel should be relative to the gun for projectiles, absolute for missiles
 -- Also use this for TPG guidance on missiles
 function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
-  local targetAngle = Vector3.Angle(-relPos, targetVel)
-  local b1, c1, b2, c2 = MathUtil.angleSSA(muzzle, targetVel.magnitude, targetAngle)
-  if not b1 then return nil end
-  local firingAngle = b2 or b1
-  if not firingAngle then return nil end
-  return (Quaternion.AngleAxis(firingAngle, Vector3.Cross(relPos, targetVel)) * relPos).normalized
+  local closest = relPos - Vector3.Project(relPos, targetVel)
+  local timeAlongLine = Vector3.Dot(targetVel, relPos - closest) / targetVel.sqrMagnitude
+  -- by pythagorean theorem, intercept time t occurs when
+  --   (t + timeAlongLine)^2 + closest.sqrMagnitude = (muzzle * t)^2
+  local a, b = MathUtil.solveQuadratic(timeAlongLine - muzzle * muzzle,
+                                                2 * timeAlongLine,
+                                                closest.sqrMagnitude + timeAlongLine * timeAlongLine)
+  local interceptTime = nil
+  if a and a >= 0 then interceptTime = a end
+  if b and b >= 0 and b < a then interceptTime = b end
+  return interceptTime and (relPos + interceptTime * targetVel).normalized or nil
 end
 
 -- math from wltrup's answer to math.stackexchange.com question number 1419643
