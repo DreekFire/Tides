@@ -7,8 +7,16 @@ local numOrigins = 1
 local originSwitchTime = 0.5
 -- maximum time to remember origin points
 local maxStaleness = 5
--- muzzle velocity of weapon (todo: support multiple weapons)
-local muzzleVelocity = -1
+-- parameters to find weapons (important: name firing pieces AND turret blocks)
+local weaponDef = {
+  { name = "laser", velocity = math.huge }
+}
+-- degrees of inaccuracy allowed when firing
+-- weapon will start firing within this angle
+-- but will always try to obtain perfect accuracy
+local AIM_TOL = 0.1
+-- physics ticks per second (Lua runs in sync with game physics)
+local TICKS_PER_S = 40
 
 local projectilePos
 local times
@@ -19,9 +27,8 @@ local inited
 local prevTime
 local lastOrigin
 local lastOriginSwitchTime
-
-local TICKS_PER_S = 40
-local EPSILON_P = 9.8 / (TICKS_PER_S * TICKS_PER_S)
+local turrets = {}
+local velocities = {}
 
 local BlockUtil = {}
 local Combat = {}
@@ -37,6 +44,10 @@ local Nav = {}
 local Targeting = {}
 
 function Init(I)
+  for idx, weapon in ipairs(weaponDef) do
+    velocities[idx] = weapon.velocity
+    turrets[idx] = BlockUtil.getWeaponsByName(I, weapon.name, 1, 2)
+  end
   projectilePos = RingBuffer.RingBuffer(targetTrackTime * TICKS_PER_S)
   times = RingBuffer.RingBuffer(targetTrackTime * TICKS_PER_S)
   enemies = {}
@@ -61,7 +72,7 @@ function Update(I)
     RingBuffer.push(enemies[target.Id].pos, target.Position)
     RingBuffer.push(enemies[target.Id].vel, target.Velocity)
   end
-  
+
   local frameTime = lastFrameTime and I:GetTimeSinceSpawn() - lastFrameTime or 0
   lastFrameTime = I:GetTimeSinceSpawn()
   -- calculate projectile location
@@ -91,7 +102,13 @@ function Update(I)
   if projectilePos.size == 1 then return end
   -- see if it matches current line
   -- todo: store multiple lines and find match
-  if currentLine and CheckAndUpdateLine(I, currentLine, projectile, frameTime, EPSILON_P) then
+
+  -- half the estimated drop in two frames due to gravity
+  -- inconsistent with theoretical formula due to discrete integration
+  -- powered missiles have no gravity so their expected error
+  -- is the negative of the drop due to gravity
+  local eps = 10 * frameTime * frameTime
+  if currentLine and CheckAndUpdateLine(I, currentLine, projectile, frameTime, eps) then
     local target = I:GetTargetInfo(0, 0)
     local enemy = enemies[target.Id]
     local relVel = (currentLine.ds / currentLine.dt) - target.Velocity
@@ -106,10 +123,6 @@ function Update(I)
         return
       end
       prevTime = closestTimeIdx
-      local tLoc = enemy.pos[closestTimeIdx]
-      local dt = times[closestTimeIdx] - currentLine.tStart
-      local pLoc = currentLine.start + dt * currentLine.ds / currentLine.dt
-        + 0.5 * I:GetGravityForAltitude(currentLine.start.y) * dt * dt
       if closest.sqrMagnitude < 100 * 100 then
         RingBuffer.push(enemy.origins, closest)
         RingBuffer.push(enemy.originTimes, I:GetTimeSinceSpawn())
@@ -148,18 +161,23 @@ function Update(I)
     end
     if fp then
       local aim
-      if muzzleVelocity < 0 then
-        aim = fp + target.Position - I:GetWeaponInfo(0).GlobalFirePoint
-      else
-        aim = Targeting.secondOrderTargeting(fp + target.Position - I:GetWeaponInfo(0).GlobalFirePoint,
-                    target.Velocity - I:GetVelocityVector(),
-                    -I:GetGravityForAltitude(target.Position.y),
-                    muzzleVelocity, 50, 1000)
-      end
-      if aim then
-        I:AimWeaponInDirection(0, aim.x, aim.y, aim.z, 0)
-        if Vector3.Angle(I:GetWeaponInfo(0).CurrentDirection, aim) < 0.1 then
-          I:FireWeapon(0, 0)
+      for i, turret in ipairs(turrets) do
+        for i, weapon in ipairs(turret) do
+          local wInfo = BlockUtil.getWeaponInfo(I, weapon)
+          if velocities[i] == math.huge then
+            aim = fp + target.Position - wInfo.GlobalFirePoint
+          else
+            aim = Targeting.secondOrderTargeting(fp + target.Position - wInfo.GlobalFirePoint,
+                        target.Velocity - wInfo.I:GetVelocityVector(),
+                        -I:GetGravityForAltitude(target.Position.y),
+                        velocities[i], 50, 1000)
+          end
+          if aim then
+            BlockUtil.aimWeapon(I, weapon, aim, 0)
+            if Vector3.Angle(wInfo.CurrentDirection, aim) < AIM_TOL then
+              I:FireWeapon(0, 0)
+            end
+          end
         end
       end
     end
