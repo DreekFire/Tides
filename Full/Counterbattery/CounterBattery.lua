@@ -4,12 +4,17 @@ local targetTrackTime = 10
 -- number of locations to track per enemy (todo: support tracking multiple projectiles)
 local numOrigins = 1
 -- time between switching targets
-local originSwitchTime = 0.5
+local originSwitchTime = 0.25
 -- maximum time to remember origin points
-local maxStaleness = 5
+local maxStaleness = 3
+-- ranges to engage
+local minRange = 50
+local maxRange = 2000
 -- parameters to find weapons (important: name firing pieces AND turret blocks)
 local weaponDef = {
-  { name = "laser", velocity = math.huge }
+  { name = "primary", velocity = 1750 }
+,
+  { name = "secondary", velocity = 602 }
 }
 -- degrees of inaccuracy allowed when firing
 -- weapon will start firing within this angle
@@ -170,7 +175,7 @@ function Update(I)
             aim = Targeting.secondOrderTargeting(fp + target.Position - wInfo.GlobalFirePoint,
                         target.Velocity - I:GetVelocityVector(),
                         -I:GetGravityForAltitude(target.Position.y),
-                        velocities[i], 50, 1000)
+                        velocities[i], minRange, maxRange)
           end
           if aim then
             BlockUtil.aimWeapon(I, weapon, aim, 0)
