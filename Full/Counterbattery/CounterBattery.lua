@@ -168,7 +168,7 @@ function Update(I)
             aim = fp + target.Position - wInfo.GlobalFirePoint
           else
             aim = Targeting.secondOrderTargeting(fp + target.Position - wInfo.GlobalFirePoint,
-                        target.Velocity - wInfo.I:GetVelocityVector(),
+                        target.Velocity - I:GetVelocityVector(),
                         -I:GetGravityForAltitude(target.Position.y),
                         velocities[i], 50, 1000)
           end
