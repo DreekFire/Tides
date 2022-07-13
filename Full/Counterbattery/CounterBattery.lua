@@ -12,9 +12,7 @@ local minRange = 50
 local maxRange = 2000
 -- parameters to find weapons (important: name firing pieces AND turret blocks)
 local weaponDef = {
-  { name = "primary", velocity = 1750 }
-,
-  { name = "secondary", velocity = 602 }
+  { name = "laser", velocity = math.huge }
 }
 -- degrees of inaccuracy allowed when firing
 -- weapon will start firing within this angle
@@ -108,11 +106,11 @@ function Update(I)
   -- see if it matches current line
   -- todo: store multiple lines and find match
 
-  -- half the estimated drop in two frames due to gravity
+  -- 3/4ths the estimated drop in two frames due to gravity
   -- inconsistent with theoretical formula due to discrete integration
   -- powered missiles have no gravity so their expected error
   -- is the negative of the drop due to gravity
-  local eps = 10 * frameTime * frameTime
+  local eps = 15 * frameTime * frameTime
   if currentLine and CheckAndUpdateLine(I, currentLine, projectile, frameTime, eps) then
     local target = I:GetTargetInfo(0, 0)
     local enemy = enemies[target.Id]
@@ -170,7 +168,10 @@ function Update(I)
         for i, weapon in ipairs(turret) do
           local wInfo = BlockUtil.getWeaponInfo(I, weapon)
           if velocities[i] == math.huge then
-            aim = fp + target.Position - wInfo.GlobalFirePoint
+            local range = (fp + target.Position - I:GetConstructPosition()).magnitude
+            if range > minRange and range < maxRange then
+              aim = fp + target.Position - wInfo.GlobalFirePoint
+            end
           else
             aim = Targeting.secondOrderTargeting(fp + target.Position - wInfo.GlobalFirePoint,
                         target.Velocity - I:GetVelocityVector(),
