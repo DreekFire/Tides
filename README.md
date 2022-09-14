@@ -35,6 +35,15 @@ The classes in Tides are divided into four categories based on their level of ab
 * Spreads out arms mounted on spinblocks prior to collision
 * Rolls to rotate arms into place, using information about which arms have already been destroyed (thump missiles only take out one arm at a time, allowing 5 uses)
 
-3. Ship Identification (WIP):
+3. Counterbattery:
+* Uses projectile avoidance routine to measure trajectories of incoming shells
+* Validates those trajectories to make sure they come from a single ballistic projectile
+* Traces those trajectories back to the time of closest approach to the enemy ship based on recorded enemy positions and returns fire
+
+4. Ship Identification (WIP):
 * Uses target prioritization cards to measure stats of enemy ships
 * Compares stats to table of known ships to identify them
+
+5. Swerve Drive (WIP):
+* Rotates wheels to turn a tank, allowing it to drive in any direction
+* Automatically detects and accounts for wheel placement to properly handle steering angle (i.e. Ackermann steering)

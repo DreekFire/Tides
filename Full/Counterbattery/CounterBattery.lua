@@ -165,7 +165,7 @@ function Update(I)
     if fp then
       local aim
       for i, turret in ipairs(turrets) do
-        for i, weapon in ipairs(turret) do
+        for j, weapon in ipairs(turret) do
           local wInfo = BlockUtil.getWeaponInfo(I, weapon)
           if velocities[i] == math.huge then
             local range = (fp + target.Position - I:GetConstructPosition()).magnitude
