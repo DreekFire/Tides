@@ -181,7 +181,7 @@ function Update(I)
           if aim then
             BlockUtil.aimWeapon(I, weapon, aim, 0)
             if Vector3.Angle(wInfo.CurrentDirection, aim) < AIM_TOL then
-              I:FireWeapon(0, 0)
+              BlockUtil.fireWeapon(I, weapon, 0)
             end
           end
         end
