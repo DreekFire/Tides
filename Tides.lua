@@ -1383,9 +1383,9 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   local azi = MathUtil.angleOnPlane(Vector3.forward, direction, Vector3.up)
   local aziDir = direction
   aziDir.z = 0
-  local elevation = Mathf.Atan2(direction.z, aziDir.magnitude)
+  local ele = Mathf.Atan2(direction.z, aziDir.magnitude)
   local aziValid = azi > con.MinAzimuth and azi < con.MaxAzimuth
-  local eleValid = elevation > con.MinElevation and elevation < con.MaxElevation
+  local eleValid = ele > con.MinElevation and ele < con.MaxElevation
   if con.FlipAzimuth then aziValid = not aziValid end
   if aziValid and eleValid then return true end
   azi = azi + 180
@@ -1393,7 +1393,7 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   if ele > 180 then ele = ele - 360 end
   if ele < -180 then ele = ele + 360 end
   aziValid = azi > con.MinAzimuth and azi < con.MaxAzimuth
-  eleValid = elevation > con.MinElevation and elevation < con.MaxElevation
+  eleValid = ele > con.MinElevation and ele < con.MaxElevation
   if con.FlipAzimuth then aziValid = not aziValid end
   if aziValid and eleValid then return true end
   return false
