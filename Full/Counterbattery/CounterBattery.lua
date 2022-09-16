@@ -12,9 +12,10 @@ local minRange = 50
 local maxRange = 2000
 -- altitudes to engage (estimated altitude of firing piece, not target origin)
   -- checked when adding an origin and when firing
-local minAlt = -5
+local minAlt = 0
 local maxAlt = math.huge
 -- parameters to find weapons (Shift+N to name turret blocks)
+  -- different turrets should have different names even if they have the same weapon
   -- if all weapons on a turret have the same muzzle velocity then just name the turret
   -- if multiple weapons on same turret with different muzzle velocity then name the turret,
     -- leave primary weapon unnamed and give secondary weapons unique names
@@ -24,9 +25,11 @@ local weaponDef = {
 }
 -- which mainframe to use
 local mainframeIdx = 0
--- enemy: aim at current target
--- none: return to idle position
--- last: continue aiming at last absolute bearing
+-- what to do when no firing origin detected
+  -- enemy: aim at current target
+  -- fire: aim and fire at current target
+  -- none: return to idle position
+  -- last: continue aiming at last absolute bearing
 local idleAim = "enemy"
 -- degrees of inaccuracy allowed when firing
 -- weapon will start firing within this angle
@@ -209,6 +212,9 @@ function Update(I)
     for i, turret in ipairs(turrets) do
       for j, weapon in ipairs(turret) do
         local wInfo = BlockUtil.getWeaponInfo(I, weapon)
+        if not fp and idleAim == "fire" then
+          fp = target.AimPointPosition - target.Position
+        end
         if fp then
           if velocities[i] == math.huge then
             local range = (fp + target.Position - I:GetConstructPosition()).magnitude
@@ -221,8 +227,9 @@ function Update(I)
                         -I:GetGravityForAltitude(target.Position.y),
                         velocities[i], minRange, maxRange)
           end
-        else
-          if idleAim == "enemy" then
+        end
+        if not aim then
+          if idleAim == "enemy" or idleAim == "fire" then
             aim = target.Position - wInfo.GlobalFirePoint
           elseif idleAim == "last" then
             aim = lastAim
