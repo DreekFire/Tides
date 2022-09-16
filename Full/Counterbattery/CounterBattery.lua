@@ -211,6 +211,7 @@ function Update(I)
     local aim
     for i, turret in ipairs(turrets) do
       for j, weapon in ipairs(turret) do
+        local fire = false
         local wInfo = BlockUtil.getWeaponInfo(I, weapon)
         if not fp and idleAim == "fire" then
           fp = target.AimPointPosition - target.Position
@@ -220,15 +221,18 @@ function Update(I)
             local range = (fp + target.Position - I:GetConstructPosition()).magnitude
             if range > minRange and range < maxRange then
               aim = fp + target.Position - wInfo.GlobalFirePoint
+              fire = true
             end
           else
             aim = Targeting.secondOrderTargeting(fp + target.Position - wInfo.GlobalFirePoint,
                         target.Velocity - I:GetVelocityVector(),
                         -I:GetGravityForAltitude(target.Position.y),
                         velocities[i], minRange, maxRange)
+            if aim then fire = true end
           end
         end
         if not aim then
+          fire = false
           if idleAim == "enemy" or idleAim == "fire" then
             aim = target.Position - wInfo.GlobalFirePoint
           elseif idleAim == "last" then
@@ -239,7 +243,7 @@ function Update(I)
           lastAim = aim
           if Combat.CheckConstraints(I, aim, weapon.wpnIdx, weapon.subIdx) then
             BlockUtil.aimWeapon(I, weapon, aim, 0)
-            if fp and Vector3.Angle(wInfo.CurrentDirection, aim) < AIM_TOL then
+            if fire and Vector3.Angle(wInfo.CurrentDirection, aim) < AIM_TOL then
               BlockUtil.fireWeapon(I, weapon, 0)
             end
           end
