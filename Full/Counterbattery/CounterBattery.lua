@@ -31,6 +31,8 @@ local mainframeIdx = 0
   -- none: return to idle position
   -- last: continue aiming at last absolute bearing
 local idleAim = "enemy"
+-- offset the aimpoint, i.e. for hitting the necks, tetris, or turret bases instead of the barrels
+local aimOffset = Vector3(0, 0, 0)
 -- degrees of inaccuracy allowed when firing
 -- weapon will start firing within this angle
 -- but will always try to obtain perfect accuracy
@@ -215,6 +217,8 @@ function Update(I)
         local wInfo = BlockUtil.getWeaponInfo(I, weapon)
         if not fp and idleAim == "fire" then
           fp = target.AimPointPosition - target.Position
+        elseif fp then
+          fp = fp + aimOffset
         end
         if fp then
           if velocities[i] == math.huge then
