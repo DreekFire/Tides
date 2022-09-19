@@ -568,7 +568,7 @@ end
     A - the angle opposite side a
   Returns:
     B - the angle opposite side b
---]]
+]]
 function MathUtil.angleLoSin(a, b, A)
   return math.deg(math.asin(b * math.sin(math.rad(A)) / a))
 end
@@ -588,15 +588,68 @@ function MathUtil.clampCone(v1, v2, angle)
   return Quaternion.AngleAxis(offAngle, axis) * v1
 end
 
+--[[
+  WIP
+]]
+function MathUtil.fourier(data)
+  return "Work in progress"
+end
+
+--[[
+  Arguments:
+    fn - the function to find the roots of
+           must be scalar valued and take one scalar input
+           if it returns nil (i.e. undefined), iteration will stop
+    df - the derivative of fn. If the derivative is unknown,
+           leave this blank to use a secant approximation
+           if it returns nil (i.e. undefined), iteration will stop
+    guess - the initial guess to start iterating at
+    eps - when two consecutive iterations give solutions that
+            differ by less than eps, finish iteration
+            default 1e-5
+    iterlimit - maximum number of iterations to run
+                  default 100
+  Returns:
+    guess - the value obtained by iteration
+    exceed - whether the maximum number of iterations was exceeded
+]]
+function MathUtil.newton(fn, df, guess, eps, iterlimit, dx)
+  eps = eps or 1e-5
+  dx = dx or (10 * eps)
+  iterlimit = iterlimit or 100
+  df = df or function(x) return (fn(x + dx) - fn(x)) / dx end
+  guess = guess or 0
+  local change = eps + 1
+  local iters = 0
+  while change > eps and iters < iterlimit do
+    local current = fn(guess)
+    local derivative = df(guess)
+    if not current or not derivative then return nil end
+    change = -current / derivative
+    guess = guess + change
+    iters = iters + 1
+  end
+  if iters < iterlimit then
+    return guess, false
+  end
+  return guess, true
+end
+
 -- code from lua-polynomials by piqey (John Kushmer) on github
+-- modified to fix a missed branch in solveQuartic
 -- https://github.com/piqey/lua-polynomials
 -- GNU General Public License, version 3
 
-local eps = 1e-9
+MathUtil.eps = 1e-9
 
 -- checks if d is close enough to 0 to be considered 0 (for our purposes)
 function MathUtil.isZero(d)
-  return (d > -eps and d < eps)
+  return (d > -MathUtil.eps and d < MathUtil.eps)
+end
+
+-- sets the tolerance for a number to be considered zero
+function MathUtil.setTolerance(eps)
+  MathUtil.eps = eps
 end
 
 -- fixes an issue with math.pow that returns nan when the result should be a real number
@@ -642,12 +695,13 @@ function MathUtil.solveCubic(c0, c1, c2, c3)
   B = c2 / c0
   C = c3 / c0
 
-  -- substitute x = y - A/3 to eliminate quadric term: x^3 + px + q = 0
+  -- substitute x = y - A/3 to eliminate quadric term: y^3 + 3py + 2q = 0
   sq_A = A * A
   p = (1 / 3) * (-(1 / 3) * sq_A + B)
   q = 0.5 * ((2 / 27) * A * sq_A - (1 / 3) * A * B + C)
 
   -- use Cardano's formula
+    -- 27 and 4 factors are already included in p, q
   cb_p = p * p * p
   D = q * q + cb_p
 
@@ -659,6 +713,10 @@ function MathUtil.solveCubic(c0, c1, c2, c3)
     else -- one single and one double solution
       local u = MathUtil.cuberoot(-q)
       s0 = 2 * u
+      -- s1 = u^3 + v^3, u^3 = v^3 = -q/2
+      -- u and v are the real cube root of -q/2
+        -- times the 1st and 2nd cuberoots of unity
+      -- sum of 1st and 2nd cube roots of unity is just -1
       s1 = -u
       num = 2
       --return s0, s1
@@ -700,7 +758,7 @@ function MathUtil.solveQuartic(c0, c1, c2, c3, c4)
   local z, u, v, sub
   local A, B, C, D
   local sq_A, p, q, r
-  local num
+  local num = 0
 
   -- normal form: x^4 + Ax^3 + Bx^2 + Cx + D = 0
   A = c1 / c0
@@ -724,6 +782,28 @@ function MathUtil.solveQuartic(c0, c1, c2, c3, c4)
     local results = {MathUtil.solveCubic(coeffs[0], coeffs[1], coeffs[2], coeffs[3])}
     num = #results
     s0, s1, s2 = results[1], results[2], results[3]
+  elseif MathUtil.isZero(q) then
+    -- special case to avoid divide by zero in general formula
+    -- if q is zero then y^4 + py^2 + q = 0, which is a biquadratic
+    local biquad_results = {MathUtil.solveQuadratic(1, p, r)}
+    if biquad_results[1] >= 0 then
+      s0 = -math.sqrt(biquad_results[1])
+      s1 = math.sqrt(biquad_results[1])
+      num = 2
+    end
+    if biquad_results[2] >= 0 then
+      if num == 0 then
+        -- this case shouldn't happen since solveQuadratic returns roots
+          -- in decreasing order, but best not to assume root ordering
+        s0 = -math.sqrt(biquad_results[2])
+        s1 = math.sqrt(biquad_results[2])
+        num = 2
+      else
+        s2 = -math.sqrt(biquad_results[2])
+        s3 = math.sqrt(biquad_results[2])
+        num = 4
+      end
+    end
   else
     -- solve the resolvent cubic …
     coeffs[3] = 0.5 * r * p - 0.125 * q * q
@@ -1096,7 +1176,7 @@ end
     Range is measured in effective range, which is how far the projectile would've
     traveled if gravity didn't exist.
     Otherwise, returns the direction to the target.
---]]
+]]
 function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange, maxRange)
   local t = Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minRange / muzzle, maxRange / muzzle)
   if t and t > 0 then
@@ -1114,7 +1194,7 @@ function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTi
   local c = relVel.sqrMagnitude - muzzle * muzzle + Vector3.Dot(relPos, accel)
   local d = 2 * Vector3.Dot(relPos, relVel)
   local e = relPos.sqrMagnitude
-  local roots = {MathUtil.solveQuartic(a, b, c, d, e)}
+  --[[local roots = {MathUtil.solveQuartic(a, b, c, d, e)}
   local t = nil
   for i = 1, 4 do
     if roots[i] and roots[i] > minTime and roots[i] < maxTime then
@@ -1122,8 +1202,21 @@ function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTi
         t = roots[i]
       end
     end
+  end]]
+  local function poly(x)
+    local x_sqr = x * x
+    return e + d * x + c * x_sqr + b * x_sqr * x + a * x_sqr * x_sqr
   end
-  return t
+  local function dpoly(x)
+    local x_sqr = x * x
+    return d + 2 * c * x + 3 * b * x_sqr + 4 * a * x_sqr * x
+  end
+  local dist = relPos.magnitude
+  local closingVel = muzzle - d / (2 * dist)
+  local t = MathUtil.newton(poly, dpoly, dist / closingVel, 0.1, 10)
+  if t and t > minTime and t < maxTime then
+    return t
+  end
 end
 
 --[[
@@ -1136,7 +1229,7 @@ end
   or even theoretically correct because I do not
   know how to perform the relevant mathematical
   analyses.
---]]
+]]
 function Targeting.AIPPN(gain, relPos, missileVel, targetVel, targetAccel)
   local relVel = targetVel - missileVel
   local closingRate = Vector3.Dot(-relVel, relPos.normalized)
@@ -1398,3 +1491,25 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   if aziValid and eleValid then return true end
   return false
 end
+function StringUtil.LogVector(I, vec, label)
+  I:Log(label.."("..vec.x..", "..vec.y..", "..vec.z..")")
+end
+
+--[[
+does not work because the Lua interpreter used by From The Depths
+does not support table.concat
+
+function StringUtil.LogTable(I, tab, label, depth, indent)
+  depth = depth or 0
+  indent = indent or string.rep("  ", depth)
+  local lines = {}
+  for k, v in pairs(tab) do
+    if type(v) == "table" then
+      lines.insert(k..": "..StringUtil.LogTable(I, v, "", depth + 1, indent))
+    else
+      lines.insert(k..": "..v)
+    end
+  end
+  return label.."{\n"..indent..table.concat(lines, "\n"..indent).."\n}"
+end
+]]

@@ -43,7 +43,11 @@ The classes in Tides are divided into four categories based on their level of ab
 4. Ship Identification (WIP):
 * Uses target prioritization cards to measure stats of enemy ships
 * Compares stats to table of known ships to identify them
+* May be used to improve counterbattery accuracy based on known locations of weapons
 
 5. Swerve Drive (WIP):
 * Rotates wheels to turn a tank, allowing it to drive in any direction
 * Automatically detects and accounts for wheel placement to properly handle steering angle (i.e. Ackermann steering)
+
+6. Ramp Targeting (WIP):
+* Aims unguided missiles while taking into account initial launch velocity and acceleration time

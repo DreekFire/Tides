@@ -1,30 +1,32 @@
 Known bugs:
 In FtD:
   General:
-    Firing a short range laser combiner with an ACB makes it hit and destroy itself. Also causes failsafes to hold fire. (Fixed)
-    AMCCs cannot control nested turrets. (Intentional)
+    --Firing a short range laser combiner with an ACB makes it hit and destroy itself. Also causes failsafes to hold fire. (Fixed)
 
   Lua:
-    Lua-controlled laser combiners (regular and short range) cannot hit missiles (have not tested with projectile weapons).
+    --Lua-controlled laser combiners (regular and short range) cannot hit missiles (have not tested with projectile weapons). (Fixed)
     Lua API for APS laser targeter and warp drive is outdated (no effect on warp drives, will set fuse time for laser target but shell doesn't actually explode).
     Some functions (i.e. get resource zones or subconstructs) return userdata instead of a table.
     I.Waypoint and I.BlueprintSpawners are not documented in help tab (also returns userdata instead of table)
+    table.concat is not supported
 
   Not bugs but things to be cautious of:
     Lua arrays start from 1, but FtD counts from 0 (FtD Lua is an API to C# code which counts from 0)
     "unique ID of docked vehicle" for tractor beams is unrelated to the vehicle's actual ID
     Vector3.SignedAngle does not project the vectors to the plane first; i.e. the magnitude is exactly the same as Vector3.Angle, with only the sign determined by the normal.
     Turrets placed on subobjects still use I:AimWeaponInDirection() instead of I:AimWeaponInDirectionOnSubConstruct(). Additionally, such nested turrets will not be aimed when the parent turret is aimed. Only actual weapons will be aimed when the parent turret is aimed.
+    AMCCs cannot control nested turrets.
 
   Things I wish were added:
     Inter-vehicle communication (other than my jank tractor-beam cube method)
     More detailed missile info from munition warners (i.e. diameter, heading, detect CRAMs/APS)
-    Thrust vectoring control
+    Thrust vectoring control (Added to breadboard)
     Reading files
 
 In Tides:
   idk probably too many to count I'm not good at this
 
+  secondOrderTargeting is unreliable
   MathUtil polynomial solvers have arguments named c0, c1, c2... but the order should be coefficients of higher powers first
 
 Future Plans:
@@ -55,9 +57,4 @@ Future Plans:
     Spread out to avoid chain reactions/AoE
     Attack from multiple directions
     Target weakpoints (reliant on target identification)
-  Weapon Sniping
-    Use Projectile Avoidance routine to track incoming projectiles
-    Trace flight path back to point of closest approach to enemy vehicle
-    Estimate position of weapon relative to enemy vehicle
-    Verify existence of blocks at estimated location using missile lasers
-    Fire on position
+    

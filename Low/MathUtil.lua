@@ -350,7 +350,7 @@ end
     A - the angle opposite side a
   Returns:
     B - the angle opposite side b
---]]
+]]
 function MathUtil.angleLoSin(a, b, A)
   return math.deg(math.asin(b * math.sin(math.rad(A)) / a))
 end
@@ -370,15 +370,68 @@ function MathUtil.clampCone(v1, v2, angle)
   return Quaternion.AngleAxis(offAngle, axis) * v1
 end
 
+--[[
+  WIP
+]]
+function MathUtil.fourier(data)
+  return "Work in progress"
+end
+
+--[[
+  Arguments:
+    fn - the function to find the roots of
+           must be scalar valued and take one scalar input
+           if it returns nil (i.e. undefined), iteration will stop
+    df - the derivative of fn. If the derivative is unknown,
+           leave this blank to use a secant approximation
+           if it returns nil (i.e. undefined), iteration will stop
+    guess - the initial guess to start iterating at
+    eps - when two consecutive iterations give solutions that
+            differ by less than eps, finish iteration
+            default 1e-5
+    iterlimit - maximum number of iterations to run
+                  default 100
+  Returns:
+    guess - the value obtained by iteration
+    exceed - whether the maximum number of iterations was exceeded
+]]
+function MathUtil.newton(fn, df, guess, eps, iterlimit, dx)
+  eps = eps or 1e-5
+  dx = dx or (10 * eps)
+  iterlimit = iterlimit or 100
+  df = df or function(x) return (fn(x + dx) - fn(x)) / dx end
+  guess = guess or 0
+  local change = eps + 1
+  local iters = 0
+  while change > eps and iters < iterlimit do
+    local current = fn(guess)
+    local derivative = df(guess)
+    if not current or not derivative then return nil end
+    change = -current / derivative
+    guess = guess + change
+    iters = iters + 1
+  end
+  if iters < iterlimit then
+    return guess, false
+  end
+  return guess, true
+end
+
 -- code from lua-polynomials by piqey (John Kushmer) on github
+-- modified to fix a missed branch in solveQuartic
 -- https://github.com/piqey/lua-polynomials
 -- GNU General Public License, version 3
 
-local eps = 1e-9
+MathUtil.eps = 1e-9
 
 -- checks if d is close enough to 0 to be considered 0 (for our purposes)
 function MathUtil.isZero(d)
-  return (d > -eps and d < eps)
+  return (d > -MathUtil.eps and d < MathUtil.eps)
+end
+
+-- sets the tolerance for a number to be considered zero
+function MathUtil.setTolerance(eps)
+  MathUtil.eps = eps
 end
 
 -- fixes an issue with math.pow that returns nan when the result should be a real number
@@ -424,12 +477,13 @@ function MathUtil.solveCubic(c0, c1, c2, c3)
   B = c2 / c0
   C = c3 / c0
 
-  -- substitute x = y - A/3 to eliminate quadric term: x^3 + px + q = 0
+  -- substitute x = y - A/3 to eliminate quadric term: y^3 + 3py + 2q = 0
   sq_A = A * A
   p = (1 / 3) * (-(1 / 3) * sq_A + B)
   q = 0.5 * ((2 / 27) * A * sq_A - (1 / 3) * A * B + C)
 
   -- use Cardano's formula
+    -- 27 and 4 factors are already included in p, q
   cb_p = p * p * p
   D = q * q + cb_p
 
@@ -441,6 +495,10 @@ function MathUtil.solveCubic(c0, c1, c2, c3)
     else -- one single and one double solution
       local u = MathUtil.cuberoot(-q)
       s0 = 2 * u
+      -- s1 = u^3 + v^3, u^3 = v^3 = -q/2
+      -- u and v are the real cube root of -q/2
+        -- times the 1st and 2nd cuberoots of unity
+      -- sum of 1st and 2nd cube roots of unity is just -1
       s1 = -u
       num = 2
       --return s0, s1
@@ -482,7 +540,7 @@ function MathUtil.solveQuartic(c0, c1, c2, c3, c4)
   local z, u, v, sub
   local A, B, C, D
   local sq_A, p, q, r
-  local num
+  local num = 0
 
   -- normal form: x^4 + Ax^3 + Bx^2 + Cx + D = 0
   A = c1 / c0
@@ -506,6 +564,28 @@ function MathUtil.solveQuartic(c0, c1, c2, c3, c4)
     local results = {MathUtil.solveCubic(coeffs[0], coeffs[1], coeffs[2], coeffs[3])}
     num = #results
     s0, s1, s2 = results[1], results[2], results[3]
+  elseif MathUtil.isZero(q) then
+    -- special case to avoid divide by zero in general formula
+    -- if q is zero then y^4 + py^2 + q = 0, which is a biquadratic
+    local biquad_results = {MathUtil.solveQuadratic(1, p, r)}
+    if biquad_results[1] >= 0 then
+      s0 = -math.sqrt(biquad_results[1])
+      s1 = math.sqrt(biquad_results[1])
+      num = 2
+    end
+    if biquad_results[2] >= 0 then
+      if num == 0 then
+        -- this case shouldn't happen since solveQuadratic returns roots
+          -- in decreasing order, but best not to assume root ordering
+        s0 = -math.sqrt(biquad_results[2])
+        s1 = math.sqrt(biquad_results[2])
+        num = 2
+      else
+        s2 = -math.sqrt(biquad_results[2])
+        s3 = math.sqrt(biquad_results[2])
+        num = 4
+      end
+    end
   else
     -- solve the resolvent cubic …
     coeffs[3] = 0.5 * r * p - 0.125 * q * q

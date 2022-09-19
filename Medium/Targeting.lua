@@ -33,7 +33,7 @@ end
     Range is measured in effective range, which is how far the projectile would've
     traveled if gravity didn't exist.
     Otherwise, returns the direction to the target.
---]]
+]]
 function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange, maxRange)
   local t = Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minRange / muzzle, maxRange / muzzle)
   if t and t > 0 then
@@ -51,7 +51,7 @@ function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTi
   local c = relVel.sqrMagnitude - muzzle * muzzle + Vector3.Dot(relPos, accel)
   local d = 2 * Vector3.Dot(relPos, relVel)
   local e = relPos.sqrMagnitude
-  local roots = {MathUtil.solveQuartic(a, b, c, d, e)}
+  --[[local roots = {MathUtil.solveQuartic(a, b, c, d, e)}
   local t = nil
   for i = 1, 4 do
     if roots[i] and roots[i] > minTime and roots[i] < maxTime then
@@ -59,8 +59,21 @@ function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTi
         t = roots[i]
       end
     end
+  end]]
+  local function poly(x)
+    local x_sqr = x * x
+    return e + d * x + c * x_sqr + b * x_sqr * x + a * x_sqr * x_sqr
   end
-  return t
+  local function dpoly(x)
+    local x_sqr = x * x
+    return d + 2 * c * x + 3 * b * x_sqr + 4 * a * x_sqr * x
+  end
+  local dist = relPos.magnitude
+  local closingVel = muzzle - d / (2 * dist)
+  local t = MathUtil.newton(poly, dpoly, dist / closingVel, 0.1, 10)
+  if t and t > minTime and t < maxTime then
+    return t
+  end
 end
 
 --[[
@@ -73,7 +86,7 @@ end
   or even theoretically correct because I do not
   know how to perform the relevant mathematical
   analyses.
---]]
+]]
 function Targeting.AIPPN(gain, relPos, missileVel, targetVel, targetAccel)
   local relVel = targetVel - missileVel
   local closingRate = Vector3.Dot(-relVel, relPos.normalized)

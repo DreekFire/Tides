@@ -1,5 +1,6 @@
 local BlockUtil = {}
 local Combat = {}
+local StringUtil = {}
 local Accumulator = {}
 local Differ = {}
 local Graph = {}
