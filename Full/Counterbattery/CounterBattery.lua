@@ -26,18 +26,26 @@ local weaponDef = {
 -- which mainframe to use
 local mainframeIdx = 0
 -- what to do when no firing origin detected
-  -- enemy: aim at current target
+  -- timer: wait for waitTime seconds, then fire at current target if no origin found
   -- fire: aim and fire at current target
+  -- enemy: aim at current target
   -- none: return to idle position
   -- last: continue aiming at last absolute bearing
-local idleAim = "enemy"
+local idleAim = "timer"
+  -- time to wait for a new origin before firing at the aimpoint
+    -- only used in idle aim mode "timer"
+local waitTime = 10
 -- offset the aimpoint, i.e. for hitting the necks, tetris, or turret bases instead of the barrels
-local aimOffset = Vector3(0, 0, 0)
+  -- is a function which accepts the target point relative to the enemy origin to adjust depending
+  -- on estimated turret location
+local function aimOffset(fp)
+  return Vector3(0, 0, 0)
+end
 -- whether or not to attempt to snipe missile launchers
   -- (WIP) since missiles can turn, we can't trace back their trajectory
-  -- however, if we detect a missile the instant it is launched (most feasible for huge missiles and large missiles
-    -- with low ramp time, low ignition delay, and high thrust),
-  -- we can just assume the launcher is in the same place
+  -- however, if we detect a missile the instant it is launched (most feasible for huge missiles
+    -- and large missiles with low ramp time, low ignition delay, and high thrust),
+  -- we can approximate the missile as traveling in a straight line
 local missileCounter = true
 -- degrees of inaccuracy allowed when firing
 -- weapon will start firing within this angle
@@ -46,7 +54,6 @@ local AIM_TOL = 0.1
 -- physics ticks per second (Lua runs in sync with game physics)
 local TICKS_PER_S = 40
 
--- todo: Add timer for maximum time waiting for origin. If exceeded, fire at aimpoint
 -- todo: Integrate with enemy identififcation script to get weapon distances from origin,
     -- and trace to that distance from origin instead of closest
 -- todo: Account for target acceleration
@@ -59,13 +66,15 @@ local lastFrameTime
 local inited
 local prevTime
 local lastOrigin
-local lastOriginSwitchTime
+local lastOriginSwitchTime = 0
+local originPopTime = 0
 local lastAim
 local turrets = {}
 local velocities = {}
 
 local BlockUtil = {}
 local Combat = {}
+local StringUtil = {}
 local Accumulator = {}
 local Differ = {}
 local Graph = {}
@@ -76,6 +85,7 @@ local VectorN = {}
 local Control = {}
 local Nav = {}
 local Targeting = {}
+
 
 function Init(I)
   for idx, weapon in ipairs(weaponDef) do
@@ -88,6 +98,7 @@ function Init(I)
   math.randomseed(I:GetTime())
   math.random()
   math.random()
+  originPopTime = I:GetTimeSinceSpawn()
   inited = true
 end
 
@@ -142,11 +153,13 @@ function Update(I)
   end
 
   if missileCounter then
-    for widx = 0, I:GetNumberOfWarnings(mainframeIdx) - 1 do
-      local warn = I:GetMissileWarning(mainframeIdx, widx)
-      if warn.TimeSinceLaunch < 0.1 then
-        local launcherPos = warn.Position - warn.Velocity * warn.TimeSinceLaunch / 2
-        local target = I:GetTargetInfo(mainframeIdx, 0)
+    -- missile warning info seems to be most reliable on mainframe 0
+      -- but I'm still getting invalid missiles sometimes
+    for widx = 0, I:GetNumberOfWarnings(0) - 1 do
+      local warn = I:GetMissileWarning(0, widx)
+      if warn.Valid and warn.TimeSinceLaunch < 0.5 then
+        local launcherPos = warn.Position - warn.Velocity * warn.TimeSinceLaunch
+        local target = I:GetTargetInfo(0, 0)
         local targetPosAtLaunch = target.Position - warn.TimeSinceLaunch * target.Velocity
         if (launcherPos - targetPosAtLaunch).sqrMagnitude < 100 * 100 then
           local closestAlt = launcherPos.y
@@ -167,11 +180,12 @@ function Update(I)
   -- see if it matches current line
   -- todo: store multiple lines and find match
 
-  -- 3/4ths the estimated drop in two frames due to gravity
+  -- 2/3rds the estimated drop in two frames due to gravity
   -- inconsistent with theoretical formula due to discrete integration
   -- powered missiles have no gravity so their expected error
   -- is the negative of the drop due to gravity
-  local eps = 15 * frameTime * frameTime
+  -- todo: use missile warning info to filter out missiles
+  local eps = 20 * frameTime * frameTime
   -- todo: maybe limit how often the line tracing runs to save processing power
   if currentLine and CheckAndUpdateLine(I, currentLine, projectile, frameTime, eps) then
     local target = I:GetTargetInfo(mainframeIdx, 0)
@@ -215,10 +229,12 @@ function Update(I)
   if target and target.Valid then
     local enemy = enemies[target.Id]
     local fp = lastOrigin
-    if not fp or not lastOriginSwitchTime or I:GetTimeSinceSpawn() - lastOriginSwitchTime > originSwitchTime then
-      while enemy.origins.size > 0 and I:GetTimeSinceSpawn() - enemy.originTimes[1] > maxStaleness do
+    local t = I:GetTimeSinceSpawn()
+    if not fp or not lastOriginSwitchTime or t - lastOriginSwitchTime > originSwitchTime then
+      while enemy.origins.size > 0 and t - enemy.originTimes[1] > maxStaleness do
         RingBuffer.pop(enemy.origins)
         RingBuffer.pop(enemy.originTimes)
+        originPopTime = t
       end
       if enemy.origins.size == 0 then
         fp = nil
@@ -237,7 +253,7 @@ function Update(I)
           if not found then fp = nil end
         end
       end
-      lastOriginSwitchTime = I:GetTimeSinceSpawn()
+      lastOriginSwitchTime = t
       lastOrigin = fp
     end
     local aim
@@ -245,10 +261,10 @@ function Update(I)
       for j, weapon in ipairs(turret) do
         local fire = false
         local wInfo = BlockUtil.getWeaponInfo(I, weapon)
-        if not fp and idleAim == "fire" then
+        if not fp and idleAim == "fire" or idleAim == "timer" and t - originPopTime > waitTime then
           fp = target.AimPointPosition - target.Position
         elseif fp then
-          fp = fp + aimOffset
+          fp = fp + aimOffset(fp)
         end
         if fp then
           if velocities[i] == math.huge then
@@ -268,7 +284,7 @@ function Update(I)
         end
         if not aim then
           fire = false
-          if idleAim == "enemy" or idleAim == "fire" then
+          if idleAim == "enemy" or idleAim == "fire" or idleAim == "timer" then
             aim = target.Position - wInfo.GlobalFirePoint
           elseif idleAim == "last" then
             aim = lastAim
@@ -286,10 +302,6 @@ function Update(I)
       end
     end
   end
-end
-
-function LogVector(I, vec, label)
-  I:Log(label.."("..vec.x..", "..vec.y..", "..vec.z..")")
 end
 
 function CheckAndUpdateLine(I, line, projectile, frameTime, tolerance)

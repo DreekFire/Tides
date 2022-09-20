@@ -1,7 +1,7 @@
 VectorN.mt = getmetatable({}) or {}
 VectorN.mt.__add = function(a, b)
-  local aInt = type(a) == "int"
-  local bInt = type(b) == "int"
+  local aInt = type(a) == "number"
+  local bInt = type(b) == "number"
   if not aInt and bInt then return b + a end
   if aInt and not bInt then
     return MathUtil.combine(a, b, function(k, x, y) return a + y end)
@@ -15,8 +15,8 @@ VectorN.mt.__sub = function(a, b)
 end
 
 VectorN.mt.__mul = function(a, b)
-  local aInt = type(a) == "int"
-  local bInt = type(b) == "int"
+  local aInt = type(a) == "number"
+  local bInt = type(b) == "number"
   if not aInt and bInt then return b * a end
   if aInt and not bInt then
     local res = {}
@@ -30,8 +30,8 @@ VectorN.mt.__mul = function(a, b)
 end
 
 VectorN.mt.__div = function(a, b)
-  local aInt = type(a) == "int"
-  local bInt = type(b) == "int"
+  local aInt = type(a) == "number"
+  local bInt = type(b) == "number"
   if not aInt and bInt then return a * (1 / b) end
   if aInt and not bInt then
     local res = {}
