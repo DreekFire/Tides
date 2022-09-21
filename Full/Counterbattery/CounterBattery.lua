@@ -308,7 +308,7 @@ function CheckAndUpdateLine(I, line, projectile, frameTime, tolerance)
   local expected = line.ed + (line.ds * frameTime / line.dt)
   local dv = line.dv - frameTime * I:GetGravityForAltitude(line.ed.y).y
   local dy = line.dy + frameTime * dv
-  local projectileZeroG = projectile + dy * Vector3.up
+  local projectileZeroG = projectile - frameTime * frameTime * I:GetGravityForAltitude(line.ed.y)
   if (expected - projectileZeroG).sqrMagnitude <= tolerance * tolerance then
     line.ds = projectileZeroG - line.start
     line.dv = dv
