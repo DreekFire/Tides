@@ -616,7 +616,7 @@ end
 function MathUtil.newton(fn, df, guess, eps, iterlimit, dx)
   eps = eps or 1e-5
   dx = dx or (10 * eps)
-  iterlimit = iterlimit or 100
+  iterlimit = iterlimit or 25
   df = df or function(x) return (fn(x + dx) - fn(x)) / dx end
   guess = guess or 0
   local change = eps + 1
@@ -633,6 +633,175 @@ function MathUtil.newton(fn, df, guess, eps, iterlimit, dx)
     return guess, false
   end
   return guess, true
+end
+
+--[[
+  formula from wikipedia
+  Arguments:
+    fn - the function to find zeros of. Must take a scalar
+      input and return a scalar
+    a - the lower bound to search
+    b - the upper bound to search
+      fn(a) and fn(b) must differ in sign, i.e.
+      fn(a) * fn(b) <= 0
+    eps - the maximum allowed error |x_itp - x*| where x*
+      is the true root and x_itp is our output
+    iterlimit - the maximum iterations to run
+      guaranteed at most n_1/2 + n0 iterations,
+      n_1/2 is the guaranteed upper bound for bisection method
+      n_1/2 = ceiling(log2((b - a) / eps))
+      n0 is a parameter which we have set to 1
+      default 25
+  Returns:
+    x_itp - the approximate root produced by the ITP method
+    exceed - whether or not iterlimit was exceeded. If this
+      is false, x_itp is guaranteed to be within eps of some
+      x* where fn(x*) = 0
+]]
+function MathUtil.ITP(fn, a, b, eps, iterlimit)
+  if fn(a) * fn(b) > 0 then
+    return nil
+  end
+  if fn(a) > fn(b) then
+    fn = function(x)
+      return -fn(x)
+    end
+  end
+  eps = eps or 1e-5
+  iterlimit = iterlimit or 25
+  -- hardwired parameters
+  local k1 = 0.2 / (b - a)
+  local k2 = 2
+  local n0 = 1
+
+  local n_bisect = math.ceil(math.log((b - a) / (2 * eps), 2))
+  local n_max = n_bisect + n0
+
+  local j = 0
+  while b - a > 2 * eps and j < iterlimit do
+    -- Interpolate (I)
+    local x_bisect = (a + b) / 2
+    local x_falsi = (b * fn(a) - a * fn(b)) / (fn(a) - fn(b))
+
+    -- Truncate (T)
+    local diff = x_bisect - x_falsi
+    local delta = k1 * math.abs(b - a) ^ k2
+    local sigma = diff > 0 and 1 or (diff == 0 and 0 or -1)
+    local x_t = delta <= math.abs(diff) and x_falsi + sigma * delta or x_bisect
+
+    -- Project (P)
+    local rho_k = eps * 2 ^ (n_max - j) - (b - a) / 2
+    local x_p = math.abs(x_t - x_bisect) <= rho_k and x_t or x_bisect - sigma * rho_k
+
+    -- Update
+    local y_p = fn(x_p)
+    if y_p > 0 then
+      b = x_p
+    elseif y_p < 0 then
+      a = x_p
+    else
+      a = x_p
+      b = x_p
+    end
+    j = j + 1
+  end
+  return (a + b) / 2, j == iterlimit
+end
+
+-- thanks to Ribtoks and Frédéric van der Plancke on StackOverflow for algorithm
+function MathUtil.binomCoeffs(depth, calc_all)
+  if calc_all then
+    coeffs = {}
+
+  else
+    coeffs = {}
+    coeffs[1] = 1
+    for k=1,depth do
+      coeffs[k+1] = (coeffs[k] * (depth - k)) / (k + 1)
+    end
+    return coeffs
+  end
+end
+
+--[[
+  Use Descartes' rule of signs to estimate how many real roots greater than some offset
+  a polynomial has. The actual number of roots is the number given by the rule of signs
+  minus some multiple of 2, including 0.
+  Running this twice with different offsets and taking the difference can give you an estimate
+  for the number of roots in an interval.
+  Arguments:
+    coeffs - the coefficients of a polynomial
+    offset - any real number, see return values for purpose
+  Returns:
+    roots - the possible number of real roots greater than offset
+            actual number of roots is less than this by an even number
+            i.e. if this returns 3, there are either 3 or 1 roots greater than offset
+]]
+function MathUtil.ruleOfSigns(coeffs, offset)
+  -- expand the polynomial with u = x + offset
+  local shiftedCoeffs = {}
+  local nCoeffs = #coeffs
+  for i = 1, nCoeffs do
+    shiftedCoeffs[i] = coeffs[nCoeffs - i + 1]
+  end
+  if offset ~= 0 then
+    -- use Taylor expansion to efficiently get coefficients of shifted polynomial
+    local tempCoeffs = {}
+    for i = 1, nCoeffs do
+      tempCoeffs[i] = (i - 1) * coeffs[nCoeffs - i + 1]
+    end
+    local factor = 1
+    for i = 2, nCoeffs do
+      local power_x = offset ^ (i - 1)
+      for j = 1, nCoeffs - i + 1 do
+        local shiftIdx = i + j - 1
+        shiftedCoeffs[j] = shiftedCoeffs[j] + factor * tempCoeffs[shiftIdx] * power_x
+        tempCoeffs[shiftIdx] = tempCoeffs[shiftIdx] * (j - 1)
+      end
+      factor = factor / i
+    end
+  end
+  -- remove coefficients that are zero
+  local nonZeroCoeffs = {}
+  local n = 1
+  for i, coeff in ipairs(shiftedCoeffs) do
+    if coeff ~= 0 then
+      nonZeroCoeffs[n] = coeff
+      n = n + 1
+    end
+  end
+  local count = 0
+  for i = 1, #nonZeroCoeffs - 1 do
+    if (nonZeroCoeffs[i] * nonZeroCoeffs[i + 1]) < 0 then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+function MathUtil._factorial(cache, n)
+  -- get highest cached value
+  -- using size instead of #cache because # is O(log n)
+  local val = cache[cache.size]
+
+  for i = cache.size + 1, n do
+    val = val * i
+    cache[i] = val
+  end
+  cache.size = n
+  return val
+end
+
+-- todo: create cache disable and general caching functionality
+-- we use a special cache for factorials because we're caching intermediate results
+MathUtil._factorialCache = {1, size=1}
+
+MathUtil._factorialMt = getmetatable(MathUtil._factorialCache) or {}
+MathUtil._factorialMt.__index = MathUtil._factorial
+setmetatable(MathUtil._factorialCache, MathUtil._factorialMt)
+
+function MathUtil.factorial(n)
+  return Mathutil._factorialCache[n]
 end
 
 -- code from lua-polynomials by piqey (John Kushmer) on github
@@ -654,6 +823,9 @@ end
 
 -- fixes an issue with math.pow that returns nan when the result should be a real number
 function MathUtil.cuberoot(x)
+  -- roots of negative numbers are ill-behaved
+  -- (1/3) gets converted to a float and is approximated
+  -- so Lua rejects it because it doesn't realize we want the exact cube root
   return (x > 0) and (x ^ (1 / 3)) or -(math.abs(x) ^ (1 / 3))
 end
 
@@ -722,6 +894,9 @@ function MathUtil.solveCubic(c0, c1, c2, c3)
       --return s0, s1
     end
   elseif (D < 0) then -- Casus irreducibilis: three real solutions
+    -- sign of q is flipped relative to wikipedia formula because
+    -- sqrt(-cb_p) = sqrt(p^2) * sqrt(-p) = |p| sqrt(-p)
+    -- D < 0 guarantees p < 0 so |p| = -p
     local phi = (1 / 3) * math.acos(-q / math.sqrt(-cb_p))
     local t = 2 * math.sqrt(-p)
 
@@ -939,8 +1114,8 @@ function RingBuffer.get(rb, idx)
 end
 VectorN.mt = getmetatable({}) or {}
 VectorN.mt.__add = function(a, b)
-  local aInt = type(a) == "int"
-  local bInt = type(b) == "int"
+  local aInt = type(a) == "number"
+  local bInt = type(b) == "number"
   if not aInt and bInt then return b + a end
   if aInt and not bInt then
     return MathUtil.combine(a, b, function(k, x, y) return a + y end)
@@ -954,8 +1129,8 @@ VectorN.mt.__sub = function(a, b)
 end
 
 VectorN.mt.__mul = function(a, b)
-  local aInt = type(a) == "int"
-  local bInt = type(b) == "int"
+  local aInt = type(a) == "number"
+  local bInt = type(b) == "number"
   if not aInt and bInt then return b * a end
   if aInt and not bInt then
     local res = {}
@@ -969,8 +1144,8 @@ VectorN.mt.__mul = function(a, b)
 end
 
 VectorN.mt.__div = function(a, b)
-  local aInt = type(a) == "int"
-  local bInt = type(b) == "int"
+  local aInt = type(a) == "number"
+  local bInt = type(b) == "number"
   if not aInt and bInt then return a * (1 / b) end
   if aInt and not bInt then
     local res = {}
@@ -1161,7 +1336,8 @@ function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
   return interceptTime and (relPos + interceptTime * targetVel).normalized or nil
 end
 
--- math from wltrup's answer to math.stackexchange.com question number 1419643
+-- originally based on wltrup's answer to math.stackexchange.com question number 1419643
+-- then switched to Newton's method, then switched to ITP
 --[[
   Arguments:
     relPos - position of the target relative to own vehicle
@@ -1171,51 +1347,65 @@ end
     minRange - the minimum distance of intercept (see return values)
     maxRange - the maximum distance of intercept (see return values)
   Returns:
-    If there exists an intercept point between minRange and maxRange, returns the
-    direction the weapon should point to hit the target at that intercept point.
-    Range is measured in effective range, which is how far the projectile would've
-    traveled if gravity didn't exist.
-    Otherwise, returns the direction to the target.
+    intercept - the position of the target at time of intercept if between minRange and maxRange
+      nil otherwise
+      Range is measured in effective range, which is how far the projectile would've
+      traveled if gravity didn't exist.
+    interceptTime - the time at which intercept occurs
 ]]
 function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange, maxRange)
-  local t = Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minRange / muzzle, maxRange / muzzle)
-  if t and t > 0 then
-    return (relPos / t + relVel + 0.5 * accel * t).normalized
-  end
-  return nil
-end
+  local a = -0.25 * accel.sqrMagnitude
+  local b = -Vector3.Dot(relVel, accel)
+  local c = -(relVel.sqrMagnitude - muzzle * muzzle + Vector3.Dot(relPos, accel))
+  local d = -2 * Vector3.Dot(relPos, relVel)
+  local e = -relPos.sqrMagnitude
+  local t
 
--- Same as above, but returns the time from now at which intercept will occur
--- wltrup's answer uses acceleration of the projectile while this takes the acceleration of the target
--- which is why the signs are flipped
-function Targeting.secondOrderTargetingTime(relPos, relVel, accel, muzzle, minTime, maxTime)
-  local a = 0.25 * accel.sqrMagnitude
-  local b = Vector3.Dot(relVel, accel)
-  local c = relVel.sqrMagnitude - muzzle * muzzle + Vector3.Dot(relPos, accel)
-  local d = 2 * Vector3.Dot(relPos, relVel)
-  local e = relPos.sqrMagnitude
-  --[[local roots = {MathUtil.solveQuartic(a, b, c, d, e)}
-  local t = nil
-  for i = 1, 4 do
-    if roots[i] and roots[i] > minTime and roots[i] < maxTime then
-      if not t or t and roots[i] < t then
-        t = roots[i]
+  local g = accel.magnitude
+  local v_T = relVel.magnitude
+  local d_0 = relPos.magnitude
+  local t1a, t1b = MathUtil.solveQuadratic(0.5 * g, v_T + muzzle, -d_0)
+  local t1 = math.max(t1a, t1b)
+  local t2
+
+  -- todo: use rule of signs to check for positive roots before solving quadratic
+  local coeffs = {0.5 * g, v_T - muzzle, d_0}
+  if MathUtil.ruleOfSigns(coeffs, 0) == 2 then
+    local t2a, t2b = MathUtil.solveQuadratic(coeffs[1], coeffs[2], coeffs[3])
+    t2 = math.min(t2a, t2b)
+  end
+  if not t2 or t2 < t1 then
+    local s0, s1, s2 = MathUtil.solveCubic(4 * a, 3 * b, 2 * c, d)
+    if not s2 then
+      if s0 > t1 then
+        t2 = s0
+      end
+    else
+      local t2a = math.min(s0, s2)
+      local t2b = math.max(s0, s2)
+      if t2a > t1 then
+        t2 = t2a
+      elseif t2b > t1 then
+        t2 = t2b
       end
     end
-  end]]
+    if not t2 then
+      return nil
+    end
+  end
+
   local function poly(x)
-    local x_sqr = x * x
-    return e + d * x + c * x_sqr + b * x_sqr * x + a * x_sqr * x_sqr
+    -- Horner's method of evaluating polynomials is slightly faster
+    return e + x * (d + x * (c + x * (b + x * a)))
   end
-  local function dpoly(x)
-    local x_sqr = x * x
-    return d + 2 * c * x + 3 * b * x_sqr + 4 * a * x_sqr * x
+  t = MathUtil.ITP(poly, t1, t2, 1e-4, 25)
+
+  local intercept
+  if t and t >= t1 then
+    intercept = relPos / t + relVel + 0.5 * accel * t
   end
-  local dist = relPos.magnitude
-  local closingVel = muzzle - d / (2 * dist)
-  local t = MathUtil.newton(poly, dpoly, dist / closingVel, 0.1, 10)
-  if t and t > minTime and t < maxTime then
-    return t
+  if intercept and intercept.sqrMagnitude >= minRange * minRange and intercept.sqrMagnitude <= maxRange * maxRange then
+    return intercept, t
   end
 end
 
