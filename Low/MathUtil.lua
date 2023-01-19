@@ -96,12 +96,15 @@ end
   lst must not have holes (nil values followed by non-nil).
   Arguments:
     lst - list to shuffle
+    inplace - whether to shuffle lst or create a copy
   Returns:
     s - shuffled list
 --]]
-function MathUtil.shuffle(lst)
-  local s = {}
-  for i = 1, #lst do s[i] = lst[i] end
+function MathUtil.shuffle(lst, inplace)
+  local s = inplace and lst or {}
+  if not inplace then
+    for i = 1, #lst do s[i] = lst[i] end
+  end
   for i = #lst, 2, -1 do
     local j = math.random(i)
     s[i], s[j] = s[j], s[i]
@@ -371,13 +374,6 @@ function MathUtil.clampCone(v1, v2, angle)
 end
 
 --[[
-  WIP
-]]
-function MathUtil.fourier(data)
-  return "Work in progress"
-end
-
---[[
   Arguments:
     fn - the function to find the roots of
            must be scalar valued and take one scalar input
@@ -444,10 +440,13 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
   if fn(a) * fn(b) > 0 then
     return nil
   end
+  local rfn
   if fn(a) > fn(b) then
-    fn = function(x)
+    rfn = function(x)
       return -fn(x)
     end
+  else
+    rfn = fn
   end
   eps = eps or 1e-5
   iterlimit = iterlimit or 25
@@ -494,7 +493,7 @@ end
 function MathUtil.binomCoeffs(depth, calc_all)
   if calc_all then
     coeffs = {}
-
+    -- WIP
   else
     coeffs = {}
     coeffs[1] = 1
@@ -561,30 +560,78 @@ function MathUtil.ruleOfSigns(coeffs, offset)
   return count
 end
 
-function MathUtil._factorial(cache, n)
-  -- get highest cached value
-  -- using size instead of #cache because # is O(log n)
-  local val = cache[cache.size]
-
-  for i = cache.size + 1, n do
-    val = val * i
-    cache[i] = val
+function MathUtil.cache(fn)
+  local c = {}
+  local mt = getmetatable(c) or {}
+  function mt.__index(tab, x)
+    local val = fn(x)
+    tab[x] = val
+    return val
   end
-  cache.size = n
-  return val
+  setmetatable(c, mt)
+  return function(a)
+    return c[a]
+  end
 end
 
--- todo: create cache disable and general caching functionality
--- we use a special cache for factorials because we're caching intermediate results
-MathUtil._factorialCache = {1, size=1}
-
-MathUtil._factorialMt = getmetatable(MathUtil._factorialCache) or {}
-MathUtil._factorialMt.__index = MathUtil._factorial
-setmetatable(MathUtil._factorialCache, MathUtil._factorialMt)
-
-function MathUtil.factorial(n)
-  return Mathutil._factorialCache[n]
+function MathUtil.lerp(fn, start, stop, step, extrap)
+  local vals = {}
+  for i=1, math.floor((stop - start) / step) + 1 do
+    vals[i] = fn(start + i * step)
+  end
+  vals.start = start
+  vals.stop = stop
+  vals.step = step
+  vals.lval = extrap and vals[1] or nil
+  vals.rval = extrap and vals[#vals] or nil
+  return function(x)
+    if x >= vals.stop then return vals.rval end
+    if x <= vals.start then return vals.lval end
+    local i = (x - vals.start) / vals.step
+    local fac = i % 1
+    i = math.floor(i)
+    return (1 - fac) * vals[i] + fac * vals[i + 1]
+  end
 end
+
+function MathUtil._factorial(n)
+  if n < 2 then return 1 end
+  return MathUtil._factorial(n - 1)
+end
+
+MathUtil.factorial = MathUtil.cache(MathUtil._factorial)
+
+--[[
+function MathUtil.rfft(data, lerp)
+  local cosLerp
+  if lerp == nil then
+    lerp = 0.05
+  elseif type(lerp) == "function" then
+    cosLerp = lerp
+  else
+    cosLerp = MathUtil.lerp(function(x) return math.cos(x * math.pi) end, 0, 2, lerp)
+  end
+  local n = #data
+  if data % 2 == 0 and n > 32 then
+    local ldata = {}
+    local rdata = {}
+    local lres = MathUtil.rfft(ldata, cosLerp)
+    local rres = MathUtil.rfft(rdata, cosLerp)
+    -- WIP
+  else
+    local res = {}
+    for w=1, n do
+      res[w] = 0
+    end
+    for i=1, n do
+      for w=1, n do
+        local theta = (((w - 1) * (i - 1)) / n) % 2
+        res[w] = res[w] + data[i] * cosLerp(theta)
+      end
+    end
+  end
+end
+--]]
 
 -- code from lua-polynomials by piqey (John Kushmer) on github
 -- modified to fix a missed branch in solveQuartic
@@ -616,7 +663,7 @@ function MathUtil.solveQuadratic(c0, c1, c2)
 
   local p, q, D
 
-  -- x^2 + px + q = 0
+  -- x^2 + 2px + q = 0
   p = c1 / (2 * c0)
   q = c2 / c0
 

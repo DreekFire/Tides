@@ -1,12 +1,17 @@
 -- Settings
+-- use pCall to avoid crash, retry if failed
+local AllowErrorRecovery = false
+
 -- seconds to record target movements for
-local targetTrackTime = 10
+local targetTrackTime = 15
 -- number of locations to track per enemy (todo: support tracking multiple projectiles)
+  -- currently not useful as a single shell will generate duplicate origins. To be fixed
 local numOrigins = 1
 -- time between switching targets
 local originSwitchTime = 0.25
 -- maximum time to remember origin points
 local maxStaleness = 3
+-- todo: move range and altitude limits to weapon definitions
 -- ranges to engage
 local minRange = 50
 local maxRange = 2000
@@ -20,10 +25,39 @@ local maxAlt = math.huge
   -- if multiple weapons on same turret with different muzzle velocity then name the turret,
     -- leave primary weapon unnamed and give secondary weapons unique names
     -- turret name should go before names of secondary weapons
+  -- checkACB lists ACBs set to detect object presence and trigger custom axis
+    -- may also have second ACB with inverted settings that trigger negative custom axis
+    -- will be checked before firing to make sure blocks actually exist at target distance
+    -- this check is not performed when firing at aimpoint due to idle mode "fire" or "timer"
+    -- validRequire is required number of ACBs in range and pointing in the right direction
+    -- checkRequire is proportion of valid ACBs that are have detected an object
 local weaponDef = {
-  { name = "laser", velocity = math.huge }
+  {
+    name = "laser",
+    checkACBs = {
+      { axis = "check", minRange = 200, maxRange = 2400, turretName = "checkTurret", offset = Vector3(0, 1, 0), },
+    },
+    checkRequire = 1,
+    validRequire = 0,
+  }
 }
--- which mainframe to use
+-- indexes of mainframes to be used to track enemy rotations
+  -- 3 is the bare minimum, but will fail if any of them target a subconstruct
+  -- so more is preferred
+  -- it will also fail if too many mainframes switch their aimpoint simultaneously
+  -- this is unavoidable in the case of blocks being destroyed, but can be avoided
+  -- in the case of the timer switching blocks. Todo: manage switch times to avoid
+  -- synchronized aimpoint switching
+local aimPointTrackers = {
+  { idx = 1 },
+  { idx = 2 },
+  { idx = 3 },
+  { idx = 4 },
+  { idx = 5 },
+}
+-- which mainframe to use, will affect target prioritization
+  -- currently only fires at the highest priority target
+  -- can be the same as one of the aimPointTrackers
 local mainframeIdx = 0
 -- what to do when no firing origin detected
   -- timer: wait for waitTime seconds, then fire at current target if no origin found
@@ -36,19 +70,26 @@ local idleAim = "timer"
     -- only used in idle aim mode "timer"
 local waitTime = 10
 -- offset the aimpoint, i.e. for hitting the necks, tetris, or turret bases instead of the barrels
-  -- is a function which accepts the target point relative to the enemy origin to adjust depending
-  -- on estimated turret location
--- todo: take in origin and aimpoint, return list of locations to attempt
-local function aimOffset(fp)
-  return Vector3(0, 0, 0)
+  -- is a function with the following properties:
+  --[[
+    Arguments:
+      fp - the original aimpoint
+      target - the target position
+      isCounter - whether we are firing at an origin detected by the counterbattery script or just the AI aimpoint
+    Returns:
+      fpOffset - the offset of the adjusted aimpoint relative to the original aimpoint
+  ]]
+  -- to adjust depending on estimated turret location
+-- todo: return list of locations to attempt, using the checkACBs to check each one
+local function aimOffset(fp, target, isCounter)
+  return Vector3.zero
 end
-local checkACB = {
-
-}
+-- when tracking rotation, reject any rotation estimates above this rate (in deg/s)
+local maxTurnRateTracking = 720
 -- whether or not to attempt to snipe missile launchers
-  -- (WIP) since missiles can turn, we can't trace back their trajectory
+  -- since missiles can turn, we can't trace back their trajectory
   -- however, if we detect a missile the instant it is launched (most feasible for huge missiles
-    -- and large missiles with low ramp time, low ignition delay, and high thrust),
+    -- and large missiles with low ramp time, no ignition delay, and high thrust),
   -- we can approximate the missile as traveling in a straight line
 local missileCounter = true
 -- degrees of inaccuracy allowed when firing
@@ -62,8 +103,10 @@ local TICKS_PER_S = 40
     -- and trace to that distance from origin instead of closest
 -- todo: Account for target acceleration
 
+-- one way to store previous values is in local variables outside of Update like this
+  -- another way is to use global variables, which has the benefit of being able to be
+  -- located near where they are used, but are much slower to access (requires a table lookup)
 local lastProjectilePos
-local times
 local enemies
 local currentLine
 local lastFrameTime
@@ -71,10 +114,12 @@ local inited
 local prevTime
 local lastOrigin
 local lastOriginSwitchTime = 0
+local currentTargetId
 local originPopTime = 0
 local lastAim
+local nextRecordTime
+local continueLine = false
 local turrets = {}
-local velocities = {}
 
 local BlockUtil = {}
 local Combat = {}
@@ -82,20 +127,26 @@ local StringUtil = {}
 local Accumulator = {}
 local Differ = {}
 local Graph = {}
+local Heapq = {}
 local LinkedList = {}
 local MathUtil = {}
 local RingBuffer = {}
 local VectorN = {}
 local Control = {}
 local Nav = {}
+local Scheduling = {}
 local Targeting = {}
 
 function Init(I)
   for idx, weapon in ipairs(weaponDef) do
-    velocities[idx] = weapon.velocity
-    turrets[idx] = BlockUtil.getWeaponsByName(I, weapon.name, 1, 2)
+    turrets[idx] = BlockUtil.getWeaponsByName(I, weapon.name)
+    for acbIdx, acb in ipairs(weapon.checkACBs) do
+      acb.turretSub = BlockUtil.getSubConstructsByName(I, acb.turretName, 1)[1]
+      acb.turret = BlockUtil.getWeaponsByName(I, acb.turretName, 1)[1]
+    end
   end
-  times = RingBuffer.RingBuffer(targetTrackTime * TICKS_PER_S)
+
+  nextRecordTime = I:GetTimeSinceSpawn()
   enemies = {}
   math.randomseed(I:GetTime())
   math.random()
@@ -106,34 +157,42 @@ function Init(I)
 end
 
 function Update(I)
-  if not inited then Init(I) end
-  for tarIdx = 0, I:GetNumberOfTargets(mainframeIdx) do
-    local target = I:GetTargetInfo(mainframeIdx, tarIdx)
-    if not enemies[target.Id] then
-      enemies[target.Id] = { pos = RingBuffer.RingBuffer(targetTrackTime * TICKS_PER_S),
-                             vel = RingBuffer.RingBuffer(targetTrackTime * TICKS_PER_S),
-                             origins = RingBuffer.RingBuffer(numOrigins),
-                             originTimes = RingBuffer.RingBuffer(numOrigins),
-                             valid = true }
-      RingBuffer.setSize(enemies[target.Id].pos, times.size)
-      RingBuffer.setSize(enemies[target.Id].vel, times.size)
-    end
-    enemies[target.Id].valid = true
-    RingBuffer.push(enemies[target.Id].pos, target.Position)
-    RingBuffer.push(enemies[target.Id].vel, target.Velocity)
+  --I:ClearLogs()
+  --I:Log(string.format("Game Time: %.2f", I:GetTimeSinceSpawn()))
+  if AllowErrorRecovery then
+    ProtectedUpdate(I)
+  else
+    CoreUpdate(I)
   end
-  for id, tar in pairs(enemies) do
-    if not tar.valid then
-        enemies[id] = nil
-    else
-        -- set valid to false. This will be set back to true the next frame if the target still exists
-        -- otherwise the target no longer exists and we can clean up its data.
-        enemies[id].valid = false
-    end
-  end
+end
 
-  local frameTime = lastFrameTime and I:GetTimeSinceSpawn() - lastFrameTime or 0
-  lastFrameTime = I:GetTimeSinceSpawn()
+function ProtectedUpdate(I)
+  local updateRan, err = pcall(CoreUpdate, I)
+  if not updateRan then
+    I:Log("Error in Update")
+    I:Log(err)
+    return false --This means we had an error, so just move on in the LUA.
+  else
+    I:Log("Ran update")
+  end
+end
+
+function CoreUpdate(I)
+  if not inited then Init(I) end
+  local target = I:GetTargetInfo(mainframeIdx, 0)
+  if not target or not target.Valid then
+    return
+  end
+  local t = I:GetTimeSinceSpawn()
+
+  if t >= nextRecordTime - 0.5 / TICKS_PER_S then
+    UpdateEnemyData(I)
+    nextRecordTime = nextRecordTime + 1 / TICKS_PER_S
+  end
+  currentTargetId = target.Id
+
+  local frameTime = lastFrameTime and t - lastFrameTime or 0
+  lastFrameTime = t
   -- calculate projectile location
   local alt = 800 * I:GetPropulsionRequest(9) -- A axis, set in projectile avoidance routine
   local relBear = 180 * I:GetPropulsionRequest(10) -- B axis
@@ -144,10 +203,6 @@ function Update(I)
   projectile = projectile + I:GetConstructCenterOfMass()
   projectile.y = alt
 
-  if prevTime and RingBuffer.isFull(times) then
-    prevTime = prevTime - 1
-  end
-  RingBuffer.push(times, I:GetTimeSinceSpawn())
   if dist == 0 then
     currentLine = nil
     lastProjectilePos = nil
@@ -155,17 +210,19 @@ function Update(I)
 
   if missileCounter then
     for widx = 0, I:GetNumberOfWarnings(0) - 1 do
-      local warn = I:GetMissileWarning(0, widx)
-      if warn.Valid and warn.TimeSinceLaunch < 0.5 then
+      local warn = I:GetMissileWarning(mainframeIdx, widx)
+      if warn.Valid and warn.TimeSinceLaunch < 0.1 then
         local launcherPos = warn.Position - warn.TimeSinceLaunch * warn.Velocity
-        local target = I:GetTargetInfo(mainframeIdx, 0)
         local targetPosAtLaunch = target.Position - warn.TimeSinceLaunch * target.Velocity
-        if (launcherPos - targetPosAtLaunch).sqrMagnitude < 100 * 100 then
+        -- todo: set threshold by target size
+        if (launcherPos - targetPosAtLaunch).sqrMagnitude < 150 * 150 then
           local closestAlt = launcherPos.y
           if closestAlt > minAlt and closestAlt < maxAlt then
             local enemy = enemies[target.Id]
-            RingBuffer.push(enemy.origins, launcherPos - targetPosAtLaunch)
-            RingBuffer.push(enemy.originTimes, I:GetTimeSinceSpawn())
+            local eRot = enemy.rotation[enemy.rotation.size] or Quaternion.Identity
+            local lPos = Quaternion.Inverse(eRot) * (launcherPos - targetPosAtLaunch)
+            RingBuffer.push(enemy.origins, lPos)
+            RingBuffer.push(enemy.originTimes, t)
           end
         end
       end
@@ -185,123 +242,333 @@ function Update(I)
   local eps = 10 * frameTime * frameTime
   -- todo: maybe limit how often the line tracing runs to save processing power
   if lastProjectilePos and currentLine and CheckAndUpdateLine(I, currentLine, projectile, frameTime, eps) then
-    local target = I:GetTargetInfo(mainframeIdx, 0)
-    local enemy = enemies[target.Id]
-    local relVel = (currentLine.ds / currentLine.dt) - target.Velocity
-    local relPos = projectile - target.Position
-    local time2d = math.sqrt((relPos.x ^ 2 + relPos.z ^ 2) / (relVel.x ^ 2 + relVel.z ^2))
-    local estimate2d = relPos - (relVel * time2d) + 0.5 * I:GetGravityForAltitude(currentLine.start.y) * time2d * time2d
-    if estimate2d.sqrMagnitude < 150 * 150 then
-      local closest, closestTimeIdx = RunTrace(I, currentLine, enemy, prevTime)
-      if not closest then
-        I:Log("no solution found")
-        prevTime = nil
-        return
-      end
-      prevTime = closestTimeIdx
-      if closest.sqrMagnitude < 100 * 100 then
-        local closestAlt = closest.y + enemy.pos[closestTimeIdx].y
-        if closestAlt > minAlt and closestAlt < maxAlt then
-          RingBuffer.push(enemy.origins, closest)
-          RingBuffer.push(enemy.originTimes, I:GetTimeSinceSpawn())
-        end
+    if not continueLine then
+      local enemy = enemies[currentTargetId]
+      local origin = GetOrigin(I, projectile, enemy)
+      if origin then
+        RingBuffer.push(enemy.origins, origin)
+        RingBuffer.push(enemy.originTimes, t)
       end
     end
-  elseif lastProjectilePos and dist > 0 then
-    local start = lastProjectilePos
-    currentLine = {
-      start = start,
-      tStart = times[times.size - 1],
-      ed = projectile
-    }
-    currentLine.dv = -frameTime * I:GetGravityForAltitude(start.y).y
-    currentLine.dy = frameTime * currentLine.dv
-    currentLine.ds = projectile + currentLine.dy * Vector3.up - start
-    currentLine.dt = frameTime
-    currentLine.ev = projectile - start
-    prevTime = nil
+    continueLine = true
+  else
+    continueLine = false
+    if lastProjectilePos and dist > 0 then
+      local start = lastProjectilePos
+      currentLine = {
+        start = start,
+        tStart = t - 1 / TICKS_PER_S,
+        ed = projectile
+      }
+      currentLine.dv = -frameTime * I:GetGravityForAltitude(start.y).y
+      currentLine.dy = frameTime * currentLine.dv
+      currentLine.ds = projectile + currentLine.dy * Vector3.up - start
+      currentLine.dt = frameTime
+      currentLine.ev = projectile - start
+      prevTime = nil
+    end
   end
 
   lastProjectilePos = projectile
 
   -- fire weapon at origins
-  local target = I:GetTargetInfo(mainframeIdx, 0)
-  if target and target.Valid then
-    local enemy = enemies[target.Id]
-    local fp = lastOrigin
-    local t = I:GetTimeSinceSpawn()
-    if not fp or not lastOriginSwitchTime or t - lastOriginSwitchTime > originSwitchTime then
-      while enemy.origins.size > 0 and t - enemy.originTimes[1] > maxStaleness do
-        RingBuffer.pop(enemy.origins)
-        RingBuffer.pop(enemy.originTimes)
-        originPopTime = t
-      end
-      if enemy.origins.size == 0 then
-        fp = nil
-      else
-        fp = enemy.origins[math.random(1, enemy.origins.size)]
-        if fp.y + target.Position.y < minAlt or fp.y + target.Position.y > maxAlt then
-          -- do a linear search to find valid origin
-          local found = false
-          for i = 1, enemy.origins.size do
-            fp = enemy.origins[i]
-            if fp.y + target.Position.y > minAlt and fp.y + target.Position.y < maxAlt then
-              found = true
-              break
-            end
-          end
-          if not found then fp = nil end
-        end
-      end
-      lastOriginSwitchTime = t
-      lastOrigin = fp
+  local enemy = enemies[currentTargetId]
+  local eRot = enemy.rotation[enemy.rotation.size] or Quaternion.identity
+  local fp
+  if lastOriginSwitchTime + originSwitchTime > t then
+    fp = lastOrigin and eRot * lastOrigin
+  end
+  if not fp then
+    while enemy.origins.size > 0 and t - enemy.originTimes[1] > maxStaleness do
+      RingBuffer.pop(enemy.origins)
+      RingBuffer.pop(enemy.originTimes)
+      originPopTime = t
     end
-    local aim
-    for i, turret in ipairs(turrets) do
-      for j, weapon in ipairs(turret) do
-        local fire = false
-        local wInfo = BlockUtil.getWeaponInfo(I, weapon)
-        if not fp and idleAim == "fire" or idleAim == "timer" and t - originPopTime > waitTime then
-          fp = target.AimPointPosition - target.Position
-        elseif fp then
-          fp = fp + aimOffset(fp)
-        end
-        if fp then
-          if velocities[i] == math.huge then
-            local range = (fp + target.Position - I:GetConstructPosition()).magnitude
-            if range > minRange and range < maxRange then
-              aim = fp + target.Position - wInfo.GlobalFirePoint
-              fire = true
-            end
-          else
-            local g = 0.5 * (I:GetGravityForAltitude(I:GetConstructPosition().y) + I:GetGravityForAltitude(target.Position.y))
-            aim = Targeting.secondOrderTargeting(fp + target.Position - wInfo.GlobalFirePoint,
-                        target.Velocity - I:GetVelocityVector(),
-                        -g,
-                        velocities[i], minRange, maxRange)
-            if aim then fire = true end
+    if enemy.origins.size > 0 then
+      lastOrigin = enemy.origins[math.random(1, enemy.origins.size)]
+      fp = eRot * lastOrigin
+      if fp.y + target.Position.y < minAlt or fp.y + target.Position.y > maxAlt then
+        -- do a linear search to find valid origin
+        local found = false
+        for i = 1, enemy.origins.size do
+          lastOrigin = enemy.origins[i]
+          fp = eRot * lastOrigin
+          if fp.y + target.Position.y > minAlt and fp.y + target.Position.y < maxAlt then
+            found = true
+            break
           end
         end
-        if not aim then
-          fire = false
-          if idleAim == "enemy" or idleAim == "fire" or idleAim == "timer" then
-            aim = target.Position - wInfo.GlobalFirePoint
-          elseif idleAim == "last" then
-            aim = lastAim
+        if not found then
+          fp = nil
+          lastOrigin = nil
+        end
+      end
+    end
+    lastOriginSwitchTime = t
+  end
+  for i, turret in ipairs(turrets) do
+    local wfp
+    local ready = false
+    if fp then
+      -- check ACBs for object presence
+      local success = 0
+      local valid = 0
+      wfp = fp + aimOffset(fp, target.Position, true)
+      for acbIdx, acb in ipairs(weaponDef[i].checkACBs) do
+        local bInfo = I:GetSubConstructInfo(acb.turretSub)
+        local r = wfp + target.Position - (bInfo.Position + bInfo.Rotation * acb.offset)
+        BlockUtil.aimWeapon(I, acb.turret, r, 0)
+        if r.magnitude > acb.minRange and r.magnitude < acb.maxRange
+            and I:IsAlive(acb.turretSub)
+            and Vector3.Angle(r, bInfo.Forwards) < AIM_TOL then
+          valid = valid + 1
+          if I:GetCustomAxis(acb.axis) > 0 then
+            success = success + 1
           end
         end
-        if aim then
-          lastAim = aim
-          if Combat.CheckConstraints(I, aim, weapon.wpnIdx, weapon.subIdx) then
-            BlockUtil.aimWeapon(I, weapon, aim, 0)
-            if fire and Vector3.Angle(wInfo.CurrentDirection, aim) < AIM_TOL then
-              BlockUtil.fireWeapon(I, weapon, 0)
+      end
+      ready = valid >= weaponDef[i].validRequire and success >= weaponDef[i].checkRequire * valid
+    end
+    wfp = ready and wfp or (target.AimPointPosition - target.Position + aimOffset(fp, target.Position, false))
+    ready = ready or (idleAim == "fire" or (idleAim == "timer" and t - originPopTime > waitTime))
+    for j, weapon in ipairs(turret) do
+      local aim
+      local fire = false
+      local wInfo = BlockUtil.getWeaponInfo(I, weapon)
+      if ready then
+        if wInfo.Speed >= 1e5 then
+          local range = (wfp + target.Position - I:GetConstructPosition()).magnitude
+          if range > minRange and range < maxRange then
+            aim = wfp + target.Position - wInfo.GlobalFirePoint
+            fire = true
+          end
+        else
+          local g = 0.5 * (I:GetGravityForAltitude(I:GetConstructPosition().y) + I:GetGravityForAltitude(target.Position.y))
+          aim = Targeting.secondOrderTargeting(wfp + target.Position - wInfo.GlobalFirePoint,
+                      target.Velocity - I:GetVelocityVector(),
+                      -g,
+                      wInfo.Speed, minRange, maxRange)
+          if aim then fire = true end
+        end
+      end
+      if not aim then
+        if idleAim == "enemy" or idleAim == "fire" or idleAim == "timer" then
+          aim = target.Position - wInfo.GlobalFirePoint
+        elseif idleAim == "last" then
+          aim = lastAim
+        end
+      end
+      if aim then
+        lastAim = aim
+        if Combat.CheckConstraints(I, aim, weapon.wpnIdx, weapon.subIdx) then
+          BlockUtil.aimWeapon(I, weapon, aim, 0)
+          if fire and Vector3.Angle(wInfo.CurrentDirection, aim) < AIM_TOL then
+            BlockUtil.fireWeapon(I, weapon, 0)
+          end
+        end
+      end
+    end
+  end
+end
+
+function UpdateEnemyData(I)
+  for id, en in pairs(enemies) do
+    en.valid = false
+  end
+  for tarIdx = 0, I:GetNumberOfTargets(mainframeIdx) - 1 do
+    local target = I:GetTargetInfo(mainframeIdx, tarIdx)
+    if target.Valid then
+      if not enemies[target.Id] then
+        local rbsize = targetTrackTime * TICKS_PER_S
+        enemies[target.Id] = {
+                              pos = RingBuffer.RingBuffer(rbsize),
+                              vel = RingBuffer.RingBuffer(rbsize),
+                              rotation = RingBuffer.RingBuffer(rbsize),
+                              origins = RingBuffer.RingBuffer(numOrigins),
+                              originTimes = RingBuffer.RingBuffer(numOrigins),
+                              valid = true,
+                              oldAimpoints = {},
+                              aimpoints = {},
+                            }
+      end
+      local e = enemies[target.Id]
+      e.valid = true
+      RingBuffer.push(e.pos, target.Position)
+      RingBuffer.push(e.vel, target.Velocity)
+    end
+  end
+
+  -- have to do this because there is no get target by id function
+  for id, en in pairs(enemies) do
+    if not en.valid then
+      enemies[id] = nil
+      if id == currentTargetId then
+        lastOrigin = nil
+        lastOriginSwitchTime = I:GetTimeSinceSpawn()
+      end
+    end
+  end
+
+  for idx, tracker in ipairs(aimPointTrackers) do
+    for tarIdx = 0, I:GetNumberOfTargets(tracker.idx) - 1 do
+      local target = I:GetTargetInfo(tracker.idx, tarIdx)
+      if target.Valid then
+        local e = enemies[target.Id]
+        e.oldAimpoints[idx] = e.aimpoints[idx] or target.AimPointPosition
+        e.aimpoints[idx] = target.AimPointPosition
+      end
+    end
+  end
+
+  for id, en in pairs(enemies) do
+    local dRot = GetRotation(en.oldAimpoints, en.aimpoints) or Quaternion.identity
+    RingBuffer.push(en.rotation, dRot * (en.rotation[en.rotation.size] or Quaternion.identity))
+  end
+end
+
+function GetOrigin(I, projectile, enemy)
+  if prevTime and RingBuffer.isFull(enemy.pos) then
+    prevTime = prevTime - 1
+  end
+  local vel = currentLine.ds / currentLine.dt
+  local relVel = vel - enemy.vel[enemy.vel.size]
+  local relPos = projectile - enemy.pos[enemy.pos.size]
+  local time2d = math.sqrt((relPos.x ^ 2 + relPos.z ^ 2) / (relVel.x ^ 2 + relVel.z ^2))
+  local estimate2d = relPos - (relVel * time2d) + 0.5 * I:GetGravityForAltitude(currentLine.start.y) * time2d * time2d
+  -- todo: adjust threshold based on enemy size, also penalize vertical error greater than horizontal
+  if estimate2d.sqrMagnitude < 150 * 150 then
+    local p, t = CheckIfCram(projectile, vel, enemy.pos[enemy.pos.size], 150)
+    if p then
+      I:Log("Projectile determined to be CRAM shell, fired "..t.." seconds ago")
+      local pIdx = enemy.pos.size + t * TICKS_PER_S
+      if pIdx < 1 then
+        I:Log("CRAM direct guess has no target data")
+        return
+      end
+      local enemyPosAtTime = enemy.pos[pIdx]
+      local enemyRotAtTime = enemy.rotation[pIdx]
+      if enemyPosAtTime then
+        return Quaternion.Inverse(enemyRotAtTime) * (p - enemyPosAtTime)
+      end
+      return
+    end
+    local closest, closestTimeIdx = RunTrace(I, currentLine, enemy, prevTime)
+    if not closest then
+      I:Log("no solution found")
+      prevTime = nil
+      return
+    end
+    prevTime = closestTimeIdx
+    if closest.sqrMagnitude < 100 * 100 then
+      local closestAlt = closest.y + enemy.pos[closestTimeIdx].y
+      if closestAlt > minAlt and closestAlt < maxAlt then
+        return Quaternion.Inverse(enemy.rotation[closestTimeIdx]) * closest
+      end
+    end
+  end
+end
+
+function GetRotation(oldPts, newPts, iterLim)
+  local nTrack = #newPts
+  iterLim = iterLim or 10
+
+  local indices = {}
+  for i=1, nTrack do
+    indices[i] = i
+  end
+  -- iterate through triples of aimpoints, check if the legs are the same length
+  for trip=1, iterLim do
+    -- not the most efficient as we shuffle the entire list even though we only need the first 3. Implement range shuffle later
+    MathUtil.shuffle(indices, true)
+    local oldAimpoints = {}
+    local aimpoints = {}
+    for i=1, 3 do
+      oldAimpoints[i] = oldPts[indices[i]]
+      aimpoints[i] = newPts[indices[i]]
+    end
+
+    local legs, oldLegs = {}, {}
+    local valid = true
+    for i=1, 3 do
+      legs[i] = aimpoints[i % 3 + 1] - aimpoints[(i - 1) % 3 + 1]
+      oldLegs[i] = oldAimpoints[i % 3 + 1] - oldAimpoints[(i - 1) % 3 + 1]
+      -- check if aimpoints have changed
+      if math.abs(legs[i].sqrMagnitude - oldLegs[i].sqrMagnitude) > 0.1 then
+        valid = false
+        break
+      end
+    end
+    if valid then
+      local oldRot = Quaternion.LookRotation(oldLegs[1], oldLegs[2])
+      local rot = Quaternion.LookRotation(legs[1], legs[2])
+      local deltaRot = rot * Quaternion.Inverse(oldRot)
+      if math.acos(math.max(math.min(deltaRot.w, 1), -1)) * 360 / math.pi * TICKS_PER_S < maxTurnRateTracking then
+        -- check for consensus
+        local votes = 0
+        for idx, ap in ipairs(newPts) do
+          local diff = ap - newPts[indices[1]]
+          local oldDiff = oldPts[idx] - oldPts[indices[1]]
+          if (diff - deltaRot * oldDiff).sqrMagnitude < 0.1 then
+            votes = votes + 1
+            if 2 * votes - 3 >= nTrack then
+              return deltaRot
             end
           end
         end
       end
     end
   end
+  return nil
+end
+
+function CheckIfCram(projPos, projVel, enemyPos, tolerance)
+  -- y component of velocity changes, but horizontal does not
+  -- if horizontal alone exceeds max CRAM speed, cannot be CRAM
+  -- no matter what y component becomes
+  local hSqrMag = projVel.x * projVel.x + projVel.z * projVel.z
+  -- CRAMs usually aren't fired underwater, and if they are, this method breaks anyways 
+  local speedAtSeaLevel = math.sqrt(2 * projPos.y * 9.81 + projVel.sqrMagnitude)
+  local maybeD = hSqrMag <= 90000 and speedAtSeaLevel >= 300
+  local maybeS = hSqrMag <= 57600 and speedAtSeaLevel >= 240
+  local p, t1, t2
+  if maybeD then
+    t1, t2 = GetCramLaunchTime(projVel, 300)
+    if t2 <= 0 then
+      p = CheckPosition(projPos, projVel, enemyPos, t2, tolerance)
+      if p then return p, t2 end
+    end
+    if t1 <= 0 then
+      p = CheckPosition(projPos, projVel, enemyPos, t1, tolerance)
+      if p then return p, t1 end
+    end
+  end
+  if maybeS then
+    t1, t2 = GetCramLaunchTime(projVel, 240)
+    if t2 <= 0 then
+      p = CheckPosition(projPos, projVel, enemyPos, t2, tolerance)
+      if p then return p, t2 end
+    end
+    if t1 <= 0 then
+      p = CheckPosition(projPos, projVel, enemyPos, t1, tolerance)
+      if p then return p, t1 end
+    end
+  end
+end
+
+function CheckPosition(projPos, projVel, enemyPos, t, tolerance)
+  local p = projPos + projVel * t - 0.5 * Vector3(0, 9.81, 0) * t * t
+  if (p - enemyPos).sqrMagnitude < tolerance * tolerance then
+    return p
+  end
+end
+
+-- provides the launch time in seconds before present
+-- assuming initial velocity of either 240 or 300m/s
+function GetCramLaunchTime(vel, muzzle)
+  local hSqrMag = vel.x * vel.x + vel.z * vel.z
+
+  local yvel = math.sqrt(muzzle * muzzle - hSqrMag)
+  return (vel.y - yvel) / 9.81, (vel.y + yvel) / 9.81
 end
 
 function CheckAndUpdateLine(I, line, projectile, frameTime, tolerance)
@@ -312,7 +579,7 @@ function CheckAndUpdateLine(I, line, projectile, frameTime, tolerance)
     line.ds = projectile + line.dy * Vector3.up - line.start
     line.dv = dv
     line.dy = dy
-    line.dt = times[times.size] - line.tStart
+    line.dt = I:GetTimeSinceSpawn() - line.tStart
     line.ev = projectile - line.ed
     line.ed = projectile
     return true
@@ -321,15 +588,16 @@ function CheckAndUpdateLine(I, line, projectile, frameTime, tolerance)
 end
 
 function RunTrace(I, line, enemy, timeGuess)
+  local t = I:GetTimeSinceSpawn()
   local totalIter = 0
   local targetPos = enemy.pos[enemy.pos.size]
   local targetVel = enemy.vel[enemy.vel.size]
   if timeGuess then
-    targetPos = enemy.pos[timeGuess]
-    targetVel = enemy.vel[timeGuess]
-    if not targetPos then
+    if enemy.pos[timeGuess] then
+      targetPos = enemy.pos[timeGuess]
+      targetVel = enemy.vel[timeGuess]
+    else
       I:Log("initial guess has no target data")
-      return nil
     end
   end
   local tIdxClosest
@@ -345,7 +613,8 @@ function RunTrace(I, line, enemy, timeGuess)
     -- 2 z_i v_z + 2 v_z^2 t +
     -- 2 y_i v_y + 2 v_y^2 t + 2 y_i g t + 3 v_y g t^2 + 0.25 g^2 t^3
     -- this is a cubic polynomial in terms of t which we can find the roots of
-    local di = line.ed - targetPos
+    local ti = (line.tStart + line.dt) - (timeGuess and t - (enemy.pos.size - timeGuess) / TICKS_PER_S or t)
+    local di = line.ed - targetPos + ti * targetVel
     local projRelVel = line.ds / line.dt - line.dv * Vector3.up - targetVel
     -- accounting exactly for gravity changes over altitude is difficult, just approximate and hope the enemy isn't using mortars
     local g = I:GetGravityForAltitude(line.ed.y).y
@@ -353,7 +622,8 @@ function RunTrace(I, line, enemy, timeGuess)
     -- critical point is a minimum when derivative changes from negative to positive
     -- since leading term is always positive (0.125g^2 = 12.2), if there are three roots, the first and third are minima
     -- if there is one root, it is a minimum
-    local minRoot, minimum
+    -- minRoot is in seconds relative to line.tStart + line.dt
+    local minRoot
     if a and b and c then
       local firstRoot = math.min(a, b, c)
       local lastRoot = math.max(a, b, c)
@@ -364,11 +634,13 @@ function RunTrace(I, line, enemy, timeGuess)
       else
         minRoot = lastRoot
       end
-    elseif a then
+    else
       minRoot = a
     end
     -- get target position and velocity at estimated time of closest approach
-    tIdxClosest = InterpolatedSearch(I, times, 1, times.size, minRoot + line.tStart + line.dt, true)
+    local approachTime = minRoot + line.tStart + line.dt - t
+    tIdxClosest = math.floor(approachTime * TICKS_PER_S + 0.5) + enemy.pos.size
+    -- InterpolatedSearch(I, times, 1, times.size, minRoot + line.tStart + line.dt, true)
     if not tIdxClosest then return nil end
     targetPos = enemy.pos[tIdxClosest]
     targetVel = enemy.vel[tIdxClosest]
@@ -381,7 +653,7 @@ function RunTrace(I, line, enemy, timeGuess)
   -- linear search to find best point
   -- todo: account for target velocity
   function CalcSqrDist(tIdx)
-    local dt = times[tIdx] - line.tStart
+    local dt = t - (enemy.pos.size - tIdx) / TICKS_PER_S - line.tStart
     return (line.start - enemy.pos[tIdx] + dt * (line.ds / line.dt) + 0.5 * I:GetGravityForAltitude(line.start.y) * dt * dt).sqrMagnitude
   end
   local currentSqrDist = CalcSqrDist(tIdxClosest)
@@ -390,7 +662,6 @@ function RunTrace(I, line, enemy, timeGuess)
     while aftSqrDist < currentSqrDist and tIdxClosest < enemy.pos.size do
       currentSqrDist = aftSqrDist
       tIdxClosest = tIdxClosest + 1
-      targetPos = enemy.pos[tIdxClosest]
       if tIdxClosest < enemy.pos.size then
         aftSqrDist = CalcSqrDist(tIdxClosest + 1)
       end
@@ -407,7 +678,6 @@ function RunTrace(I, line, enemy, timeGuess)
     while befSqrDist < currentSqrDist and tIdxClosest > 1 do
       currentSqrDist = befSqrDist
       tIdxClosest = tIdxClosest - 1
-      targetPos = enemy.pos[tIdxClosest]
       if tIdxClosest > 1 then
         befSqrDist = CalcSqrDist(tIdxClosest -1)
       end
@@ -419,8 +689,9 @@ function RunTrace(I, line, enemy, timeGuess)
     end
   end
   --I:Log(totalIter.." iterations after downwards search")
-  local dt = times[tIdxClosest] - line.tStart
-  return line.start - targetPos + dt * (line.ds / line.dt) + 0.5 * I:GetGravityForAltitude(line.start.y) * dt * dt, tIdxClosest
+  -- time of closest approach relative to line.tStart
+  local dt = t - (enemy.pos.size - tIdxClosest) / TICKS_PER_S - line.tStart
+  return line.start - enemy.pos[tIdxClosest] + dt * (line.ds / line.dt) + 0.5 * I:GetGravityForAltitude(line.start.y) * dt * dt, tIdxClosest
 end
 
 function SqrDistance(I, line, targetAbsPos, targetAbsVel, t)
@@ -430,7 +701,8 @@ function SqrDistance(I, line, targetAbsPos, targetAbsVel, t)
   return diff.sqrMagnitude
 end
 
-function InterpolatedSearch(I, list, left, right, target, findClosest)
+function InterpolatedSearch(I, list, left, right, target, findClosest, iterLim)
+  iterLim = iterLim or 50
   local a, b, split
   local totalIter = 0
   while right > left do
@@ -455,7 +727,7 @@ function InterpolatedSearch(I, list, left, right, target, findClosest)
       left = split + 1
     end
     totalIter = totalIter + 1
-    if totalIter > 50 then
+    if totalIter > iterLim then
       I:Log("max iterations exceeded on InterpolatedSearch")
       break
     end
@@ -464,4 +736,4 @@ function InterpolatedSearch(I, list, left, right, target, findClosest)
 end
 
 -- minified version of Tides library (not meant to be human-readable, see Tides.lua or individual class files for human-readable source)
-function Accumulator.Accumulator(a,b)local c={}c.decay=b;c.window=a;c.time=0;c.weight=0;if a>0 then c.vals=LinkedList.LinkedList()c.times=LinkedList.LinkedList()end;return c end;function Accumulator.update(c,d,e)local f=Mathf.Pow(c.decay,e)if not c.value then c.value=d*e else c.value=c.value*f;c.value=c.value+d*e end;c.time=c.time+e;c.weight=c.weight*f;c.weight=c.weight+e;if c.window>0 then LinkedList.pushFront(c.vals,d)LinkedList.pushFront(c.times,e)while c.time>c.window do local g=LinkedList.popBack(c.times)c.time=c.time-g;local h=Mathf.Pow(c.decay,c.time)c.weight=c.weight-g*h;c.value=c.value-LinkedList.popBack(c.vals)*g*h end end;return c.value,c.weight end;function Accumulator.get(c)return c.value,c.weight end;function Differ.Differ(i)local j={}j.lastVal=i;j.diff=nil;return j end;function Differ.update(j,d)if j.lastVal then j.diff=d-j.lastVal;j.lastVal=d end;j.lastVal=d;return j.diff end;function Differ.get(j)return j.diff end;function LinkedList.LinkedList()local k={}k.value=nil;k.next=k;k.prev=k;return k end;function LinkedList.pushFront(l,d)local k={}k.value=d;LinkedList.connect(k,l.next)LinkedList.connect(l,k)end;function LinkedList.pushBack(l,d)local k={}k.value=d;LinkedList.connect(l.prev,k)LinkedList.connect(k,l)end;function LinkedList.popFront(l)local m=l.next.value;LinkedList.connect(l,l.next.next)return m end;function LinkedList.popBack(l)local m=l.prev.value;LinkedList.connect(l.prev.prev,l)return m end;function LinkedList.peekFront(l)return l.next.val end;function LinkedList.peekBack(l)return l.prev.val end;function LinkedList.connect(n,o)n.next=o;o.prev=n end;function LinkedList.toArray(l)local p=1;local q={}local k=l.next;while k~=l do q[p]=k.value;k=k.next end;return q end;function MathUtil.angleOnPlane(r,s,t)local u=Vector3.ProjectOnPlane(r,t)local g=Vector3.ProjectOnPlane(s,t)return Vector3.SignedAngle(u,g,t)end;function MathUtil.min(v,w)local x=nil;w=w or function(y,z)return y<z end;for A in v do if not x or w(A,x)then x=A end end;return x end;function MathUtil.max(v,w)local B=nil;w=w or function(y,z)return y<z end;for A in v do if not B or w(B,A)then B=A end end;return B end;function MathUtil.range(y,z,C)local D,E=y,z;local F;if not y then return end;if not z then D=0;E=y;F=D<E and 1 or-1 elseif C then F=C end;return function(G,H)local I=H+F;if I==E then return nil end;return I end,nil,D-F end;function MathUtil.shuffle(l)local J={}for p=1,#l do J[p]=l[p]end;for p=#l,2,-1 do local K=math.random(p)J[p],J[K]=J[K],J[p]end;return J end;function MathUtil.combine(y,z,L)if#y==#z then local M={}for N,O in pairs(y)do M[N]=L(N,O,z[N])end;return M end end;function MathUtil.distribution()return{n=0}end;function MathUtil.updateDistribution(P,Q)P.n=P.n+1;if P.n==1 then P.mean=Q;P.covariance={}local h=#Q;for p=1,h do local R={}for K=1,h do R[K]=0 end;P.covariance[p]=R end else P.mean=P.mean+1/(P.n+1)*Q end end;function MathUtil.mean(P)return P.mean end;function MathUtil.covariance(P)return P.cov end;function MathUtil.normal()local S,T=MathUtil.boxMuller()return S end;function MathUtil.normalPDF(S)return math.exp(-0.5*S*S)/math.sqrt(2*math.pi)end;function MathUtil.normalCDF(S)local U=0.2316419;local V=0.319381530;local W=-0.356563782;local X=1.781477937;local Y=-1.821255978;local Z=1.330274429;local g=1/(1+U*S)return 1-MathUtil.normalPDF(S)*(V*g+W*g^2+X*g^3+Y*g^4+Z*g^5)end;function MathUtil.inverseNorm(_)local a0=_>=0.5 and _ or-_;local S=5.55556*(1-((1-a0)/a0)^0.1186)if _<0.5 then S=-S end;return S end;function MathUtil.boxMuller()local a1=math.random()local a2=math.random()a2=math.random()a2=math.random()local a3=math.sqrt(-2*math.log(a1))local a4=2*math.pi*a2;return a3*math.cos(a4),a3*math.sin(a4)end;function MathUtil.angleSSS(y,z,C)if y+z<C or y+C<z or z+C<y then return nil end;local a5=math.deg(math.acos((z*z+C*C-y*y)/(2*z*C)))local a6,a7=MathUtil.angleSAS(z,a5,C)return a5,a6,a7 end;function MathUtil.sideSAS(y,a7,z)local a8=y*y+z*z-2*y*z*math.cos(math.rad(a7))return math.sqrt(a8)end;function MathUtil.angleSAS(y,a7,z)local C=MathUtil.sideSAS(y,a7,z)if MathUtil.isZero(C)then return nil end;local a5,a6;if y<z then a5=MathUtil.angleLoSin(C,y,a7)a6=180-a5-a7 else a6=MathUtil.angleLoSin(C,z,a7)a5=180-a6-a7 end;return a5,a6 end;function MathUtil.sideSSA(y,z,a5)local a9=z*z-y*y;local aa=-2*z*math.cos(math.rad(a5))local ab,ac=MathUtil.solveQuadratic(1,aa,a9)if not ac then return ab,ac end;if ab<ac then return ab,ac end;return ac,ab end;function MathUtil.angleSSA(y,z,a5)local ab,ac=MathUtil.sideSSA(y,z,a5)if not ab then return nil end;local ad,ae=MathUtil.angleSAS(z,a5,ab)if not ac then return ad,ae end;local af,ag=MathUtil.angleSAS(z,a5,ac)return ad,ae,af,ag end;function MathUtil.sideAAS(a5,a6,y)local a7=180-a5-a6;local z=MathUtil.sideLoSin(a5,a6,y)local C=MathUtil.sideLoSin(a5,a7,y)return z,C end;function MathUtil.sideLoSin(y,a5,a6)return y*math.sin(math.rad(a6))/math.sin(math.rad(a5))end;function MathUtil.angleLoSin(y,z,a5)return math.deg(math.asin(z*math.sin(math.rad(a5))/y))end;function MathUtil.clampCone(ah,ai,aj)local ak=math.min(aj,Vector3.Angle(ah,ai))local al=Vector3.Cross(ah,ai)return Quaternion.AngleAxis(ak,al)*ah end;function MathUtil.fourier(am)return"Work in progress"end;function MathUtil.newton(an,ao,ap,aq,ar,as)aq=aq or 1e-5;as=as or 10*aq;ar=ar or 25;ao=ao or function(at)return(an(at+as)-an(at))/as end;ap=ap or 0;local au=aq+1;local av=0;while au>aq and av<ar do local aw=an(ap)local ax=ao(ap)if not aw or not ax then return nil end;au=-aw/ax;ap=ap+au;av=av+1 end;if av<ar then return ap,false end;return ap,true end;function MathUtil.ITP(an,y,z,aq,ar)aq=aq or 1e-5;local ay=math.ceil(math.log((z-y)/aq,2))ar=ar or 25;local az=0.2/(z-y)local aA=2;local aB=1;local K=0;while z-y>2*aq and K<ar do local aC=(y+z)/2;local aD=(z*an(y)-y*an(z))/(an(y)-an(z))local aE=aC-aD;local aF=az*math.abs(z-y)^aA;local aG=aE>0 and 1 or(aE==0 and 0 or-1)local aH=aF<=math.abs(aE)and aD+aG*aF or aC;local aI=aq*2^(ay+aB-K)-(z-y)/2;local aJ=aI<math.abs(aH-aC)and aC-aG*aI or aH;local aK=an(aJ)if aK>0 then z=aJ elseif aK<0 then y=aJ else y=aJ;z=aJ end;K=K+1 end;return(y+z)/2,K==ar end;function MathUtil.binomCoeffs(aL,aM)if aM then coeffs={}else coeffs={}coeffs[1]=1;for N=1,aL do coeffs[N+1]=coeffs[N]*(aL-N)/(N+1)end;return coeffs end end;function MathUtil.ruleOfSigns(coeffs,aN)local aO={}local aP=#coeffs;for p=1,aP do aO[p]=coeffs[aP-p+1]end;if aN~=0 then local aQ={}for p=1,aP do aQ[p]=(p-1)*coeffs[aP-p+1]end;local aR=1;for p=2,aP do local aS=aN^(p-1)for K=1,aP-p+1 do local aT=p+K-1;aO[K]=aO[K]+aR*aQ[aT]*aS;aQ[aT]=aQ[aT]*(K-1)end;aR=aR/p end end;local aU={}local aV=1;for p,aW in ipairs(aO)do if aW~=0 then aU[aV]=aW;aV=aV+1 end end;local aX=0;for p=1,#aU-1 do if aU[p]*aU[p+1]<0 then aX=aX+1 end end;return aX end;function MathUtil._factorial(aY,aV)local m=aY[aY.size]for p=aY.size+1,aV do m=m*p;aY[p]=m end;aY.size=aV;return m end;MathUtil._factorialCache={1,size=1}MathUtil._factorialMt=getmetatable(MathUtil._factorialCache)or{}MathUtil._factorialMt.__index=MathUtil._factorial;setmetatable(MathUtil._factorialCache,MathUtil._factorialMt)function MathUtil.factorial(aV)return Mathutil._factorialCache[aV]end;MathUtil.eps=1e-9;function MathUtil.isZero(h)return h>-MathUtil.eps and h<MathUtil.eps end;function MathUtil.setTolerance(aq)MathUtil.eps=aq end;function MathUtil.cuberoot(at)return at>0 and at^(1/3)or-math.abs(at)^(1/3)end;function MathUtil.solveQuadratic(aZ,ab,ac)local a_,b0;local _,b1,b2;_=ab/(2*aZ)b1=ac/aZ;b2=_*_-b1;if MathUtil.isZero(b2)then a_=-_;return a_ elseif b2<0 then return else local b3=math.sqrt(b2)a_=b3-_;b0=-b3-_;return a_,b0 end end;function MathUtil.solveCubic(aZ,ab,ac,b4)local a_,b0,b5;local b6,b7;local a5,a6,a7;local b8,_,b1;local b9,b2;a5=ab/aZ;a6=ac/aZ;a7=b4/aZ;b8=a5*a5;_=1/3*(-(1/3)*b8+a6)b1=0.5*(2/27*a5*b8-1/3*a5*a6+a7)b9=_*_*_;b2=b1*b1+b9;if MathUtil.isZero(b2)then if MathUtil.isZero(b1)then a_=0;b6=1 else local ba=MathUtil.cuberoot(-b1)a_=2*ba;b0=-ba;b6=2 end elseif b2<0 then local bb=1/3*math.acos(-b1/math.sqrt(-b9))local g=2*math.sqrt(-_)a_=g*math.cos(bb)b0=-g*math.cos(bb+math.pi/3)b5=-g*math.cos(bb-math.pi/3)b6=3 else local b3=math.sqrt(b2)local ba=MathUtil.cuberoot(b3-b1)local O=-MathUtil.cuberoot(b3+b1)a_=ba+O;b6=1 end;b7=1/3*a5;if b6>0 then a_=a_-b7 end;if b6>1 then b0=b0-b7 end;if b6>2 then b5=b5-b7 end;return a_,b0,b5 end;function MathUtil.solveQuartic(aZ,ab,ac,b4,bc)local a_,b0,b5,bd;local coeffs={}local S,ba,O,b7;local a5,a6,a7,b2;local b8,_,b1,a3;local b6=0;a5=ab/aZ;a6=ac/aZ;a7=b4/aZ;b2=bc/aZ;b8=a5*a5;_=-0.375*b8+a6;b1=0.125*b8*a5-0.5*a5*a6+a7;a3=-(3/256)*b8*b8+0.0625*b8*a6-0.25*a5*a7+b2;if MathUtil.isZero(a3)then coeffs[3]=b1;coeffs[2]=_;coeffs[1]=0;coeffs[0]=1;local be={MathUtil.solveCubic(coeffs[0],coeffs[1],coeffs[2],coeffs[3])}b6=#be;a_,b0,b5=be[1],be[2],be[3]elseif MathUtil.isZero(b1)then local bf={MathUtil.solveQuadratic(1,_,a3)}if bf[1]>=0 then a_=-math.sqrt(bf[1])b0=math.sqrt(bf[1])b6=2 end;if bf[2]>=0 then if b6==0 then a_=-math.sqrt(bf[2])b0=math.sqrt(bf[2])b6=2 else b5=-math.sqrt(bf[2])bd=math.sqrt(bf[2])b6=4 end end else coeffs[3]=0.5*a3*_-0.125*b1*b1;coeffs[2]=-a3;coeffs[1]=-0.5*_;coeffs[0]=1;a_,b0,b5=MathUtil.solveCubic(coeffs[0],coeffs[1],coeffs[2],coeffs[3])S=a_;ba=S*S-a3;O=2*S-_;if MathUtil.isZero(ba)then ba=0 elseif ba>0 then ba=math.sqrt(ba)else return end;if MathUtil.isZero(O)then O=0 elseif O>0 then O=math.sqrt(O)else return end;coeffs[2]=S-ba;coeffs[1]=b1<0 and-O or O;coeffs[0]=1;do local be={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}b6=#be;a_,b0=be[1],be[2]end;coeffs[2]=S+ba;coeffs[1]=b1<0 and O or-O;coeffs[0]=1;if b6==0 then local be={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}b6=b6+#be;a_,b0=be[1],be[2]end;if b6==1 then local be={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}b6=b6+#be;b0,b5=be[1],be[2]end;if b6==2 then local be={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}b6=b6+#be;b5,bd=be[1],be[2]end end;b7=0.25*a5;if b6>0 then a_=a_-b7 end;if b6>1 then b0=b0-b7 end;if b6>2 then b5=b5-b7 end;if b6>3 then bd=bd-b7 end;return a_,b0,b5,bd end;function RingBuffer.RingBuffer(bg)local bh={}bh.buf={}bh.capacity=bg;bh.size=0;bh.head=1;local bi=getmetatable(bh)or{}bi.__index=RingBuffer.get;setmetatable(bh,bi)return bh end;function RingBuffer.isFull(bh)return bh.size>=bh.capacity end;function RingBuffer.setSize(bh,bj)bh.size=bj end;function RingBuffer.push(bh,d)bh.buf[(bh.head+bh.size-1)%bh.capacity+1]=d;if bh.size==bh.capacity then bh.head=bh.head%bh.capacity+1 else bh.size=bh.size+1 end end;function RingBuffer.pop(bh)if bh.size==0 then return nil end;local m=bh.buf[bh.head]bh.buf[bh.head]=nil;bh.head=bh.head%bh.capacity+1;bh.size=bh.size-1;return m end;function RingBuffer.get(bh,bk)if type(bk)~="number"or math.floor(bk)~=bk then return nil end;if bk<1 or bk>bh.size then return nil end;return bh.buf[(bh.head+bk-2)%bh.capacity+1]end;VectorN.mt=getmetatable({})or{}VectorN.mt.__add=function(y,z)local bl=type(y)=="number"local bm=type(z)=="number"if not bl and bm then return z+y end;if bl and not bm then return MathUtil.combine(y,z,function(N,at,bn)return y+bn end)else return MathUtil.combine(y,z,function(N,at,bn)return at+bn end)end end;VectorN.mt.__sub=function(y,z)return y+-z end;VectorN.mt.__mul=function(y,z)local bl=type(y)=="number"local bm=type(z)=="number"if not bl and bm then return z*y end;if bl and not bm then local M={}for N,O in pairs(z)do M[N]=y*O end;return M else return MathUtil.combine(y,z,function(N,at,bn)return at*bn end)end end;VectorN.mt.__div=function(y,z)local bl=type(y)=="number"local bm=type(z)=="number"if not bl and bm then return y*1/z end;if bl and not bm then local M={}for N,O in pairs(z)do M[N]=y/O end;return M else return MathUtil.combine(y,z,function(N,at,bn)return at/bn end)end end;VectorN.mt.__unm=function(y)local M={}for N,O in pairs(y)do M[N]=-O end;return M end;function VectorN.VectorN(l)local bo={}for N,O in pairs(l)do if type(O)=="table"then bo[N]=VectorN.VectorN(O)else bo[N]=O end end;setmetatable(bo,VectorN.mt)return bo end;function Control.PID(bp,bq,br,bs,bt,bu)local bv={}bv.kP=bp;bv.kI=bq;bv.kD=br;bv.Iacc=Accumulator.Accumulator(bs,bt)if bu and bu~=0 then bv.period=bu end;return bv end;function Control.processPID(bw,bx,e)bx=bw.period and(bx+bw.period/2)%bw.period-bw.period/2 or bx;local _=bw.kP*bx;local p,by=bw.kI*Accumulator.update(bw.Iacc,bx,e)p=p/by;local h=bw.kD*(bx-(bw.lastError or bx))/e;bw.lastError=bx;return _+p+h end;function Control.FF(coeffs,bu)local bz={}bz.coeffs=coeffs;bz.degree=#coeffs-1;if bu and bu~=0 then bz.period=bu end;bz.derivs={}return bz end;function Control.processFF(bw,bA,e)local bB=0*bA;local bC=bA;local bD=bA;for p=1,bw.degree+1 do bD=bw.derivs[p]bw.derivs[p]=bC;bB=bB+bw.coeffs[p]*bC;if bD then local aE=bC-bD;if p==1 and bw.period then aE=(aE+bw.period/2)%bw.period-bw.period/2 end;bC=aE/e else break end end;return bB end;function Nav.toLocal(bE,bF,bG)local bH=bE-bF;return Quaternion.Inverse(bG)*bH end;function Nav.toGlobal(bI,bF,bG)local bH=bG*bI;return bH+bF end;function Nav.cartToPol(bJ)local a3=bJ.magnitude;local a4=Vector3.SignedAngle(Vector3.forward,bJ,Vector3.up)local bb=90-Vector3.Angle(Vector3.up,bJ)return Vector3(a3,a4,bb)end;function Nav.cartToCyl(bJ)local bK=Vector3(bJ.x,0,bJ.z)local bL=bK.magnitude;local bb=Vector3.SignedAngle(Vector3.forward,bJ,Vector3.up)local S=bJ.y;return Vector3(bL,bb,S)end;function Nav.polToCart(bJ)local a3,a4,bb=bJ.x,bJ.y,bJ.z;local at=Mathf.Sin(a4)*Mathf.Cos(bb)local bn=Mathf.Sin(bb)local S=Mathf.Cos(a4)*Mathf.Cos(bb)return a3*Vector3(at,bn,S)end;function Nav.cylToCart(bJ)local bL,bb,bM=bJ.x,bJ.y,bJ.z;local at=bL*Mathf.Sin(bb)local bn=bM;local S=bL*Mathf.Cos(bb)return Vector3(at,bn,S)end;function Targeting.firstOrderTargeting(bN,bO,bP)local bQ=bN-Vector3.Project(bN,bO)local bR=Vector3.Dot(bO,bN-bQ)/bO.sqrMagnitude;local y,z=MathUtil.solveQuadratic(bR-bP*bP,2*bR,bQ.sqrMagnitude+bR*bR)local bS=nil;if y and y>=0 then bS=y end;if z and z>=0 and z<y then bS=z end;return bS and(bN+bS*bO).normalized or nil end;function Targeting.secondOrderTargeting(bN,bT,bU,bP,bV,bW)local y=0.25*bU.sqrMagnitude;local z=Vector3.Dot(bT,bU)local C=bT.sqrMagnitude-bP*bP+Vector3.Dot(bN,bU)local h=2*Vector3.Dot(bN,bT)local bx=bN.sqrMagnitude;local g;local bX=bU.magnitude;local bY=bT.magnitude;local bZ=bN.magnitude;local G,b_=MathUtil.solveQuadratic(0.5*bX,bY+bP,-bZ)local c0;local coeffs={0.5*bX,bY-bP,bZ}if MathUtil.ruleOfSigns(coeffs,0)==2 then G,c0=MathUtil.solveQuadratic(coeffs[1],coeffs[2],coeffs[3])end;if not c0 or c0<0 then local a_,G,b5=MathUtil.solveCubic(4*y,3*z,2*C,h)if a_>0 then c0=a_ elseif b5 and b5>0 then c0=b5 else return nil end end;local function c1(at)return bx+at*(h+at*(C+at*(z+at*y)))end;g=MathUtil.ITP(c1,b_,c0)local c2;if g and g>0 then c2=bN/g+bT+0.5*bU*g end;if c2.sqrMagnitude>bV*bV and c2.sqrMagnitude<bW*bW then return c2,g end end;function Targeting.AIPPN(c3,bN,c4,bO,c5)local bT=bO-c4;local c6=Vector3.Dot(-bT,bN.normalized)if c6<=0 then c6=10 end;local c7=bN.magnitude/c6;local c8=Vector3.Cross(bN,bT)/bN.sqrMagnitude;local c9=Vector3.Cross(bN,c5)/bN.sqrMagnitude*c7/2;local ca=c8+c9;local cb=Vector3.Cross(ca,bN.normalized)local cc=Vector3.ProjectOnPlane(cb,c4).normalized;local cd=c3*c4.magnitude*ca.magnitude;return cd*cc end;function Targeting.ATPN(c3,bN,c4,bO,c5)local bT=bO-c4;local c6=-Vector3.Dot(bT,bN.normalized)if c6<=0 then c6=10 end;local c8=Vector3.Cross(bN,bT)/bN.sqrMagnitude;local cb=Vector3.Cross(c8,bN.normalized)local ce=Vector3.ProjectOnPlane(c5,bN)return c3*c6*cb+0.5*c3*c5 end;function BlockUtil.getWeaponsByName(cf,cg,aX,ch)if DEBUG then cf:Log("searching for "..cg)end;local ci=cf:GetAllSubConstructs()local cj={}aX=aX or-1;local C=aX;if not ch or ch==0 or ch==2 then for p=0,cf:GetWeaponCount()-1 do if C==0 then break end;if cf:GetWeaponBlockInfo(p).CustomName==cg then table.insert(cj,{subIdx=nil,wpnIdx=p})if DEBUG then cf:Log("found weapon "..cg.." on hull, type "..cf:GetWeaponInfo(p).WeaponType)end;C=C-1 end end end;if not ch or ch==1 or ch==2 then for bk=1,#ci do local b7=ci[bk]for p=0,cf:GetWeaponCountOnSubConstruct(b7)-1 do if C==0 then break end;if cf:GetWeaponBlockInfoOnSubConstruct(b7,p).CustomName==cg then table.insert(cj,{subIdx=b7,wpnIdx=p})if DEBUG then cf:Log("found weapon "..cg.." on subobj "..b7 ..", type "..cf:GetWeaponInfo(p).WeaponType)end;C=C-1 end end end end;if DEBUG then cf:Log("weapon count: "..#cj)end;return cj end;function BlockUtil.getSubConstructsByName(cf,cg,aX)if DEBUG then cf:Log("searching for "..cg)end;local ci=cf:GetAllSubConstructs()local ck={}aX=aX or-1;local C=aX;for bk=1,#ci do local b7=ci[bk]if C==0 then break end;if cf:GetSubConstructInfo(b7).CustomName==cg then table.insert(ck,b7)if DEBUG then cf:Log("found subobj "..cg)end;C=C-1 end end;if DEBUG then cf:Log("subobj count: "..#ck)end;return ck end;function BlockUtil.getBlocksByName(cf,cg,type,aX)if DEBUG then cf:Log("searching for "..cg)end;local cl={}aX=aX or-1;local C=aX;for bk=0,cf:Component_GetCount(type)-1 do if C==0 then break end;if cf:Component_GetBlockInfo(type,bk).CustomName==cg then table.insert(cl,bk)if DEBUG then cf:Log("found component "..cg)end;C=C-1 end end;if DEBUG then cf:Log("component count: "..#cl)end;return cl end;function BlockUtil.getWeaponInfo(cf,cm)local cn;if cm.subIdx then cn=cf:GetWeaponInfoOnSubConstruct(cm.subIdx,cm.wpnIdx)else cn=cf:GetWeaponInfo(cm.wpnIdx)end;return cn end;function BlockUtil.aimWeapon(cf,cm,co,cp)if cm.subIdx then cf:AimWeaponInDirectionOnSubConstruct(cm.subIdx,cm.wpnIdx,co.x,co.y,co.z,cp)else cf:AimWeaponInDirection(cm.wpnIdx,co.x,co.y,co.z,cp)end end;function BlockUtil.fireWeapon(cf,cm,cp)if cm.subIdx then cf:FireWeaponOnSubConstruct(cm.subIdx,cm.wpnIdx,cp)else cf:FireWeapon(cm.wpnIdx,cp)end end;function Combat.pickTarget(cf,cq,cr)cr=cr or function(G,cs)return cs.Priority end;local bA,ct;for p in MathUtil.range(cf:GetNumberOfTargets(cq))do local cs=cf:GetTargetInfo(cq,p)local cu=cr(cf,cs)if not bA or cu>ct then bA=cs;ct=cu end end;return bA end;function Combat.CheckConstraints(cf,cv,cw,cx)local cy;if cx then cy=cf:GetWeaponConstraintsOnSubConstruct(cx,cw)else cy=cf:GetWeaponConstraints(cw)end;local cz=cf:GetConstructForwardVector()local cA=cf:GetConstructUpVector()local cB=Quaternion.LookRotation(cz,cA)cv=Quaternion.Inverse(cB)*cv;if cy.InParentConstructSpace and cx then local cC=cf:GetSubConstructInfo(cx).localRotation;cv=Quaternion.inverse(cC)*cv end;local cD=MathUtil.angleOnPlane(Vector3.forward,cv,Vector3.up)local cE=cv;cE.z=0;local A=Mathf.Atan2(cv.z,cE.magnitude)local cF=cD>cy.MinAzimuth and cD<cy.MaxAzimuth;local cG=A>cy.MinElevation and A<cy.MaxElevation;if cy.FlipAzimuth then cF=not cF end;if cF and cG then return true end;cD=cD+180;A=180-A;if A>180 then A=A-360 end;if A<-180 then A=A+360 end;cF=cD>cy.MinAzimuth and cD<cy.MaxAzimuth;cG=A>cy.MinElevation and A<cy.MaxElevation;if cy.FlipAzimuth then cF=not cF end;if cF and cG then return true end;return false end;function StringUtil.LogVector(cf,bo,cH)cf:Log(cH.."("..bo.x..", "..bo.y..", "..bo.z..")")end
+function Accumulator.Accumulator(a,b)local c={}c.decay=b;c.window=a;c.time=0;c.weight=0;if a>0 then c.vals=LinkedList.LinkedList()c.times=LinkedList.LinkedList()end;return c end;function Accumulator.update(c,d,e)local f=Mathf.Pow(c.decay,e)if not c.value then c.value=d*e else c.value=c.value*f;c.value=c.value+d*e end;c.time=c.time+e;c.weight=c.weight*f;c.weight=c.weight+e;if c.window>0 then LinkedList.pushFront(c.vals,d)LinkedList.pushFront(c.times,e)while c.time>c.window do local g=LinkedList.popBack(c.times)c.time=c.time-g;local h=Mathf.Pow(c.decay,c.time)c.weight=c.weight-g*h;c.value=c.value-LinkedList.popBack(c.vals)*g*h end end;return c.value,c.weight end;function Accumulator.get(c)return c.value,c.weight end;function Differ.Differ(i)local j={}j.lastVal=i;j.diff=nil;return j end;function Differ.update(j,d)if j.lastVal then j.diff=d-j.lastVal;j.lastVal=d end;j.lastVal=d;return j.diff end;function Differ.get(j)return j.diff end;function Heapq.Heapq(i,k)local l={}l.data=i;l.comp=k or function(m,n)return m<n end;local o=#l.data;l.size=o;for p=math.floor(o/2),1,-1 do Heapq.siftDown(l,p)end;return l end;function Heapq.siftDown(l,q)local r=false;local s=q;local o=#l.data;while not r do r=true;local t=2*s;local u=2*s+1;local v=s;if t<=o and l.comp(l.data[t],l.data[v])then v=t;r=false end;if u<=o and l.comp(l.data[u],l.data[v])then v=u;r=false end;if not r then local w=l.data[v]l.data[v]=l.data[s]l.data[s]=w;s=v end end end;function Heapq.siftUp(l,q)local r=false;local s=q;while not r do r=true;local x=math.floor(s/2)if l.comp(l.data[s],l.data[x])then local w=l.data[x]l.data[x]=l.data[s]l.data[s]=w;s=x;r=false end end end;function Heapq.insert(l,y)l.data[l.size+1]=y;l.size=l.size+1;Heapq.siftUp(l,l.size)end;function Heapq.pop(l)local z=l.data[1]l.data[1]=l.data[l.size]l.data[l.size]=nil;l.size=l.size-1;Heapq.siftDown(l,1)return z end;function Heapq.peek(l)return l.data[1]end;function Heapq.size(l)return l.size end;function LinkedList.LinkedList()local A={}A.value=nil;A.next=A;A.prev=A;return A end;function LinkedList.pushFront(B,d)local A={}A.value=d;LinkedList.connect(A,B.next)LinkedList.connect(B,A)end;function LinkedList.pushBack(B,d)local A={}A.value=d;LinkedList.connect(B.prev,A)LinkedList.connect(A,B)end;function LinkedList.popFront(B)local C=B.next.value;LinkedList.connect(B,B.next.next)return C end;function LinkedList.popBack(B)local C=B.prev.value;LinkedList.connect(B.prev.prev,B)return C end;function LinkedList.peekFront(B)return B.next.val end;function LinkedList.peekBack(B)return B.prev.val end;function LinkedList.connect(D,E)D.next=E;E.prev=D end;function LinkedList.toArray(B)local F=1;local G={}local A=B.next;while A~=B do G[F]=A.value;A=A.next end;return G end;function MathUtil.angleOnPlane(H,I,J)local K=Vector3.ProjectOnPlane(H,J)local g=Vector3.ProjectOnPlane(I,J)return Vector3.SignedAngle(K,g,J)end;function MathUtil.min(L,M)local N=nil;M=M or function(m,n)return m<n end;for O in L do if not N or M(O,N)then N=O end end;return N end;function MathUtil.max(L,M)local P=nil;M=M or function(m,n)return m<n end;for O in L do if not P or M(P,O)then P=O end end;return P end;function MathUtil.range(m,n,Q)local R,S=m,n;local T;if not m then return end;if not n then R=0;S=m;T=R<S and 1 or-1 elseif Q then T=Q end;return function(U,V)local W=V+T;if W==S then return nil end;return W end,nil,R-T end;function MathUtil.shuffle(B,X)local s=X and B or{}if not X then for F=1,#B do s[F]=B[F]end end;for F=#B,2,-1 do local Y=math.random(F)s[F],s[Y]=s[Y],s[F]end;return s end;function MathUtil.combine(m,n,Z)if#m==#n then local z={}for _,a0 in pairs(m)do z[_]=Z(_,a0,n[_])end;return z end end;function MathUtil.distribution()return{n=0}end;function MathUtil.updateDistribution(a1,a2)a1.n=a1.n+1;if a1.n==1 then a1.mean=a2;a1.covariance={}local h=#a2;for F=1,h do local a3={}for Y=1,h do a3[Y]=0 end;a1.covariance[F]=a3 end else a1.mean=a1.mean+1/(a1.n+1)*a2 end end;function MathUtil.mean(a1)return a1.mean end;function MathUtil.covariance(a1)return a1.cov end;function MathUtil.normal()local a4,a5=MathUtil.boxMuller()return a4 end;function MathUtil.normalPDF(a4)return math.exp(-0.5*a4*a4)/math.sqrt(2*math.pi)end;function MathUtil.normalCDF(a4)local a6=0.2316419;local a7=0.319381530;local a8=-0.356563782;local a9=1.781477937;local aa=-1.821255978;local ab=1.330274429;local g=1/(1+a6*a4)return 1-MathUtil.normalPDF(a4)*(a7*g+a8*g^2+a9*g^3+aa*g^4+ab*g^5)end;function MathUtil.inverseNorm(ac)local ad=ac>=0.5 and ac or-ac;local a4=5.55556*(1-((1-ad)/ad)^0.1186)if ac<0.5 then a4=-a4 end;return a4 end;function MathUtil.boxMuller()local ae=math.random()local af=math.random()af=math.random()af=math.random()local ag=math.sqrt(-2*math.log(ae))local ah=2*math.pi*af;return ag*math.cos(ah),ag*math.sin(ah)end;function MathUtil.angleSSS(m,n,Q)if m+n<Q or m+Q<n or n+Q<m then return nil end;local ai=math.deg(math.acos((n*n+Q*Q-m*m)/(2*n*Q)))local aj,ak=MathUtil.angleSAS(n,ai,Q)return ai,aj,ak end;function MathUtil.sideSAS(m,ak,n)local al=m*m+n*n-2*m*n*math.cos(math.rad(ak))return math.sqrt(al)end;function MathUtil.angleSAS(m,ak,n)local Q=MathUtil.sideSAS(m,ak,n)if MathUtil.isZero(Q)then return nil end;local ai,aj;if m<n then ai=MathUtil.angleLoSin(Q,m,ak)aj=180-ai-ak else aj=MathUtil.angleLoSin(Q,n,ak)ai=180-aj-ak end;return ai,aj end;function MathUtil.sideSSA(m,n,ai)local am=n*n-m*m;local an=-2*n*math.cos(math.rad(ai))local ao,ap=MathUtil.solveQuadratic(1,an,am)if not ap then return ao,ap end;if ao<ap then return ao,ap end;return ap,ao end;function MathUtil.angleSSA(m,n,ai)local ao,ap=MathUtil.sideSSA(m,n,ai)if not ao then return nil end;local aq,ar=MathUtil.angleSAS(n,ai,ao)if not ap then return aq,ar end;local as,at=MathUtil.angleSAS(n,ai,ap)return aq,ar,as,at end;function MathUtil.sideAAS(ai,aj,m)local ak=180-ai-aj;local n=MathUtil.sideLoSin(ai,aj,m)local Q=MathUtil.sideLoSin(ai,ak,m)return n,Q end;function MathUtil.sideLoSin(m,ai,aj)return m*math.sin(math.rad(aj))/math.sin(math.rad(ai))end;function MathUtil.angleLoSin(m,n,ai)return math.deg(math.asin(n*math.sin(math.rad(ai))/m))end;function MathUtil.clampCone(au,av,aw)local ax=math.min(aw,Vector3.Angle(au,av))local ay=Vector3.Cross(au,av)return Quaternion.AngleAxis(ax,ay)*au end;function MathUtil.newton(az,aA,aB,aC,aD,aE)aC=aC or 1e-5;aE=aE or 10*aC;aD=aD or 25;aA=aA or function(aF)return(az(aF+aE)-az(aF))/aE end;aB=aB or 0;local aG=aC+1;local aH=0;while aG>aC and aH<aD do local aI=az(aB)local aJ=aA(aB)if not aI or not aJ then return nil end;aG=-aI/aJ;aB=aB+aG;aH=aH+1 end;if aH<aD then return aB,false end;return aB,true end;function MathUtil.ITP(az,m,n,aC,aD)if az(m)*az(n)>0 then return nil end;local aK;if az(m)>az(n)then aK=function(aF)return-az(aF)end else aK=az end;aC=aC or 1e-5;aD=aD or 25;local aL=0.2/(n-m)local aM=2;local aN=1;local aO=math.ceil(math.log((n-m)/(2*aC),2))local aP=aO+aN;local Y=0;while n-m>2*aC and Y<aD do local aQ=(m+n)/2;local aR=(n*az(m)-m*az(n))/(az(m)-az(n))local aS=aQ-aR;local aT=aL*math.abs(n-m)^aM;local aU=aS>0 and 1 or(aS==0 and 0 or-1)local aV=aT<=math.abs(aS)and aR+aU*aT or aQ;local aW=aC*2^(aP-Y)-(n-m)/2;local aX=math.abs(aV-aQ)<=aW and aV or aQ-aU*aW;local aY=az(aX)if aY>0 then n=aX elseif aY<0 then m=aX else m=aX;n=aX end;Y=Y+1 end;return(m+n)/2,Y==aD end;function MathUtil.binomCoeffs(aZ,a_)if a_ then coeffs={}else coeffs={}coeffs[1]=1;for _=1,aZ do coeffs[_+1]=coeffs[_]*(aZ-_)/(_+1)end;return coeffs end end;function MathUtil.ruleOfSigns(coeffs,b0)local b1={}local b2=#coeffs;for F=1,b2 do b1[F]=coeffs[b2-F+1]end;if b0~=0 then local b3={}for F=1,b2 do b3[F]=(F-1)*coeffs[b2-F+1]end;local b4=1;for F=2,b2 do local b5=b0^(F-1)for Y=1,b2-F+1 do local b6=F+Y-1;b1[Y]=b1[Y]+b4*b3[b6]*b5;b3[b6]=b3[b6]*(Y-1)end;b4=b4/F end end;local b7={}local o=1;for F,b8 in ipairs(b1)do if b8~=0 then b7[o]=b8;o=o+1 end end;local b9=0;for F=1,#b7-1 do if b7[F]*b7[F+1]<0 then b9=b9+1 end end;return b9 end;function MathUtil.cache(az)local Q={}local ba=getmetatable(Q)or{}function ba.__index(bb,aF)local C=az(aF)bb[aF]=C;return C end;setmetatable(Q,ba)return function(m)return Q[m]end end;function MathUtil.lerp(az,R,S,T,bc)local bd={}for F=1,math.floor((S-R)/T)+1 do bd[F]=az(R+F*T)end;bd.start=R;bd.stop=S;bd.step=T;bd.lval=bc and bd[1]or nil;bd.rval=bc and bd[#bd]or nil;return function(aF)if aF>=bd.stop then return bd.rval end;if aF<=bd.start then return bd.lval end;local F=(aF-bd.start)/bd.step;local be=F%1;F=math.floor(F)return(1-be)*bd[F]+be*bd[F+1]end end;function MathUtil._factorial(o)if o<2 then return 1 end;return MathUtil._factorial(o-1)end;MathUtil.factorial=MathUtil.cache(MathUtil._factorial)MathUtil.eps=1e-9;function MathUtil.isZero(h)return h>-MathUtil.eps and h<MathUtil.eps end;function MathUtil.setTolerance(aC)MathUtil.eps=aC end;function MathUtil.cuberoot(aF)return aF>0 and aF^(1/3)or-math.abs(aF)^(1/3)end;function MathUtil.solveQuadratic(bf,ao,ap)local bg,bh;local ac,bi,bj;ac=ao/(2*bf)bi=ap/bf;bj=ac*ac-bi;if MathUtil.isZero(bj)then bg=-ac;return bg elseif bj<0 then return else local bk=math.sqrt(bj)bg=bk-ac;bh=-bk-ac;return bg,bh end end;function MathUtil.solveCubic(bf,ao,ap,bl)local bg,bh,bm;local bn,bo;local ai,aj,ak;local bp,ac,bi;local bq,bj;ai=ao/bf;aj=ap/bf;ak=bl/bf;bp=ai*ai;ac=1/3*(-(1/3)*bp+aj)bi=0.5*(2/27*ai*bp-1/3*ai*aj+ak)bq=ac*ac*ac;bj=bi*bi+bq;if MathUtil.isZero(bj)then if MathUtil.isZero(bi)then bg=0;bn=1 else local br=MathUtil.cuberoot(-bi)bg=2*br;bh=-br;bn=2 end elseif bj<0 then local bs=1/3*math.acos(-bi/math.sqrt(-bq))local g=2*math.sqrt(-ac)bg=g*math.cos(bs)bh=-g*math.cos(bs+math.pi/3)bm=-g*math.cos(bs-math.pi/3)bn=3 else local bk=math.sqrt(bj)local br=MathUtil.cuberoot(bk-bi)local a0=-MathUtil.cuberoot(bk+bi)bg=br+a0;bn=1 end;bo=1/3*ai;if bn>0 then bg=bg-bo end;if bn>1 then bh=bh-bo end;if bn>2 then bm=bm-bo end;return bg,bh,bm end;function MathUtil.solveQuartic(bf,ao,ap,bl,bt)local bg,bh,bm,bu;local coeffs={}local a4,br,a0,bo;local ai,aj,ak,bj;local bp,ac,bi,ag;local bn=0;ai=ao/bf;aj=ap/bf;ak=bl/bf;bj=bt/bf;bp=ai*ai;ac=-0.375*bp+aj;bi=0.125*bp*ai-0.5*ai*aj+ak;ag=-(3/256)*bp*bp+0.0625*bp*aj-0.25*ai*ak+bj;if MathUtil.isZero(ag)then coeffs[3]=bi;coeffs[2]=ac;coeffs[1]=0;coeffs[0]=1;local bv={MathUtil.solveCubic(coeffs[0],coeffs[1],coeffs[2],coeffs[3])}bn=#bv;bg,bh,bm=bv[1],bv[2],bv[3]elseif MathUtil.isZero(bi)then local bw={MathUtil.solveQuadratic(1,ac,ag)}if bw[1]>=0 then bg=-math.sqrt(bw[1])bh=math.sqrt(bw[1])bn=2 end;if bw[2]>=0 then if bn==0 then bg=-math.sqrt(bw[2])bh=math.sqrt(bw[2])bn=2 else bm=-math.sqrt(bw[2])bu=math.sqrt(bw[2])bn=4 end end else coeffs[3]=0.5*ag*ac-0.125*bi*bi;coeffs[2]=-ag;coeffs[1]=-0.5*ac;coeffs[0]=1;bg,bh,bm=MathUtil.solveCubic(coeffs[0],coeffs[1],coeffs[2],coeffs[3])a4=bg;br=a4*a4-ag;a0=2*a4-ac;if MathUtil.isZero(br)then br=0 elseif br>0 then br=math.sqrt(br)else return end;if MathUtil.isZero(a0)then a0=0 elseif a0>0 then a0=math.sqrt(a0)else return end;coeffs[2]=a4-br;coeffs[1]=bi<0 and-a0 or a0;coeffs[0]=1;do local bv={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bn=#bv;bg,bh=bv[1],bv[2]end;coeffs[2]=a4+br;coeffs[1]=bi<0 and a0 or-a0;coeffs[0]=1;if bn==0 then local bv={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bn=bn+#bv;bg,bh=bv[1],bv[2]end;if bn==1 then local bv={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bn=bn+#bv;bh,bm=bv[1],bv[2]end;if bn==2 then local bv={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bn=bn+#bv;bm,bu=bv[1],bv[2]end end;bo=0.25*ai;if bn>0 then bg=bg-bo end;if bn>1 then bh=bh-bo end;if bn>2 then bm=bm-bo end;if bn>3 then bu=bu-bo end;return bg,bh,bm,bu end;function RingBuffer.RingBuffer(bx)local by={}by.buf={}by.capacity=bx;by.size=0;by.head=1;local ba=getmetatable(by)or{}ba.__index=RingBuffer.get;setmetatable(by,ba)return by end;function RingBuffer.isFull(by)return by.size>=by.capacity end;function RingBuffer.setSize(by,bz)by.size=bz end;function RingBuffer.push(by,d)by.buf[(by.head+by.size-1)%by.capacity+1]=d;if by.size==by.capacity then by.head=by.head%by.capacity+1 else by.size=by.size+1 end end;function RingBuffer.pop(by)if by.size==0 then return nil end;local C=by.buf[by.head]by.buf[by.head]=nil;by.head=by.head%by.capacity+1;by.size=by.size-1;return C end;function RingBuffer.get(by,p)if type(p)~="number"or math.floor(p)~=p then return nil end;if p<1 or p>by.size then return nil end;return by.buf[(by.head+p-2)%by.capacity+1]end;VectorN.mt=getmetatable({})or{}VectorN.mt.__add=function(m,n)local bA=type(m)=="number"local bB=type(n)=="number"if not bA and bB then return n+m end;if bA and not bB then return MathUtil.combine(m,n,function(_,aF,bC)return m+bC end)else return MathUtil.combine(m,n,function(_,aF,bC)return aF+bC end)end end;VectorN.mt.__sub=function(m,n)return m+-n end;VectorN.mt.__mul=function(m,n)local bA=type(m)=="number"local bB=type(n)=="number"if not bA and bB then return n*m end;if bA and not bB then local z={}for _,a0 in pairs(n)do z[_]=m*a0 end;return z else return MathUtil.combine(m,n,function(_,aF,bC)return aF*bC end)end end;VectorN.mt.__div=function(m,n)local bA=type(m)=="number"local bB=type(n)=="number"if not bA and bB then return m*1/n end;if bA and not bB then local z={}for _,a0 in pairs(n)do z[_]=m/a0 end;return z else return MathUtil.combine(m,n,function(_,aF,bC)return aF/bC end)end end;VectorN.mt.__unm=function(m)local z={}for _,a0 in pairs(m)do z[_]=-a0 end;return z end;function VectorN.VectorN(B)local bD={}for _,a0 in pairs(B)do if type(a0)=="table"then bD[_]=VectorN.VectorN(a0)else bD[_]=a0 end end;setmetatable(bD,VectorN.mt)return bD end;function Control.PID(bE,bF,bG,bH,bI,bJ)local bK={}bK.kP=bE;bK.kI=bF;bK.kD=bG;bK.Iacc=Accumulator.Accumulator(bH,bI)if bJ and bJ~=0 then bK.period=bJ end;return bK end;function Control.processPID(bL,bM,e)bM=bL.period and(bM+bL.period/2)%bL.period-bL.period/2 or bM;local ac=bL.kP*bM;local F,bN=bL.kI*Accumulator.update(bL.Iacc,bM,e)F=F/bN;local h=bL.kD*(bM-(bL.lastError or bM))/e;bL.lastError=bM;return ac+F+h end;function Control.FF(coeffs,bJ)local bO={}bO.coeffs=coeffs;bO.degree=#coeffs-1;if bJ and bJ~=0 then bO.period=bJ end;bO.derivs={}return bO end;function Control.processFF(bL,bP,e)local bQ=0*bP;local bR=bP;local bS=bP;for F=1,bL.degree+1 do bS=bL.derivs[F]bL.derivs[F]=bR;bQ=bQ+bL.coeffs[F]*bR;if bS then local aS=bR-bS;if F==1 and bL.period then aS=(aS+bL.period/2)%bL.period-bL.period/2 end;bR=aS/e else break end end;return bQ end;function Nav.toLocal(bT,bU,bV)local bW=bT-bU;return Quaternion.Inverse(bV)*bW end;function Nav.toGlobal(bX,bU,bV)local bW=bV*bX;return bW+bU end;function Nav.cartToPol(bY)local ag=bY.magnitude;local ah=Vector3.SignedAngle(Vector3.forward,bY,Vector3.up)local bs=90-Vector3.Angle(Vector3.up,bY)return Vector3(ag,ah,bs)end;function Nav.cartToCyl(bY)local bZ=Vector3(bY.x,0,bY.z)local b_=bZ.magnitude;local bs=Vector3.SignedAngle(Vector3.forward,bY,Vector3.up)local a4=bY.y;return Vector3(b_,bs,a4)end;function Nav.polToCart(bY)local ag,ah,bs=bY.x,bY.y,bY.z;local aF=Mathf.Sin(ah)*Mathf.Cos(bs)local bC=Mathf.Sin(bs)local a4=Mathf.Cos(ah)*Mathf.Cos(bs)return ag*Vector3(aF,bC,a4)end;function Nav.cylToCart(bY)local b_,bs,c0=bY.x,bY.y,bY.z;local aF=b_*Mathf.Sin(bs)local bC=c0;local a4=b_*Mathf.Cos(bs)return Vector3(aF,bC,a4)end;function Targeting.firstOrderTargeting(c1,c2,c3)local c4=c1-Vector3.Project(c1,c2)local c5=Vector3.Dot(c2,c1-c4)/c2.sqrMagnitude;local m,n=MathUtil.solveQuadratic(c5-c3*c3,2*c5,c4.sqrMagnitude+c5*c5)local c6=nil;if m and m>=0 then c6=m end;if n and n>=0 and n<m then c6=n end;return c6 and(c1+c6*c2).normalized or nil end;function Targeting.secondOrderTargeting(c1,c7,c8,c3,c9,ca)local m=-0.25*c8.sqrMagnitude;local n=-Vector3.Dot(c7,c8)local Q=-(c7.sqrMagnitude-c3*c3+Vector3.Dot(c1,c8))local h=-2*Vector3.Dot(c1,c7)local bM=-c1.sqrMagnitude;local g;local cb=c8.magnitude;local cc=c7.magnitude;local cd=c1.magnitude;local ce,cf=MathUtil.solveQuadratic(0.5*cb,cc+c3,-cd)local cg=math.max(ce,cf)local ch;local coeffs={0.5*cb,cc-c3,cd}if MathUtil.ruleOfSigns(coeffs,0)==2 then local ci,cj=MathUtil.solveQuadratic(coeffs[1],coeffs[2],coeffs[3])if ci then ch=math.min(ci,cj)end end;if not ch or ch<cg then local bg,bh,bm=MathUtil.solveCubic(4*m,3*n,2*Q,h)if not bm then if bg>cg then ch=bg end else local ci=math.min(bg,bm)local cj=math.max(bg,bm)if ci>cg then ch=ci elseif cj>cg then ch=cj end end;if not ch then return nil end end;local function ck(aF)return bM+aF*(h+aF*(Q+aF*(n+aF*m)))end;g=MathUtil.ITP(ck,cg,ch,1e-4,25)if not g then return nil end;local cl;if g and g>=cg and g<=ch then cl=c1/g+c7+0.5*c8*g end;if cl and cl.sqrMagnitude>=c9*c9 and cl.sqrMagnitude<=ca*ca then return cl,g end end;function Targeting.AIPPN(cm,c1,cn,c2,co)local c7=c2-cn;local cp=Vector3.Dot(-c7,c1.normalized)if cp<=0 then cp=10 end;local cq=c1.magnitude/cp;local cr=Vector3.Cross(c1,c7)/c1.sqrMagnitude;local cs=Vector3.Cross(c1,co)/c1.sqrMagnitude*cq/2;local ct=cr+cs;local cu=Vector3.Cross(ct,c1.normalized)local cv=Vector3.ProjectOnPlane(cu,cn).normalized;local cw=cm*cn.magnitude*ct.magnitude;return cw*cv end;function Targeting.ATPN(cm,c1,cn,c2,co)local c7=c2-cn;local cp=-Vector3.Dot(c7,c1.normalized)if cp<=0 then cp=10 end;local cr=Vector3.Cross(c1,c7)/c1.sqrMagnitude;local cu=Vector3.Cross(cr,c1.normalized)local cx=Vector3.ProjectOnPlane(co,c1)return cm*cp*cu+0.5*cm*co end;function BlockUtil.getWeaponsByName(cy,cz,b9,cA)if DEBUG then cy:Log("searching for "..cz)end;local cB=cy:GetAllSubConstructs()local cC={}b9=b9 or-1;local Q=b9;if not cA or cA==0 or cA==2 then for F=0,cy:GetWeaponCount()-1 do if Q==0 then break end;if cy:GetWeaponBlockInfo(F).CustomName==cz then table.insert(cC,{subIdx=nil,wpnIdx=F})if DEBUG then cy:Log("found weapon "..cz.." on hull, type "..cy:GetWeaponInfo(F).WeaponType)end;Q=Q-1 end end end;if not cA or cA==1 or cA==2 then for p=1,#cB do local bo=cB[p]for F=0,cy:GetWeaponCountOnSubConstruct(bo)-1 do if Q==0 then break end;if cy:GetWeaponBlockInfoOnSubConstruct(bo,F).CustomName==cz then table.insert(cC,{subIdx=bo,wpnIdx=F})if DEBUG then cy:Log("found weapon "..cz.." on subobj "..bo..", type "..cy:GetWeaponInfo(F).WeaponType)end;Q=Q-1 end end end end;if DEBUG then cy:Log("weapon count: "..#cC)end;return cC end;function BlockUtil.getSubConstructsByName(cy,cz,b9)if DEBUG then cy:Log("searching for "..cz)end;local cB=cy:GetAllSubConstructs()local cD={}b9=b9 or-1;local Q=b9;for p=1,#cB do local bo=cB[p]if Q==0 then break end;if cy:GetSubConstructInfo(bo).CustomName==cz then table.insert(cD,bo)if DEBUG then cy:Log("found subobj "..cz)end;Q=Q-1 end end;if DEBUG then cy:Log("subobj count: "..#cD)end;return cD end;function BlockUtil.getBlocksByName(cy,cz,type,b9)if DEBUG then cy:Log("searching for "..cz)end;local cE={}b9=b9 or-1;local Q=b9;for p=0,cy:Component_GetCount(type)-1 do if Q==0 then break end;if cy:Component_GetBlockInfo(type,p).CustomName==cz then table.insert(cE,p)if DEBUG then cy:Log("found component "..cz)end;Q=Q-1 end end;if DEBUG then cy:Log("component count: "..#cE)end;return cE end;function BlockUtil.getWeaponInfo(cy,cF)if cF.subIdx then return cy:GetWeaponInfoOnSubConstruct(cF.subIdx,cF.wpnIdx)end;return cy:GetWeaponInfo(cF.wpnIdx)end;function BlockUtil.getWeaponBlockInfo(cy,cF)if cF.subIdx then return cy:GetWeaponBlockInfoOnSubConstruct(cF.subIdx,cF.wpnIdx)end;return cy:GetWeaponBlockInfo(cF.wpnIdx)end;function BlockUtil.aimWeapon(cy,cF,cG,cH)if cF.subIdx then cy:AimWeaponInDirectionOnSubConstruct(cF.subIdx,cF.wpnIdx,cG.x,cG.y,cG.z,cH)else cy:AimWeaponInDirection(cF.wpnIdx,cG.x,cG.y,cG.z,cH)end end;function BlockUtil.fireWeapon(cy,cF,cH)if cF.subIdx then return cy:FireWeaponOnSubConstruct(cF.subIdx,cF.wpnIdx,cH)end;return cy:FireWeapon(cF.wpnIdx,cH)end;function Combat.pickTarget(cy,cI,cJ)cJ=cJ or function(U,cK)return cK.Priority end;local bP,cL;for F in MathUtil.range(cy:GetNumberOfTargets(cI))do local cK=cy:GetTargetInfo(cI,F)local cM=cJ(cy,cK)if not bP or cM>cL then bP=cK;cL=cM end end;return bP end;function Combat.CheckConstraints(cy,cN,cO,cP)local cQ;if cP then cQ=cy:GetWeaponConstraintsOnSubConstruct(cP,cO)else cQ=cy:GetWeaponConstraints(cO)end;local cR=cy:GetConstructForwardVector()local cS=cy:GetConstructUpVector()local cT=Quaternion.LookRotation(cR,cS)cN=Quaternion.Inverse(cT)*cN;if cQ.InParentConstructSpace and cP then local cU=cy:GetSubConstructInfo(cP).localRotation;cN=Quaternion.inverse(cU)*cN end;local cV=MathUtil.angleOnPlane(Vector3.forward,cN,Vector3.up)local cW=cN;cW.z=0;local O=Mathf.Atan2(cN.z,cW.magnitude)local cX=cV>cQ.MinAzimuth and cV<cQ.MaxAzimuth;local cY=O>cQ.MinElevation and O<cQ.MaxElevation;if cQ.FlipAzimuth then cX=not cX end;if cX and cY then return true end;cV=cV+180;O=180-O;if O>180 then O=O-360 end;if O<-180 then O=O+360 end;cX=cV>cQ.MinAzimuth and cV<cQ.MaxAzimuth;cY=O>cQ.MinElevation and O<cQ.MaxElevation;if cQ.FlipAzimuth then cX=not cX end;if cX and cY then return true end;return false end;function StringUtil.LogVector(cy,bD,cZ)cy:Log(cZ.."("..bD.x..", "..bD.y..", "..bD.z..")")end

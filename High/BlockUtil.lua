@@ -121,16 +121,31 @@ end
     info - the weapon info for the specified weapon
 ]]--
 function BlockUtil.getWeaponInfo(I, weapon)
-  local info
   if weapon.subIdx then
-    info = I:GetWeaponInfoOnSubConstruct(weapon.subIdx, weapon.wpnIdx)
-  else
-    info = I:GetWeaponInfo(weapon.wpnIdx)
+    return I:GetWeaponInfoOnSubConstruct(weapon.subIdx, weapon.wpnIdx)
   end
-  return info
+  return I:GetWeaponInfo(weapon.wpnIdx)
 end
 
--- See getWeaponInfo for arguments
+--[[
+  Arguments:
+    see getWeaponInfo
+  Returns:
+    weaponBlockInfo - the BlockInfo corresponding to the weapon
+]]--
+function BlockUtil.getWeaponBlockInfo(I, weapon)
+  if weapon.subIdx then
+    return I:GetWeaponBlockInfoOnSubConstruct(weapon.subIdx, weapon.wpnIdx)
+  end
+  return I:GetWeaponBlockInfo(weapon.wpnIdx)
+end
+
+--[[
+  Arguments:
+    I, weapon - see getWeaponInfo
+    dir - the direction to aim in as a Vector3 in world space
+    slot - the weapon slot to control
+]]--
 function BlockUtil.aimWeapon(I, weapon, dir, slot)
   if weapon.subIdx then
     I:AimWeaponInDirectionOnSubConstruct(weapon.subIdx, weapon.wpnIdx, dir.x, dir.y, dir.z, slot)
@@ -139,11 +154,15 @@ function BlockUtil.aimWeapon(I, weapon, dir, slot)
   end
 end
 
--- See getWeaponInfo for arguments
+--[[
+  Arguments:
+    I, weapon, slot - see aimWeapon
+  Returns:
+    fired - whether the weapon fired or not
+]]--
 function BlockUtil.fireWeapon(I, weapon, slot)
   if weapon.subIdx then
-    I:FireWeaponOnSubConstruct(weapon.subIdx, weapon.wpnIdx, slot)
-  else
-    I:FireWeapon(weapon.wpnIdx, slot)
+    return I:FireWeaponOnSubConstruct(weapon.subIdx, weapon.wpnIdx, slot)
   end
+  return I:FireWeapon(weapon.wpnIdx, slot)
 end

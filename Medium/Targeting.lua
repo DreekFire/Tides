@@ -54,7 +54,9 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   local coeffs = {0.5 * g, v_T - muzzle, d_0}
   if MathUtil.ruleOfSigns(coeffs, 0) == 2 then
     local t2a, t2b = MathUtil.solveQuadratic(coeffs[1], coeffs[2], coeffs[3])
-    t2 = math.min(t2a, t2b)
+    if t2a then
+      t2 = math.min(t2a, t2b)
+    end
   end
   if not t2 or t2 < t1 then
     local s0, s1, s2 = MathUtil.solveCubic(4 * a, 3 * b, 2 * c, d)
@@ -82,8 +84,9 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   end
   t = MathUtil.ITP(poly, t1, t2, 1e-4, 25)
 
+  if not t then return nil end
   local intercept
-  if t and t >= t1 then
+  if t and t >= t1 and t <= t2 then
     intercept = relPos / t + relVel + 0.5 * accel * t
   end
   if intercept and intercept.sqrMagnitude >= minRange * minRange and intercept.sqrMagnitude <= maxRange * maxRange then

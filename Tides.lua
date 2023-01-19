@@ -84,6 +84,7 @@ end
 function Accumulator.get(acc)
   return acc.value, acc.weight
 end
+
 -- Differ is short for differencer and is the discrete time equivalent of taking the derivative
 
 --[[
@@ -134,6 +135,7 @@ end
 function Differ.get(differ)
   return differ.diff
 end
+
 --[[
 WIP
 function Graph.Graph()
@@ -143,6 +145,91 @@ function Graph.Graph()
   return g
 end
 ]]--
+
+-- A priority queue is a data structure which retrieves the smallest (or largest) value stored
+-- A heap priority queue is a commonly used efficient implementation of a priority queue
+-- These functions implement a min-heap, which retrieves the smallest value
+-- If you need the largest one, you can just store the negative of the values or provide a custom comparator
+
+function Heapq.Heapq(initial, comparator)
+  local heapq = {}
+  heapq.data = initial
+  heapq.comp = comparator or function(a, b)
+    return a < b
+  end
+  local n = #heapq.data
+  heapq.size = n
+  for idx = math.floor(n / 2), 1, -1 do
+    Heapq.siftDown(heapq, idx)
+  end
+  return heapq
+end
+
+function Heapq.siftDown(heapq, position)
+  local heaped = false
+  local s = position
+  local n = #heapq.data
+  while not heaped do
+    heaped = true
+    local left = 2 * s
+    local right = 2 * s + 1
+    local argmin = s
+    if left <= n and heapq.comp(heapq.data[left], heapq.data[argmin]) then
+      argmin = left
+      heaped = false
+    end
+    if right <= n and heapq.comp(heapq.data[right], heapq.data[argmin]) then
+      argmin = right
+      heaped = false
+    end
+    if not heaped then
+      local swap = heapq.data[argmin]
+      heapq.data[argmin] = heapq.data[s]
+      heapq.data[s] = swap
+      s = argmin
+    end
+  end
+end
+
+function Heapq.siftUp(heapq, position)
+  local heaped = false
+  local s = position
+  while not heaped do
+    heaped = true
+    local parent = math.floor(s / 2)
+    if heapq.comp(heapq.data[s], heapq.data[parent]) then
+      local swap = heapq.data[parent]
+      heapq.data[parent] = heapq.data[s]
+      heapq.data[s] = swap
+      s = parent
+      heaped = false
+    end
+  end
+end
+
+function Heapq.insert(heapq, item)
+  heapq.data[heapq.size + 1] = item
+  heapq.size = heapq.size + 1
+  Heapq.siftUp(heapq, heapq.size)
+end
+
+function Heapq.pop(heapq)
+  local res = heapq.data[1]
+  heapq.data[1] = heapq.data[heapq.size]
+  heapq.data[heapq.size] = nil
+  heapq.size = heapq.size - 1
+  Heapq.siftDown(heapq, 1)
+  return res
+end
+
+function Heapq.peek(heapq)
+  return heapq.data[1]
+end
+
+function Heapq.size(heapq)
+  return heapq.size
+end
+
 -- A LinkedList is a chain of elements where each element contains a reference to the next one in the list.
 -- This is a doubly linked list so each element also contains a reference to the previous element.
 
@@ -216,6 +303,7 @@ function LinkedList.toArray(lst)
   end
   return arr
 end
+
 --[[
   Arguments:
     from - a vector
@@ -314,12 +402,15 @@ end
   lst must not have holes (nil values followed by non-nil).
   Arguments:
     lst - list to shuffle
+    inplace - whether to shuffle lst or create a copy
   Returns:
     s - shuffled list
 --]]
-function MathUtil.shuffle(lst)
-  local s = {}
-  for i = 1, #lst do s[i] = lst[i] end
+function MathUtil.shuffle(lst, inplace)
+  local s = inplace and lst or {}
+  if not inplace then
+    for i = 1, #lst do s[i] = lst[i] end
+  end
   for i = #lst, 2, -1 do
     local j = math.random(i)
     s[i], s[j] = s[j], s[i]
@@ -589,13 +680,6 @@ function MathUtil.clampCone(v1, v2, angle)
 end
 
 --[[
-  WIP
-]]
-function MathUtil.fourier(data)
-  return "Work in progress"
-end
-
---[[
   Arguments:
     fn - the function to find the roots of
            must be scalar valued and take one scalar input
@@ -662,10 +746,13 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
   if fn(a) * fn(b) > 0 then
     return nil
   end
+  local rfn
   if fn(a) > fn(b) then
-    fn = function(x)
+    rfn = function(x)
       return -fn(x)
     end
+  else
+    rfn = fn
   end
   eps = eps or 1e-5
   iterlimit = iterlimit or 25
@@ -712,7 +799,7 @@ end
 function MathUtil.binomCoeffs(depth, calc_all)
   if calc_all then
     coeffs = {}
-
+    -- WIP
   else
     coeffs = {}
     coeffs[1] = 1
@@ -779,30 +866,78 @@ function MathUtil.ruleOfSigns(coeffs, offset)
   return count
 end
 
-function MathUtil._factorial(cache, n)
-  -- get highest cached value
-  -- using size instead of #cache because # is O(log n)
-  local val = cache[cache.size]
-
-  for i = cache.size + 1, n do
-    val = val * i
-    cache[i] = val
+function MathUtil.cache(fn)
+  local c = {}
+  local mt = getmetatable(c) or {}
+  function mt.__index(tab, x)
+    local val = fn(x)
+    tab[x] = val
+    return val
   end
-  cache.size = n
-  return val
+  setmetatable(c, mt)
+  return function(a)
+    return c[a]
+  end
 end
 
--- todo: create cache disable and general caching functionality
--- we use a special cache for factorials because we're caching intermediate results
-MathUtil._factorialCache = {1, size=1}
-
-MathUtil._factorialMt = getmetatable(MathUtil._factorialCache) or {}
-MathUtil._factorialMt.__index = MathUtil._factorial
-setmetatable(MathUtil._factorialCache, MathUtil._factorialMt)
-
-function MathUtil.factorial(n)
-  return Mathutil._factorialCache[n]
+function MathUtil.lerp(fn, start, stop, step, extrap)
+  local vals = {}
+  for i=1, math.floor((stop - start) / step) + 1 do
+    vals[i] = fn(start + i * step)
+  end
+  vals.start = start
+  vals.stop = stop
+  vals.step = step
+  vals.lval = extrap and vals[1] or nil
+  vals.rval = extrap and vals[#vals] or nil
+  return function(x)
+    if x >= vals.stop then return vals.rval end
+    if x <= vals.start then return vals.lval end
+    local i = (x - vals.start) / vals.step
+    local fac = i % 1
+    i = math.floor(i)
+    return (1 - fac) * vals[i] + fac * vals[i + 1]
+  end
 end
+
+function MathUtil._factorial(n)
+  if n < 2 then return 1 end
+  return MathUtil._factorial(n - 1)
+end
+
+MathUtil.factorial = MathUtil.cache(MathUtil._factorial)
+
+--[[
+function MathUtil.rfft(data, lerp)
+  local cosLerp
+  if lerp == nil then
+    lerp = 0.05
+  elseif type(lerp) == "function" then
+    cosLerp = lerp
+  else
+    cosLerp = MathUtil.lerp(function(x) return math.cos(x * math.pi) end, 0, 2, lerp)
+  end
+  local n = #data
+  if data % 2 == 0 and n > 32 then
+    local ldata = {}
+    local rdata = {}
+    local lres = MathUtil.rfft(ldata, cosLerp)
+    local rres = MathUtil.rfft(rdata, cosLerp)
+    -- WIP
+  else
+    local res = {}
+    for w=1, n do
+      res[w] = 0
+    end
+    for i=1, n do
+      for w=1, n do
+        local theta = (((w - 1) * (i - 1)) / n) % 2
+        res[w] = res[w] + data[i] * cosLerp(theta)
+      end
+    end
+  end
+end
+--]]
 
 -- code from lua-polynomials by piqey (John Kushmer) on github
 -- modified to fix a missed branch in solveQuartic
@@ -834,7 +969,7 @@ function MathUtil.solveQuadratic(c0, c1, c2)
 
   local p, q, D
 
-  -- x^2 + px + q = 0
+  -- x^2 + 2px + q = 0
   p = c1 / (2 * c0)
   q = c2 / c0
 
@@ -1054,6 +1189,7 @@ function MathUtil.solveQuartic(c0, c1, c2, c3, c4)
 
   return s0, s1, s2, s3
 end
+
 --[[
   A ringbuffer is an efficient FIFO buffer in the form of a circular
   array. This allows for fast removal from the ends (though the
@@ -1112,6 +1248,7 @@ function RingBuffer.get(rb, idx)
   if idx < 1 or idx > rb.size then return nil end
   return rb.buf[(rb.head + idx - 2) % rb.capacity + 1]
 end
+
 VectorN.mt = getmetatable({}) or {}
 VectorN.mt.__add = function(a, b)
   local aInt = type(a) == "number"
@@ -1178,6 +1315,7 @@ function VectorN.VectorN(lst)
   setmetatable(vec, VectorN.mt)
   return vec
 end
+
 -- dependencies: Accumulator, LinkedList
 
 function Control.PID(kP, kI, kD, IDecay, IWindow, period)
@@ -1235,6 +1373,7 @@ function Control.processFF(ctrl, target, time)
   end
   return response
 end
+
 --[[
   Arguments:
     gCoords - a point in global coordinates
@@ -1316,6 +1455,8 @@ function Nav.visGraph()
 
 end
 --]]
+
+
 -- dependencies: MathUtil
 
 -- Returns the direction in which the weapon should fire to hit a target
@@ -1372,7 +1513,9 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   local coeffs = {0.5 * g, v_T - muzzle, d_0}
   if MathUtil.ruleOfSigns(coeffs, 0) == 2 then
     local t2a, t2b = MathUtil.solveQuadratic(coeffs[1], coeffs[2], coeffs[3])
-    t2 = math.min(t2a, t2b)
+    if t2a then
+      t2 = math.min(t2a, t2b)
+    end
   end
   if not t2 or t2 < t1 then
     local s0, s1, s2 = MathUtil.solveCubic(4 * a, 3 * b, 2 * c, d)
@@ -1400,8 +1543,9 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   end
   t = MathUtil.ITP(poly, t1, t2, 1e-4, 25)
 
+  if not t then return nil end
   local intercept
-  if t and t >= t1 then
+  if t and t >= t1 and t <= t2 then
     intercept = relPos / t + relVel + 0.5 * accel * t
   end
   if intercept and intercept.sqrMagnitude >= minRange * minRange and intercept.sqrMagnitude <= maxRange * maxRange then
@@ -1462,6 +1606,7 @@ function Targeting.ATPN(gain, relPos, missileVel, targetVel, targetAccel)
 
   return gain * closingRate * losMotion + 0.5 * gain * targetAccel
 end
+
 --[[
   Arguments:
     I - the variable passed to Update
@@ -1585,16 +1730,31 @@ end
     info - the weapon info for the specified weapon
 ]]--
 function BlockUtil.getWeaponInfo(I, weapon)
-  local info
   if weapon.subIdx then
-    info = I:GetWeaponInfoOnSubConstruct(weapon.subIdx, weapon.wpnIdx)
-  else
-    info = I:GetWeaponInfo(weapon.wpnIdx)
+    return I:GetWeaponInfoOnSubConstruct(weapon.subIdx, weapon.wpnIdx)
   end
-  return info
+  return I:GetWeaponInfo(weapon.wpnIdx)
 end
 
--- See getWeaponInfo for arguments
+--[[
+  Arguments:
+    see getWeaponInfo
+  Returns:
+    weaponBlockInfo - the BlockInfo corresponding to the weapon
+]]--
+function BlockUtil.getWeaponBlockInfo(I, weapon)
+  if weapon.subIdx then
+    return I:GetWeaponBlockInfoOnSubConstruct(weapon.subIdx, weapon.wpnIdx)
+  end
+  return I:GetWeaponBlockInfo(weapon.wpnIdx)
+end
+
+--[[
+  Arguments:
+    I, weapon - see getWeaponInfo
+    dir - the direction to aim in as a Vector3 in world space
+    slot - the weapon slot to control
+]]--
 function BlockUtil.aimWeapon(I, weapon, dir, slot)
   if weapon.subIdx then
     I:AimWeaponInDirectionOnSubConstruct(weapon.subIdx, weapon.wpnIdx, dir.x, dir.y, dir.z, slot)
@@ -1603,14 +1763,19 @@ function BlockUtil.aimWeapon(I, weapon, dir, slot)
   end
 end
 
--- See getWeaponInfo for arguments
+--[[
+  Arguments:
+    I, weapon, slot - see aimWeapon
+  Returns:
+    fired - whether the weapon fired or not
+]]--
 function BlockUtil.fireWeapon(I, weapon, slot)
   if weapon.subIdx then
-    I:FireWeaponOnSubConstruct(weapon.subIdx, weapon.wpnIdx, slot)
-  else
-    I:FireWeapon(weapon.wpnIdx, slot)
+    return I:FireWeaponOnSubConstruct(weapon.subIdx, weapon.wpnIdx, slot)
   end
+  return I:FireWeapon(weapon.wpnIdx, slot)
 end
+
 --[[
   Arguments:
     I - the variable passed to Update
@@ -1681,6 +1846,7 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   if aziValid and eleValid then return true end
   return false
 end
+
 function StringUtil.LogVector(I, vec, label)
   I:Log(label.."("..vec.x..", "..vec.y..", "..vec.z..")")
 end
