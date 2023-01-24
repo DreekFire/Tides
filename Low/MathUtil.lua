@@ -442,11 +442,9 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
   end
   local rfn
   if fn(a) > fn(b) then
-    rfn = function(x)
+    fn = function(x)
       return -fn(x)
     end
-  else
-    rfn = fn
   end
   eps = eps or 1e-5
   iterlimit = iterlimit or 25
@@ -461,8 +459,11 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
   local j = 0
   while b - a > 2 * eps and j < iterlimit do
     -- Interpolate (I)
-    local x_bisect = (a + b) / 2
-    local x_falsi = (b * fn(a) - a * fn(b)) / (fn(a) - fn(b))
+    local x_bisect = 0.5 * (a + b)
+    local base = fn(a) - fn(b)
+    if base == 0 then return a end
+    local x_falsi = (b * fn(a) - a * fn(b)) / base
+
 
     -- Truncate (T)
     local diff = x_bisect - x_falsi
@@ -471,7 +472,7 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
     local x_t = delta <= math.abs(diff) and x_falsi + sigma * delta or x_bisect
 
     -- Project (P)
-    local rho_k = eps * 2 ^ (n_max - j) - (b - a) / 2
+    local rho_k = eps * 2 ^ (n_max - j) - 0.5 * (b - a)
     local x_p = math.abs(x_t - x_bisect) <= rho_k and x_t or x_bisect - sigma * rho_k
 
     -- Update
@@ -486,7 +487,9 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
     end
     j = j + 1
   end
-  return (a + b) / 2, j == iterlimit
+  local base = (fn(a) - fn(b))
+  if base ~= 0 then return (b * fn(a) - a * fn(b)) / base, j == iterlimit end
+  return a, j == iterlimit
 end
 
 -- thanks to Ribtoks and Frédéric van der Plancke on StackOverflow for algorithm

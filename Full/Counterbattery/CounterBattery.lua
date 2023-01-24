@@ -49,6 +49,18 @@ local validACBRequire = 0
   -- this is unavoidable in the case of blocks being destroyed, but can be avoided
   -- in the case of the timer switching blocks. Todo: manage switch times to avoid
   -- synchronized aimpoint switching
+
+-- custom axis containing stability value (pass using breadboard)
+local stabilityAxisName = "Stability"
+-- will fire if any are true, set to 0 to ignore
+-- will fire if stability exceeds this value
+local minStabilityToFire = 0.87
+-- will fire if stability exceeds the average stability
+  -- calculated by an exponential filter with time constant of stabilityAveragingTime
+local stabilityAvgTime = 3
+-- will fire if stability is the highest its been in this many seconds
+local stabilityMaxTime = 1
+
 local aimPointTrackers = {
   { idx = 1 },
   { idx = 2 },
@@ -128,6 +140,7 @@ local TICKS_PER_S = 40
 local lastProjectilePos
 local enemies
 local currentLine
+local frameTime
 local lastFrameTime
 local inited
 local prevTime
@@ -139,6 +152,8 @@ local lastAim
 local nextRecordTime
 local trackLossTime = 0
 local continueLine = false
+local stabilityAvg = 1
+local stabilityWindow
 local turrets = {}
 
 local BlockUtil = {}
@@ -160,14 +175,18 @@ local Targeting = {}
 function Init(I)
   for idx, weapon in ipairs(weaponDef) do
     turrets[idx] = BlockUtil.getWeaponsByName(I, weapon.name)
-    for acbIdx, acb in ipairs(weapon.checkACBs) do
-      acb.turretSub = BlockUtil.getSubConstructsByName(I, acb.turretName, 1)[1]
-      acb.turret = BlockUtil.getWeaponsByName(I, acb.turretName, 1)[1]
-    end
+  end
+
+  for acbIdx, acb in ipairs(checkACBs) do
+    acb.turretSub = BlockUtil.getSubConstructsByName(I, acb.turretName, 1)[1]
+    acb.turret = BlockUtil.getWeaponsByName(I, acb.turretName, 1)[1]
   end
 
   nextRecordTime = I:GetTimeSinceSpawn()
   enemies = {}
+  if stabilityMaxTime > 0 then
+    stabilityWindow = RingBuffer.RingBuffer(TICKS_PER_S * stabilityMaxTime)
+  end
   math.randomseed(I:GetTime())
   math.random()
   math.random()
@@ -179,7 +198,7 @@ end
 function Update(I)
   I:ClearLogs()
   I:Log(string.format("Game Time: %.2f", I:GetTimeSinceSpawn()))
-  I:Log("Total rotation track loss time: %.3f", trackLossTime)
+  I:Log(string.format("Total rotation track loss time: %.3f", trackLossTime))
   if AllowErrorRecovery then
     ProtectedUpdate(I)
   else
@@ -208,11 +227,24 @@ function CoreUpdate(I)
 
   if t >= nextRecordTime - 0.5 / TICKS_PER_S then
     UpdateEnemyData(I)
+    local stability = I:GetCustomAxis(stabilityAxisName)
+    if stability then
+      I:Log("Current stability: "..stability)
+      if stabilityAvgTime > 0 then
+        stabilityAvg = (1 - 1 / stabilityAvgTime) * stabilityAvg + (1 / stabilityAvgTime) * stability
+      end
+      if stabilityMaxTime > 0 then
+        while stabilityWindow.size > 0 and RingBuffer.get(stabilityWindow, stabilityWindow.size) <= stability do
+          RingBuffer.pop(stabilityWindow)
+        end
+        RingBuffer.push(stabilityWindow, stability)
+      end
+    end
     nextRecordTime = nextRecordTime + 1 / TICKS_PER_S
   end
   currentTargetId = target.Id
 
-  local frameTime = lastFrameTime and t - lastFrameTime or 0
+  frameTime = lastFrameTime and t - lastFrameTime or 0
   lastFrameTime = t
   -- calculate projectile location
   local alt = 800 * I:GetPropulsionRequest(9) -- A axis, set in projectile avoidance routine
@@ -269,7 +301,7 @@ function CoreUpdate(I)
   -- is the negative of the drop due to gravity
   local eps = 10 * frameTime * frameTime
   -- todo: maybe limit how often the line tracing runs to save processing power
-  if lastProjectilePos and currentLine and CheckAndUpdateLine(I, currentLine, projectile, frameTime, eps) then
+  if lastProjectilePos and currentLine and CheckAndUpdateLine(I, currentLine, projectile, eps) then
     if not continueLine then
       local enemy = enemies[currentTargetId]
       local origin = GetOrigin(I, currentLine, enemy)
@@ -284,14 +316,14 @@ function CoreUpdate(I)
       local start = lastProjectilePos
       currentLine = {
         start = start,
-        tStart = t - 1 / TICKS_PER_S,
-        ed = projectile
+        tStart = t - frameTime,
+        ed = projectile,
       }
       currentLine.dv = -frameTime * I:GetGravityForAltitude(start.y).y
       currentLine.dy = frameTime * currentLine.dv
       currentLine.ds = projectile + currentLine.dy * Vector3.up - start
       currentLine.dt = frameTime
-      currentLine.ev = (projectile - start) / frameTime
+      currentLine.ev = projectile - start
       prevTime = nil
     end
   end
@@ -299,6 +331,7 @@ function CoreUpdate(I)
   lastProjectilePos = projectile
 
   -- fire weapon at origins
+  if I:GetAIFiringMode(mainframeIdx) == "off" then return end
   local enemy = enemies[currentTargetId]
   local eRot = enemy.rotation[enemy.rotation.size] or Quaternion.identity
   local origin, fp
@@ -310,19 +343,26 @@ function CoreUpdate(I)
       RingBuffer.pop(enemy.origins)
       originPopTime = t
     end
-    if enemy.origins.size > 0 then
-      lastOrigin = enemy.origins[math.random(1, enemy.origins.size)]
-      local originAlt = (eRot * lastOrigin.position).y + target.Position.y
+    if enemy.origins.size == 0 then
+      I:Log("No origins found.")
+    else
+      local candidate = enemy.origins[math.random(1, enemy.origins.size)]
+      local originAlt = (eRot * candidate.position).y + target.Position.y
       if originAlt < minAlt or originAlt > maxAlt then
         -- do a linear search to find valid origin
         for i = 1, enemy.origins.size do
-          lastOrigin = enemy.origins[i]
-          originAlt = (eRot * lastOrigin.position).y + target.Position.y
-          if originAlt.y > minAlt and originAlt.y < maxAlt then
-            origin = lastOrigin
+          candidate = enemy.origins[i]
+          originAlt = (eRot * candidate.position).y + target.Position.y
+          if originAlt > minAlt and originAlt < maxAlt then
+            origin = candidate
             break
           end
         end
+        if not origin then
+          I:Log("No origin in bounds.")
+        end
+      else
+        origin = candidate
       end
     end
     lastOriginSwitchTime = t
@@ -330,6 +370,7 @@ function CoreUpdate(I)
   lastOrigin = origin
 
   if origin then
+    I:Log("Aiming at origin")
     fp = eRot * origin.position + aimOffset(origin, target.Position, target.Velocity, eRot, true)
     -- check ACBs for object presence
     local valid = 0
@@ -350,9 +391,13 @@ function CoreUpdate(I)
     end
     if valid < validACBRequire or score < checkACBRequire * valid then
       fp = nil
+      I:Log(string.format("Origin ACB check failed: score %.2f of %.2f required with %d valid ACBs of %d required", score, checkACBRequire * valid, valid, validACBRequire))
+    else
+      I:Log("Origin ACB check passed")
     end
   end
   if not fp then
+    I:Log("Aiming at AI aimpoint")
     fp = target.AimPointPosition - target.Position
     fp = fp + aimOffset(fp, target.Position, target.Velocity, eRot, false)
   end
@@ -392,6 +437,15 @@ function CoreUpdate(I)
             BlockUtil.aimWeapon(I, weapon, aim, 0)
             if fire and Vector3.Angle(wInfo.CurrentDirection, aim) < AIM_TOL then
               BlockUtil.fireWeapon(I, weapon, 0)
+              local stability = I:GetCustomAxis(stabilityAxisName)
+              if stability and ((minStabilityToFire > 0 and stability >= minStabilityToFire) or stability >= stabilityAvg or stabilityWindow.size == 1) then
+                I:Log("Fire!")
+                BlockUtil.fireWeapon(I, weapon, 0)
+              else
+                I:Log("Holding fire for stability.")
+              end
+            else
+              I:Log("Holding fire for aim.")
             end
           end
         end
@@ -463,7 +517,7 @@ function GetOrigin(I, line, enemy)
   if prevTime and RingBuffer.isFull(enemy.pos) then
     prevTime = prevTime - 1
   end
-  local relVel = line.ev - enemy.vel[enemy.vel.size]
+  local relVel = line.ev / frameTime - enemy.vel[enemy.vel.size]
   local relPos = line.ed - enemy.pos[enemy.pos.size]
   local time2d = math.sqrt((relPos.x ^ 2 + relPos.z ^ 2) / (relVel.x ^ 2 + relVel.z ^2))
   local g = I:GetGravityForAltitude(currentLine.start.y)
@@ -471,7 +525,7 @@ function GetOrigin(I, line, enemy)
   -- todo: adjust threshold based on enemy size, also penalize vertical error greater than horizontal
   if estimate2d.sqrMagnitude < 150 * 150 then
     local t = I:GetTimeSinceSpawn()
-    local launchPos, launchTime = CheckIfCram(line.ed, line.ev, enemy.pos[enemy.pos.size], enemy.vel[enemy.vel.size], 150)
+    local launchPos, launchTime = CheckIfCram(line.ed, line.ev / frameTime, enemy.pos[enemy.pos.size], enemy.vel[enemy.vel.size], 150)
     if launchPos then
       I:Log("Projectile determined to be CRAM shell, fired "..launchTime.." seconds ago")
       local pIdx = enemy.pos.size + launchTime * TICKS_PER_S
@@ -485,7 +539,7 @@ function GetOrigin(I, line, enemy)
         local origin = {
           position = Quaternion.Inverse(enemyRotAtTime) * (launchPos - enemyPosAtTime),
           time = t + launchTime,
-          relVel = line.ev + g * launchTime - enemy.vel[pIdx],
+          relVel = line.ev / frameTime + g * launchTime - enemy.vel[pIdx],
           detectTime = t,
           detectPos = line.ed,
           type = 1,
@@ -506,7 +560,7 @@ function GetOrigin(I, line, enemy)
         local origin = {
           position = Quaternion.Inverse(enemy.rotation[closestTimeIdx]) * closest,
           time = t + (closestTimeIdx - enemy.pos.size) / TICKS_PER_S,
-          relVel = line.ev + g * t - enemy.vel[closestTimeIdx],
+          relVel = line.ev / frameTime + g * t - enemy.vel[closestTimeIdx],
           detectTime = t,
           detectPos = line.ed,
           type = 0,
@@ -519,7 +573,7 @@ end
 
 function GetRotation(oldPts, newPts, iterLim)
   local nTrack = #newPts
-  iterLim = iterLim or 10
+  iterLim = iterLim or 25
 
   local indices = {}
   for i=1, nTrack do
@@ -620,7 +674,8 @@ function GetCramLaunchTime(vel, muzzle)
   return (vel.y - yvel) / 9.81, (vel.y + yvel) / 9.81
 end
 
-function CheckAndUpdateLine(I, line, projectile, frameTime, tolerance)
+function CheckAndUpdateLine(I, line, projectile, tolerance)
+  -- the theoretical equation has a 0.5 before the quadratic term, but discrete integration results in no 0.5
   local expected = line.ed + line.ev + frameTime * frameTime * I:GetGravityForAltitude(line.ed.y)
   local dv = line.dv - frameTime * I:GetGravityForAltitude(line.ed.y).y
   local dy = line.dy + frameTime * line.dv
@@ -629,7 +684,7 @@ function CheckAndUpdateLine(I, line, projectile, frameTime, tolerance)
     line.dv = dv
     line.dy = dy
     line.dt = I:GetTimeSinceSpawn() - line.tStart
-    line.ev = (projectile - line.ed) * TICKS_PER_S
+    line.ev = projectile - line.ed
     line.ed = projectile
     return true
   end
@@ -750,4 +805,4 @@ function SqrDistance(I, line, targetAbsPos, targetAbsVel, t)
 end
 
 -- minified version of Tides library (not meant to be human-readable, see Tides.lua or individual class files for human-readable source)
-function Accumulator.Accumulator(a,b)local c={}c.decay=b;c.window=a;c.time=0;c.weight=0;if a>0 then c.vals=LinkedList.LinkedList()c.times=LinkedList.LinkedList()end;return c end;function Accumulator.update(c,d,e)local f=Mathf.Pow(c.decay,e)if not c.value then c.value=d*e else c.value=c.value*f;c.value=c.value+d*e end;c.time=c.time+e;c.weight=c.weight*f;c.weight=c.weight+e;if c.window>0 then LinkedList.pushFront(c.vals,d)LinkedList.pushFront(c.times,e)while c.time>c.window do local g=LinkedList.popBack(c.times)c.time=c.time-g;local h=Mathf.Pow(c.decay,c.time)c.weight=c.weight-g*h;c.value=c.value-LinkedList.popBack(c.vals)*g*h end end;return c.value,c.weight end;function Accumulator.get(c)return c.value,c.weight end;function Differ.Differ(i)local j={}j.lastVal=i;j.diff=nil;return j end;function Differ.update(j,d)if j.lastVal then j.diff=d-j.lastVal;j.lastVal=d end;j.lastVal=d;return j.diff end;function Differ.get(j)return j.diff end;function Heapq.Heapq(i,k)local l={}l.data=i;l.comp=k or function(m,n)return m<n end;local o=#l.data;l.size=o;for p=math.floor(o/2),1,-1 do Heapq.siftDown(l,p)end;return l end;function Heapq.siftDown(l,q)local r=false;local s=q;local o=#l.data;while not r do r=true;local t=2*s;local u=2*s+1;local v=s;if t<=o and l.comp(l.data[t],l.data[v])then v=t;r=false end;if u<=o and l.comp(l.data[u],l.data[v])then v=u;r=false end;if not r then local w=l.data[v]l.data[v]=l.data[s]l.data[s]=w;s=v end end end;function Heapq.siftUp(l,q)local r=false;local s=q;while not r do r=true;local x=math.floor(s/2)if l.comp(l.data[s],l.data[x])then local w=l.data[x]l.data[x]=l.data[s]l.data[s]=w;s=x;r=false end end end;function Heapq.insert(l,y)l.data[l.size+1]=y;l.size=l.size+1;Heapq.siftUp(l,l.size)end;function Heapq.pop(l)local z=l.data[1]l.data[1]=l.data[l.size]l.data[l.size]=nil;l.size=l.size-1;Heapq.siftDown(l,1)return z end;function Heapq.peek(l)return l.data[1]end;function Heapq.size(l)return l.size end;function LinkedList.LinkedList()local A={}A.value=nil;A.next=A;A.prev=A;return A end;function LinkedList.pushFront(B,d)local A={}A.value=d;LinkedList.connect(A,B.next)LinkedList.connect(B,A)end;function LinkedList.pushBack(B,d)local A={}A.value=d;LinkedList.connect(B.prev,A)LinkedList.connect(A,B)end;function LinkedList.popFront(B)local C=B.next.value;LinkedList.connect(B,B.next.next)return C end;function LinkedList.popBack(B)local C=B.prev.value;LinkedList.connect(B.prev.prev,B)return C end;function LinkedList.peekFront(B)return B.next.val end;function LinkedList.peekBack(B)return B.prev.val end;function LinkedList.connect(D,E)D.next=E;E.prev=D end;function LinkedList.toArray(B)local F=1;local G={}local A=B.next;while A~=B do G[F]=A.value;A=A.next end;return G end;function MathUtil.angleOnPlane(H,I,J)local K=Vector3.ProjectOnPlane(H,J)local g=Vector3.ProjectOnPlane(I,J)return Vector3.SignedAngle(K,g,J)end;function MathUtil.min(L,M)local N=nil;M=M or function(m,n)return m<n end;for O in L do if not N or M(O,N)then N=O end end;return N end;function MathUtil.max(L,M)local P=nil;M=M or function(m,n)return m<n end;for O in L do if not P or M(P,O)then P=O end end;return P end;function MathUtil.range(m,n,Q)local R,S=m,n;local T;if not m then return end;if not n then R=0;S=m;T=R<S and 1 or-1 elseif Q then T=Q end;return function(U,V)local W=V+T;if W==S then return nil end;return W end,nil,R-T end;function MathUtil.shuffle(B,X)local s=X and B or{}if not X then for F=1,#B do s[F]=B[F]end end;for F=#B,2,-1 do local Y=math.random(F)s[F],s[Y]=s[Y],s[F]end;return s end;function MathUtil.combine(m,n,Z)if#m==#n then local z={}for _,a0 in pairs(m)do z[_]=Z(_,a0,n[_])end;return z end end;function MathUtil.distribution()return{n=0}end;function MathUtil.updateDistribution(a1,a2)a1.n=a1.n+1;if a1.n==1 then a1.mean=a2;a1.covariance={}local h=#a2;for F=1,h do local a3={}for Y=1,h do a3[Y]=0 end;a1.covariance[F]=a3 end else a1.mean=a1.mean+1/(a1.n+1)*a2 end end;function MathUtil.mean(a1)return a1.mean end;function MathUtil.covariance(a1)return a1.cov end;function MathUtil.normal()local a4,a5=MathUtil.boxMuller()return a4 end;function MathUtil.normalPDF(a4)return math.exp(-0.5*a4*a4)/math.sqrt(2*math.pi)end;function MathUtil.normalCDF(a4)local a6=0.2316419;local a7=0.319381530;local a8=-0.356563782;local a9=1.781477937;local aa=-1.821255978;local ab=1.330274429;local g=1/(1+a6*a4)return 1-MathUtil.normalPDF(a4)*(a7*g+a8*g^2+a9*g^3+aa*g^4+ab*g^5)end;function MathUtil.inverseNorm(ac)local ad=ac>=0.5 and ac or-ac;local a4=5.55556*(1-((1-ad)/ad)^0.1186)if ac<0.5 then a4=-a4 end;return a4 end;function MathUtil.boxMuller()local ae=math.random()local af=math.random()af=math.random()af=math.random()local ag=math.sqrt(-2*math.log(ae))local ah=2*math.pi*af;return ag*math.cos(ah),ag*math.sin(ah)end;function MathUtil.angleSSS(m,n,Q)if m+n<Q or m+Q<n or n+Q<m then return nil end;local ai=math.deg(math.acos((n*n+Q*Q-m*m)/(2*n*Q)))local aj,ak=MathUtil.angleSAS(n,ai,Q)return ai,aj,ak end;function MathUtil.sideSAS(m,ak,n)local al=m*m+n*n-2*m*n*math.cos(math.rad(ak))return math.sqrt(al)end;function MathUtil.angleSAS(m,ak,n)local Q=MathUtil.sideSAS(m,ak,n)if MathUtil.isZero(Q)then return nil end;local ai,aj;if m<n then ai=MathUtil.angleLoSin(Q,m,ak)aj=180-ai-ak else aj=MathUtil.angleLoSin(Q,n,ak)ai=180-aj-ak end;return ai,aj end;function MathUtil.sideSSA(m,n,ai)local am=n*n-m*m;local an=-2*n*math.cos(math.rad(ai))local ao,ap=MathUtil.solveQuadratic(1,an,am)if not ap then return ao,ap end;if ao<ap then return ao,ap end;return ap,ao end;function MathUtil.angleSSA(m,n,ai)local ao,ap=MathUtil.sideSSA(m,n,ai)if not ao then return nil end;local aq,ar=MathUtil.angleSAS(n,ai,ao)if not ap then return aq,ar end;local as,at=MathUtil.angleSAS(n,ai,ap)return aq,ar,as,at end;function MathUtil.sideAAS(ai,aj,m)local ak=180-ai-aj;local n=MathUtil.sideLoSin(ai,aj,m)local Q=MathUtil.sideLoSin(ai,ak,m)return n,Q end;function MathUtil.sideLoSin(m,ai,aj)return m*math.sin(math.rad(aj))/math.sin(math.rad(ai))end;function MathUtil.angleLoSin(m,n,ai)return math.deg(math.asin(n*math.sin(math.rad(ai))/m))end;function MathUtil.clampCone(au,av,aw)local ax=math.min(aw,Vector3.Angle(au,av))local ay=Vector3.Cross(au,av)return Quaternion.AngleAxis(ax,ay)*au end;function MathUtil.newton(az,aA,aB,aC,aD,aE)aC=aC or 1e-5;aE=aE or 10*aC;aD=aD or 25;aA=aA or function(aF)return(az(aF+aE)-az(aF))/aE end;aB=aB or 0;local aG=aC+1;local aH=0;while aG>aC and aH<aD do local aI=az(aB)local aJ=aA(aB)if not aI or not aJ then return nil end;aG=-aI/aJ;aB=aB+aG;aH=aH+1 end;if aH<aD then return aB,false end;return aB,true end;function MathUtil.ITP(az,m,n,aC,aD)if az(m)*az(n)>0 then return nil end;local aK;if az(m)>az(n)then aK=function(aF)return-az(aF)end else aK=az end;aC=aC or 1e-5;aD=aD or 25;local aL=0.2/(n-m)local aM=2;local aN=1;local aO=math.ceil(math.log((n-m)/(2*aC),2))local aP=aO+aN;local Y=0;while n-m>2*aC and Y<aD do local aQ=(m+n)/2;local aR=(n*az(m)-m*az(n))/(az(m)-az(n))local aS=aQ-aR;local aT=aL*math.abs(n-m)^aM;local aU=aS>0 and 1 or(aS==0 and 0 or-1)local aV=aT<=math.abs(aS)and aR+aU*aT or aQ;local aW=aC*2^(aP-Y)-(n-m)/2;local aX=math.abs(aV-aQ)<=aW and aV or aQ-aU*aW;local aY=az(aX)if aY>0 then n=aX elseif aY<0 then m=aX else m=aX;n=aX end;Y=Y+1 end;return(m+n)/2,Y==aD end;function MathUtil.binomCoeffs(aZ,a_)if a_ then coeffs={}else coeffs={}coeffs[1]=1;for _=1,aZ do coeffs[_+1]=coeffs[_]*(aZ-_)/(_+1)end;return coeffs end end;function MathUtil.ruleOfSigns(coeffs,b0)local b1={}local b2=#coeffs;for F=1,b2 do b1[F]=coeffs[b2-F+1]end;if b0~=0 then local b3={}for F=1,b2 do b3[F]=(F-1)*coeffs[b2-F+1]end;local b4=1;for F=2,b2 do local b5=b0^(F-1)for Y=1,b2-F+1 do local b6=F+Y-1;b1[Y]=b1[Y]+b4*b3[b6]*b5;b3[b6]=b3[b6]*(Y-1)end;b4=b4/F end end;local b7={}local o=1;for F,b8 in ipairs(b1)do if b8~=0 then b7[o]=b8;o=o+1 end end;local b9=0;for F=1,#b7-1 do if b7[F]*b7[F+1]<0 then b9=b9+1 end end;return b9 end;function MathUtil.cache(az)local Q={}local ba=getmetatable(Q)or{}function ba.__index(bb,aF)local C=az(aF)bb[aF]=C;return C end;setmetatable(Q,ba)return function(m)return Q[m]end end;function MathUtil.lerp(az,R,S,T,bc)local bd={}for F=1,math.floor((S-R)/T)+1 do bd[F]=az(R+F*T)end;bd.start=R;bd.stop=S;bd.step=T;bd.lval=bc and bd[1]or nil;bd.rval=bc and bd[#bd]or nil;return function(aF)if aF>=bd.stop then return bd.rval end;if aF<=bd.start then return bd.lval end;local F=(aF-bd.start)/bd.step;local be=F%1;F=math.floor(F)return(1-be)*bd[F]+be*bd[F+1]end end;function MathUtil._factorial(o)if o<2 then return 1 end;return MathUtil._factorial(o-1)end;MathUtil.factorial=MathUtil.cache(MathUtil._factorial)MathUtil.eps=1e-9;function MathUtil.isZero(h)return h>-MathUtil.eps and h<MathUtil.eps end;function MathUtil.setTolerance(aC)MathUtil.eps=aC end;function MathUtil.cuberoot(aF)return aF>0 and aF^(1/3)or-math.abs(aF)^(1/3)end;function MathUtil.solveQuadratic(bf,ao,ap)local bg,bh;local ac,bi,bj;ac=ao/(2*bf)bi=ap/bf;bj=ac*ac-bi;if MathUtil.isZero(bj)then bg=-ac;return bg elseif bj<0 then return else local bk=math.sqrt(bj)bg=bk-ac;bh=-bk-ac;return bg,bh end end;function MathUtil.solveCubic(bf,ao,ap,bl)local bg,bh,bm;local bn,bo;local ai,aj,ak;local bp,ac,bi;local bq,bj;ai=ao/bf;aj=ap/bf;ak=bl/bf;bp=ai*ai;ac=1/3*(-(1/3)*bp+aj)bi=0.5*(2/27*ai*bp-1/3*ai*aj+ak)bq=ac*ac*ac;bj=bi*bi+bq;if MathUtil.isZero(bj)then if MathUtil.isZero(bi)then bg=0;bn=1 else local br=MathUtil.cuberoot(-bi)bg=2*br;bh=-br;bn=2 end elseif bj<0 then local bs=1/3*math.acos(-bi/math.sqrt(-bq))local g=2*math.sqrt(-ac)bg=g*math.cos(bs)bh=-g*math.cos(bs+math.pi/3)bm=-g*math.cos(bs-math.pi/3)bn=3 else local bk=math.sqrt(bj)local br=MathUtil.cuberoot(bk-bi)local a0=-MathUtil.cuberoot(bk+bi)bg=br+a0;bn=1 end;bo=1/3*ai;if bn>0 then bg=bg-bo end;if bn>1 then bh=bh-bo end;if bn>2 then bm=bm-bo end;return bg,bh,bm end;function MathUtil.solveQuartic(bf,ao,ap,bl,bt)local bg,bh,bm,bu;local coeffs={}local a4,br,a0,bo;local ai,aj,ak,bj;local bp,ac,bi,ag;local bn=0;ai=ao/bf;aj=ap/bf;ak=bl/bf;bj=bt/bf;bp=ai*ai;ac=-0.375*bp+aj;bi=0.125*bp*ai-0.5*ai*aj+ak;ag=-(3/256)*bp*bp+0.0625*bp*aj-0.25*ai*ak+bj;if MathUtil.isZero(ag)then coeffs[3]=bi;coeffs[2]=ac;coeffs[1]=0;coeffs[0]=1;local bv={MathUtil.solveCubic(coeffs[0],coeffs[1],coeffs[2],coeffs[3])}bn=#bv;bg,bh,bm=bv[1],bv[2],bv[3]elseif MathUtil.isZero(bi)then local bw={MathUtil.solveQuadratic(1,ac,ag)}if bw[1]>=0 then bg=-math.sqrt(bw[1])bh=math.sqrt(bw[1])bn=2 end;if bw[2]>=0 then if bn==0 then bg=-math.sqrt(bw[2])bh=math.sqrt(bw[2])bn=2 else bm=-math.sqrt(bw[2])bu=math.sqrt(bw[2])bn=4 end end else coeffs[3]=0.5*ag*ac-0.125*bi*bi;coeffs[2]=-ag;coeffs[1]=-0.5*ac;coeffs[0]=1;bg,bh,bm=MathUtil.solveCubic(coeffs[0],coeffs[1],coeffs[2],coeffs[3])a4=bg;br=a4*a4-ag;a0=2*a4-ac;if MathUtil.isZero(br)then br=0 elseif br>0 then br=math.sqrt(br)else return end;if MathUtil.isZero(a0)then a0=0 elseif a0>0 then a0=math.sqrt(a0)else return end;coeffs[2]=a4-br;coeffs[1]=bi<0 and-a0 or a0;coeffs[0]=1;do local bv={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bn=#bv;bg,bh=bv[1],bv[2]end;coeffs[2]=a4+br;coeffs[1]=bi<0 and a0 or-a0;coeffs[0]=1;if bn==0 then local bv={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bn=bn+#bv;bg,bh=bv[1],bv[2]end;if bn==1 then local bv={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bn=bn+#bv;bh,bm=bv[1],bv[2]end;if bn==2 then local bv={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bn=bn+#bv;bm,bu=bv[1],bv[2]end end;bo=0.25*ai;if bn>0 then bg=bg-bo end;if bn>1 then bh=bh-bo end;if bn>2 then bm=bm-bo end;if bn>3 then bu=bu-bo end;return bg,bh,bm,bu end;function RingBuffer.RingBuffer(bx)local by={}by.buf={}by.capacity=bx;by.size=0;by.head=1;local ba=getmetatable(by)or{}ba.__index=RingBuffer.get;setmetatable(by,ba)return by end;function RingBuffer.isFull(by)return by.size>=by.capacity end;function RingBuffer.setSize(by,bz)by.size=bz end;function RingBuffer.push(by,d)by.buf[(by.head+by.size-1)%by.capacity+1]=d;if by.size==by.capacity then by.head=by.head%by.capacity+1 else by.size=by.size+1 end end;function RingBuffer.pop(by)if by.size==0 then return nil end;local C=by.buf[by.head]by.buf[by.head]=nil;by.head=by.head%by.capacity+1;by.size=by.size-1;return C end;function RingBuffer.get(by,p)if type(p)~="number"or math.floor(p)~=p then return nil end;if p<1 or p>by.size then return nil end;return by.buf[(by.head+p-2)%by.capacity+1]end;VectorN.mt=getmetatable({})or{}VectorN.mt.__add=function(m,n)local bA=type(m)=="number"local bB=type(n)=="number"if not bA and bB then return n+m end;if bA and not bB then return MathUtil.combine(m,n,function(_,aF,bC)return m+bC end)else return MathUtil.combine(m,n,function(_,aF,bC)return aF+bC end)end end;VectorN.mt.__sub=function(m,n)return m+-n end;VectorN.mt.__mul=function(m,n)local bA=type(m)=="number"local bB=type(n)=="number"if not bA and bB then return n*m end;if bA and not bB then local z={}for _,a0 in pairs(n)do z[_]=m*a0 end;return z else return MathUtil.combine(m,n,function(_,aF,bC)return aF*bC end)end end;VectorN.mt.__div=function(m,n)local bA=type(m)=="number"local bB=type(n)=="number"if not bA and bB then return m*1/n end;if bA and not bB then local z={}for _,a0 in pairs(n)do z[_]=m/a0 end;return z else return MathUtil.combine(m,n,function(_,aF,bC)return aF/bC end)end end;VectorN.mt.__unm=function(m)local z={}for _,a0 in pairs(m)do z[_]=-a0 end;return z end;function VectorN.VectorN(B)local bD={}for _,a0 in pairs(B)do if type(a0)=="table"then bD[_]=VectorN.VectorN(a0)else bD[_]=a0 end end;setmetatable(bD,VectorN.mt)return bD end;function Control.PID(bE,bF,bG,bH,bI,bJ)local bK={}bK.kP=bE;bK.kI=bF;bK.kD=bG;bK.Iacc=Accumulator.Accumulator(bH,bI)if bJ and bJ~=0 then bK.period=bJ end;return bK end;function Control.processPID(bL,bM,e)bM=bL.period and(bM+bL.period/2)%bL.period-bL.period/2 or bM;local ac=bL.kP*bM;local F,bN=bL.kI*Accumulator.update(bL.Iacc,bM,e)F=F/bN;local h=bL.kD*(bM-(bL.lastError or bM))/e;bL.lastError=bM;return ac+F+h end;function Control.FF(coeffs,bJ)local bO={}bO.coeffs=coeffs;bO.degree=#coeffs-1;if bJ and bJ~=0 then bO.period=bJ end;bO.derivs={}return bO end;function Control.processFF(bL,bP,e)local bQ=0*bP;local bR=bP;local bS=bP;for F=1,bL.degree+1 do bS=bL.derivs[F]bL.derivs[F]=bR;bQ=bQ+bL.coeffs[F]*bR;if bS then local aS=bR-bS;if F==1 and bL.period then aS=(aS+bL.period/2)%bL.period-bL.period/2 end;bR=aS/e else break end end;return bQ end;function Nav.toLocal(bT,bU,bV)local bW=bT-bU;return Quaternion.Inverse(bV)*bW end;function Nav.toGlobal(bX,bU,bV)local bW=bV*bX;return bW+bU end;function Nav.cartToPol(bY)local ag=bY.magnitude;local ah=Vector3.SignedAngle(Vector3.forward,bY,Vector3.up)local bs=90-Vector3.Angle(Vector3.up,bY)return Vector3(ag,ah,bs)end;function Nav.cartToCyl(bY)local bZ=Vector3(bY.x,0,bY.z)local b_=bZ.magnitude;local bs=Vector3.SignedAngle(Vector3.forward,bY,Vector3.up)local a4=bY.y;return Vector3(b_,bs,a4)end;function Nav.polToCart(bY)local ag,ah,bs=bY.x,bY.y,bY.z;local aF=Mathf.Sin(ah)*Mathf.Cos(bs)local bC=Mathf.Sin(bs)local a4=Mathf.Cos(ah)*Mathf.Cos(bs)return ag*Vector3(aF,bC,a4)end;function Nav.cylToCart(bY)local b_,bs,c0=bY.x,bY.y,bY.z;local aF=b_*Mathf.Sin(bs)local bC=c0;local a4=b_*Mathf.Cos(bs)return Vector3(aF,bC,a4)end;function Targeting.firstOrderTargeting(c1,c2,c3)local c4=c1-Vector3.Project(c1,c2)local c5=Vector3.Dot(c2,c1-c4)/c2.sqrMagnitude;local m,n=MathUtil.solveQuadratic(c5-c3*c3,2*c5,c4.sqrMagnitude+c5*c5)local c6=nil;if m and m>=0 then c6=m end;if n and n>=0 and n<m then c6=n end;return c6 and(c1+c6*c2).normalized or nil end;function Targeting.secondOrderTargeting(c1,c7,c8,c3,c9,ca)local m=-0.25*c8.sqrMagnitude;local n=-Vector3.Dot(c7,c8)local Q=-(c7.sqrMagnitude-c3*c3+Vector3.Dot(c1,c8))local h=-2*Vector3.Dot(c1,c7)local bM=-c1.sqrMagnitude;local g;local cb=c8.magnitude;local cc=c7.magnitude;local cd=c1.magnitude;local ce,cf=MathUtil.solveQuadratic(0.5*cb,cc+c3,-cd)local cg=math.max(ce,cf)local ch;local coeffs={0.5*cb,cc-c3,cd}if MathUtil.ruleOfSigns(coeffs,0)==2 then local ci,cj=MathUtil.solveQuadratic(coeffs[1],coeffs[2],coeffs[3])if ci then ch=math.min(ci,cj)end end;if not ch or ch<cg then local bg,bh,bm=MathUtil.solveCubic(4*m,3*n,2*Q,h)if not bm then if bg>cg then ch=bg end else local ci=math.min(bg,bm)local cj=math.max(bg,bm)if ci>cg then ch=ci elseif cj>cg then ch=cj end end;if not ch then return nil end end;local function ck(aF)return bM+aF*(h+aF*(Q+aF*(n+aF*m)))end;g=MathUtil.ITP(ck,cg,ch,1e-4,25)if not g then return nil end;if g>=cg and g<=ch then local cl=c1+c7*g+0.5*c8*g*g;if cl.sqrMagnitude>=c9*c9 and cl.sqrMagnitude<=ca*ca then return cl,g end end end;function Targeting.AIPPN(cm,c1,cn,c2,co)local c7=c2-cn;local cp=Vector3.Dot(-c7,c1.normalized)if cp<=0 then cp=10 end;local cq=c1.magnitude/cp;local cr=Vector3.Cross(c1,c7)/c1.sqrMagnitude;local cs=Vector3.Cross(c1,co)/c1.sqrMagnitude*cq/2;local ct=cr+cs;local cu=Vector3.Cross(ct,c1.normalized)local cv=Vector3.ProjectOnPlane(cu,cn).normalized;local cw=cm*cn.magnitude*ct.magnitude;return cw*cv end;function Targeting.ATPN(cm,c1,cn,c2,co)local c7=c2-cn;local cp=-Vector3.Dot(c7,c1.normalized)if cp<=0 then cp=10 end;local cr=Vector3.Cross(c1,c7)/c1.sqrMagnitude;local cu=Vector3.Cross(cr,c1.normalized)local cx=Vector3.ProjectOnPlane(co,c1)return cm*cp*cu+0.5*cm*co end;function BlockUtil.getWeaponsByName(cy,cz,b9,cA)if DEBUG then cy:Log("searching for "..cz)end;local cB=cy:GetAllSubConstructs()local cC={}b9=b9 or-1;local Q=b9;if not cA or cA==0 or cA==2 then for F=0,cy:GetWeaponCount()-1 do if Q==0 then break end;if cy:GetWeaponBlockInfo(F).CustomName==cz then table.insert(cC,{subIdx=nil,wpnIdx=F})if DEBUG then cy:Log("found weapon "..cz.." on hull, type "..cy:GetWeaponInfo(F).WeaponType)end;Q=Q-1 end end end;if not cA or cA==1 or cA==2 then for p=1,#cB do local bo=cB[p]for F=0,cy:GetWeaponCountOnSubConstruct(bo)-1 do if Q==0 then break end;if cy:GetWeaponBlockInfoOnSubConstruct(bo,F).CustomName==cz then table.insert(cC,{subIdx=bo,wpnIdx=F})if DEBUG then cy:Log("found weapon "..cz.." on subobj "..bo..", type "..cy:GetWeaponInfo(F).WeaponType)end;Q=Q-1 end end end end;if DEBUG then cy:Log("weapon count: "..#cC)end;return cC end;function BlockUtil.getSubConstructsByName(cy,cz,b9)if DEBUG then cy:Log("searching for "..cz)end;local cB=cy:GetAllSubConstructs()local cD={}b9=b9 or-1;local Q=b9;for p=1,#cB do local bo=cB[p]if Q==0 then break end;if cy:GetSubConstructInfo(bo).CustomName==cz then table.insert(cD,bo)if DEBUG then cy:Log("found subobj "..cz)end;Q=Q-1 end end;if DEBUG then cy:Log("subobj count: "..#cD)end;return cD end;function BlockUtil.getBlocksByName(cy,cz,type,b9)if DEBUG then cy:Log("searching for "..cz)end;local cE={}b9=b9 or-1;local Q=b9;for p=0,cy:Component_GetCount(type)-1 do if Q==0 then break end;if cy:Component_GetBlockInfo(type,p).CustomName==cz then table.insert(cE,p)if DEBUG then cy:Log("found component "..cz)end;Q=Q-1 end end;if DEBUG then cy:Log("component count: "..#cE)end;return cE end;function BlockUtil.getWeaponInfo(cy,cF)if cF.subIdx then return cy:GetWeaponInfoOnSubConstruct(cF.subIdx,cF.wpnIdx)end;return cy:GetWeaponInfo(cF.wpnIdx)end;function BlockUtil.getWeaponBlockInfo(cy,cF)if cF.subIdx then return cy:GetWeaponBlockInfoOnSubConstruct(cF.subIdx,cF.wpnIdx)end;return cy:GetWeaponBlockInfo(cF.wpnIdx)end;function BlockUtil.aimWeapon(cy,cF,cG,cH)if cF.subIdx then cy:AimWeaponInDirectionOnSubConstruct(cF.subIdx,cF.wpnIdx,cG.x,cG.y,cG.z,cH)else cy:AimWeaponInDirection(cF.wpnIdx,cG.x,cG.y,cG.z,cH)end end;function BlockUtil.fireWeapon(cy,cF,cH)if cF.subIdx then return cy:FireWeaponOnSubConstruct(cF.subIdx,cF.wpnIdx,cH)end;return cy:FireWeapon(cF.wpnIdx,cH)end;function Combat.pickTarget(cy,cI,cJ)cJ=cJ or function(U,cK)return cK.Priority end;local bP,cL;for F in MathUtil.range(cy:GetNumberOfTargets(cI))do local cK=cy:GetTargetInfo(cI,F)local cM=cJ(cy,cK)if not bP or cM>cL then bP=cK;cL=cM end end;return bP end;function Combat.CheckConstraints(cy,cN,cO,cP)local cQ;if cP then cQ=cy:GetWeaponConstraintsOnSubConstruct(cP,cO)else cQ=cy:GetWeaponConstraints(cO)end;local cR=cy:GetConstructForwardVector()local cS=cy:GetConstructUpVector()local cT=Quaternion.LookRotation(cR,cS)cN=Quaternion.Inverse(cT)*cN;if cQ.InParentConstructSpace and cP then local cU=cy:GetSubConstructInfo(cP).localRotation;cN=Quaternion.inverse(cU)*cN end;local cV=MathUtil.angleOnPlane(Vector3.forward,cN,Vector3.up)local cW=cN;cW.z=0;local O=Mathf.Atan2(cN.z,cW.magnitude)local cX=cV>cQ.MinAzimuth and cV<cQ.MaxAzimuth;local cY=O>cQ.MinElevation and O<cQ.MaxElevation;if cQ.FlipAzimuth then cX=not cX end;if cX and cY then return true end;cV=cV+180;O=180-O;if O>180 then O=O-360 end;if O<-180 then O=O+360 end;cX=cV>cQ.MinAzimuth and cV<cQ.MaxAzimuth;cY=O>cQ.MinElevation and O<cQ.MaxElevation;if cQ.FlipAzimuth then cX=not cX end;if cX and cY then return true end;return false end;function StringUtil.LogVector(cy,bD,cZ)cy:Log(cZ.."("..bD.x..", "..bD.y..", "..bD.z..")")end
+function Accumulator.Accumulator(a,b)local c={}c.decay=b;c.window=a;c.time=0;c.weight=0;if a>0 then c.vals=LinkedList.LinkedList()c.times=LinkedList.LinkedList()end;return c end;function Accumulator.update(c,d,e)local f=Mathf.Pow(c.decay,e)if not c.value then c.value=d*e else c.value=c.value*f;c.value=c.value+d*e end;c.time=c.time+e;c.weight=c.weight*f;c.weight=c.weight+e;if c.window>0 then LinkedList.pushFront(c.vals,d)LinkedList.pushFront(c.times,e)while c.time>c.window do local g=LinkedList.popBack(c.times)c.time=c.time-g;local h=Mathf.Pow(c.decay,c.time)c.weight=c.weight-g*h;c.value=c.value-LinkedList.popBack(c.vals)*g*h end end;return c.value,c.weight end;function Accumulator.get(c)return c.value,c.weight end;function Differ.Differ(i)local j={}j.lastVal=i;j.diff=nil;return j end;function Differ.update(j,d)if j.lastVal then j.diff=d-j.lastVal;j.lastVal=d end;j.lastVal=d;return j.diff end;function Differ.get(j)return j.diff end;function Heapq.Heapq(i,k)local l={}l.data=i;l.comp=k or function(m,n)return m<n end;local o=#l.data;l.size=o;for p=math.floor(o/2),1,-1 do Heapq.siftDown(l,p)end;return l end;function Heapq.siftDown(l,q)local r=false;local s=q;local o=#l.data;while not r do r=true;local t=2*s;local u=2*s+1;local v=s;if t<=o and l.comp(l.data[t],l.data[v])then v=t;r=false end;if u<=o and l.comp(l.data[u],l.data[v])then v=u;r=false end;if not r then local w=l.data[v]l.data[v]=l.data[s]l.data[s]=w;s=v end end end;function Heapq.siftUp(l,q)local r=false;local s=q;while not r do r=true;local x=math.floor(s/2)if l.comp(l.data[s],l.data[x])then local w=l.data[x]l.data[x]=l.data[s]l.data[s]=w;s=x;r=false end end end;function Heapq.insert(l,y)l.data[l.size+1]=y;l.size=l.size+1;Heapq.siftUp(l,l.size)end;function Heapq.pop(l)local z=l.data[1]l.data[1]=l.data[l.size]l.data[l.size]=nil;l.size=l.size-1;Heapq.siftDown(l,1)return z end;function Heapq.peek(l)return l.data[1]end;function Heapq.size(l)return l.size end;function LinkedList.LinkedList()local A={}A.value=nil;A.next=A;A.prev=A;return A end;function LinkedList.pushFront(B,d)local A={}A.value=d;LinkedList.connect(A,B.next)LinkedList.connect(B,A)end;function LinkedList.pushBack(B,d)local A={}A.value=d;LinkedList.connect(B.prev,A)LinkedList.connect(A,B)end;function LinkedList.popFront(B)local C=B.next.value;LinkedList.connect(B,B.next.next)return C end;function LinkedList.popBack(B)local C=B.prev.value;LinkedList.connect(B.prev.prev,B)return C end;function LinkedList.peekFront(B)return B.next.val end;function LinkedList.peekBack(B)return B.prev.val end;function LinkedList.connect(D,E)D.next=E;E.prev=D end;function LinkedList.toArray(B)local F=1;local G={}local A=B.next;while A~=B do G[F]=A.value;A=A.next end;return G end;function MathUtil.angleOnPlane(H,I,J)local K=Vector3.ProjectOnPlane(H,J)local g=Vector3.ProjectOnPlane(I,J)return Vector3.SignedAngle(K,g,J)end;function MathUtil.min(L,M)local N=nil;M=M or function(m,n)return m<n end;for O in L do if not N or M(O,N)then N=O end end;return N end;function MathUtil.max(L,M)local P=nil;M=M or function(m,n)return m<n end;for O in L do if not P or M(P,O)then P=O end end;return P end;function MathUtil.range(m,n,Q)local R,S=m,n;local T;if not m then return end;if not n then R=0;S=m;T=R<S and 1 or-1 elseif Q then T=Q end;return function(U,V)local W=V+T;if W==S then return nil end;return W end,nil,R-T end;function MathUtil.shuffle(B,X)local s=X and B or{}if not X then for F=1,#B do s[F]=B[F]end end;for F=#B,2,-1 do local Y=math.random(F)s[F],s[Y]=s[Y],s[F]end;return s end;function MathUtil.combine(m,n,Z)if#m==#n then local z={}for _,a0 in pairs(m)do z[_]=Z(_,a0,n[_])end;return z end end;function MathUtil.distribution()return{n=0}end;function MathUtil.updateDistribution(a1,a2)a1.n=a1.n+1;if a1.n==1 then a1.mean=a2;a1.covariance={}local h=#a2;for F=1,h do local a3={}for Y=1,h do a3[Y]=0 end;a1.covariance[F]=a3 end else a1.mean=a1.mean+1/(a1.n+1)*a2 end end;function MathUtil.mean(a1)return a1.mean end;function MathUtil.covariance(a1)return a1.cov end;function MathUtil.normal()local a4,a5=MathUtil.boxMuller()return a4 end;function MathUtil.normalPDF(a4)return math.exp(-0.5*a4*a4)/math.sqrt(2*math.pi)end;function MathUtil.normalCDF(a4)local a6=0.2316419;local a7=0.319381530;local a8=-0.356563782;local a9=1.781477937;local aa=-1.821255978;local ab=1.330274429;local g=1/(1+a6*a4)return 1-MathUtil.normalPDF(a4)*(a7*g+a8*g^2+a9*g^3+aa*g^4+ab*g^5)end;function MathUtil.inverseNorm(ac)local ad=ac>=0.5 and ac or-ac;local a4=5.55556*(1-((1-ad)/ad)^0.1186)if ac<0.5 then a4=-a4 end;return a4 end;function MathUtil.boxMuller()local ae=math.random()local af=math.random()af=math.random()af=math.random()local ag=math.sqrt(-2*math.log(ae))local ah=2*math.pi*af;return ag*math.cos(ah),ag*math.sin(ah)end;function MathUtil.angleSSS(m,n,Q)if m+n<Q or m+Q<n or n+Q<m then return nil end;local ai=math.deg(math.acos((n*n+Q*Q-m*m)/(2*n*Q)))local aj,ak=MathUtil.angleSAS(n,ai,Q)return ai,aj,ak end;function MathUtil.sideSAS(m,ak,n)local al=m*m+n*n-2*m*n*math.cos(math.rad(ak))return math.sqrt(al)end;function MathUtil.angleSAS(m,ak,n)local Q=MathUtil.sideSAS(m,ak,n)if MathUtil.isZero(Q)then return nil end;local ai,aj;if m<n then ai=MathUtil.angleLoSin(Q,m,ak)aj=180-ai-ak else aj=MathUtil.angleLoSin(Q,n,ak)ai=180-aj-ak end;return ai,aj end;function MathUtil.sideSSA(m,n,ai)local am=n*n-m*m;local an=-2*n*math.cos(math.rad(ai))local ao,ap=MathUtil.solveQuadratic(1,an,am)if not ap then return ao,ap end;if ao<ap then return ao,ap end;return ap,ao end;function MathUtil.angleSSA(m,n,ai)local ao,ap=MathUtil.sideSSA(m,n,ai)if not ao then return nil end;local aq,ar=MathUtil.angleSAS(n,ai,ao)if not ap then return aq,ar end;local as,at=MathUtil.angleSAS(n,ai,ap)return aq,ar,as,at end;function MathUtil.sideAAS(ai,aj,m)local ak=180-ai-aj;local n=MathUtil.sideLoSin(ai,aj,m)local Q=MathUtil.sideLoSin(ai,ak,m)return n,Q end;function MathUtil.sideLoSin(m,ai,aj)return m*math.sin(math.rad(aj))/math.sin(math.rad(ai))end;function MathUtil.angleLoSin(m,n,ai)return math.deg(math.asin(n*math.sin(math.rad(ai))/m))end;function MathUtil.clampCone(au,av,aw)local ax=math.min(aw,Vector3.Angle(au,av))local ay=Vector3.Cross(au,av)return Quaternion.AngleAxis(ax,ay)*au end;function MathUtil.newton(az,aA,aB,aC,aD,aE)aC=aC or 1e-5;aE=aE or 10*aC;aD=aD or 25;aA=aA or function(aF)return(az(aF+aE)-az(aF))/aE end;aB=aB or 0;local aG=aC+1;local aH=0;while aG>aC and aH<aD do local aI=az(aB)local aJ=aA(aB)if not aI or not aJ then return nil end;aG=-aI/aJ;aB=aB+aG;aH=aH+1 end;if aH<aD then return aB,false end;return aB,true end;function MathUtil.ITP(az,m,n,aC,aD)if az(m)*az(n)>0 then return nil end;local aK;if az(m)>az(n)then az=function(aF)return-az(aF)end end;aC=aC or 1e-5;aD=aD or 25;local aL=0.2/(n-m)local aM=2;local aN=1;local aO=math.ceil(math.log((n-m)/(2*aC),2))local aP=aO+aN;local Y=0;while n-m>2*aC and Y<aD do local aQ=0.5*(m+n)local aR=az(m)-az(n)if aR==0 then return m end;local aS=(n*az(m)-m*az(n))/aR;local aT=aQ-aS;local aU=aL*math.abs(n-m)^aM;local aV=aT>0 and 1 or(aT==0 and 0 or-1)local aW=aU<=math.abs(aT)and aS+aV*aU or aQ;local aX=aC*2^(aP-Y)-0.5*(n-m)local aY=math.abs(aW-aQ)<=aX and aW or aQ-aV*aX;local aZ=az(aY)if aZ>0 then n=aY elseif aZ<0 then m=aY else m=aY;n=aY end;Y=Y+1 end;local aR=az(m)-az(n)if aR~=0 then return(n*az(m)-m*az(n))/aR,Y==aD end;return m,Y==aD end;function MathUtil.binomCoeffs(a_,b0)if b0 then coeffs={}else coeffs={}coeffs[1]=1;for _=1,a_ do coeffs[_+1]=coeffs[_]*(a_-_)/(_+1)end;return coeffs end end;function MathUtil.ruleOfSigns(coeffs,b1)local b2={}local b3=#coeffs;for F=1,b3 do b2[F]=coeffs[b3-F+1]end;if b1~=0 then local b4={}for F=1,b3 do b4[F]=(F-1)*coeffs[b3-F+1]end;local b5=1;for F=2,b3 do local b6=b1^(F-1)for Y=1,b3-F+1 do local b7=F+Y-1;b2[Y]=b2[Y]+b5*b4[b7]*b6;b4[b7]=b4[b7]*(Y-1)end;b5=b5/F end end;local b8={}local o=1;for F,b9 in ipairs(b2)do if b9~=0 then b8[o]=b9;o=o+1 end end;local ba=0;for F=1,#b8-1 do if b8[F]*b8[F+1]<0 then ba=ba+1 end end;return ba end;function MathUtil.cache(az)local Q={}local bb=getmetatable(Q)or{}function bb.__index(bc,aF)local C=az(aF)bc[aF]=C;return C end;setmetatable(Q,bb)return function(m)return Q[m]end end;function MathUtil.lerp(az,R,S,T,bd)local be={}for F=1,math.floor((S-R)/T)+1 do be[F]=az(R+F*T)end;be.start=R;be.stop=S;be.step=T;be.lval=bd and be[1]or nil;be.rval=bd and be[#be]or nil;return function(aF)if aF>=be.stop then return be.rval end;if aF<=be.start then return be.lval end;local F=(aF-be.start)/be.step;local bf=F%1;F=math.floor(F)return(1-bf)*be[F]+bf*be[F+1]end end;function MathUtil._factorial(o)if o<2 then return 1 end;return MathUtil._factorial(o-1)end;MathUtil.factorial=MathUtil.cache(MathUtil._factorial)MathUtil.eps=1e-9;function MathUtil.isZero(h)return h>-MathUtil.eps and h<MathUtil.eps end;function MathUtil.setTolerance(aC)MathUtil.eps=aC end;function MathUtil.cuberoot(aF)return aF>0 and aF^(1/3)or-math.abs(aF)^(1/3)end;function MathUtil.solveQuadratic(bg,ao,ap)local bh,bi;local ac,bj,bk;ac=ao/(2*bg)bj=ap/bg;bk=ac*ac-bj;if MathUtil.isZero(bk)then bh=-ac;return bh elseif bk<0 then return else local bl=math.sqrt(bk)bh=bl-ac;bi=-bl-ac;return bh,bi end end;function MathUtil.solveCubic(bg,ao,ap,bm)local bh,bi,bn;local bo,bp;local ai,aj,ak;local bq,ac,bj;local br,bk;ai=ao/bg;aj=ap/bg;ak=bm/bg;bq=ai*ai;ac=1/3*(-(1/3)*bq+aj)bj=0.5*(2/27*ai*bq-1/3*ai*aj+ak)br=ac*ac*ac;bk=bj*bj+br;if MathUtil.isZero(bk)then if MathUtil.isZero(bj)then bh=0;bo=1 else local bs=MathUtil.cuberoot(-bj)bh=2*bs;bi=-bs;bo=2 end elseif bk<0 then local bt=1/3*math.acos(-bj/math.sqrt(-br))local g=2*math.sqrt(-ac)bh=g*math.cos(bt)bi=-g*math.cos(bt+math.pi/3)bn=-g*math.cos(bt-math.pi/3)bo=3 else local bl=math.sqrt(bk)local bs=MathUtil.cuberoot(bl-bj)local a0=-MathUtil.cuberoot(bl+bj)bh=bs+a0;bo=1 end;bp=1/3*ai;if bo>0 then bh=bh-bp end;if bo>1 then bi=bi-bp end;if bo>2 then bn=bn-bp end;return bh,bi,bn end;function MathUtil.solveQuartic(bg,ao,ap,bm,bu)local bh,bi,bn,bv;local coeffs={}local a4,bs,a0,bp;local ai,aj,ak,bk;local bq,ac,bj,ag;local bo=0;ai=ao/bg;aj=ap/bg;ak=bm/bg;bk=bu/bg;bq=ai*ai;ac=-0.375*bq+aj;bj=0.125*bq*ai-0.5*ai*aj+ak;ag=-(3/256)*bq*bq+0.0625*bq*aj-0.25*ai*ak+bk;if MathUtil.isZero(ag)then coeffs[3]=bj;coeffs[2]=ac;coeffs[1]=0;coeffs[0]=1;local bw={MathUtil.solveCubic(coeffs[0],coeffs[1],coeffs[2],coeffs[3])}bo=#bw;bh,bi,bn=bw[1],bw[2],bw[3]elseif MathUtil.isZero(bj)then local bx={MathUtil.solveQuadratic(1,ac,ag)}if bx[1]>=0 then bh=-math.sqrt(bx[1])bi=math.sqrt(bx[1])bo=2 end;if bx[2]>=0 then if bo==0 then bh=-math.sqrt(bx[2])bi=math.sqrt(bx[2])bo=2 else bn=-math.sqrt(bx[2])bv=math.sqrt(bx[2])bo=4 end end else coeffs[3]=0.5*ag*ac-0.125*bj*bj;coeffs[2]=-ag;coeffs[1]=-0.5*ac;coeffs[0]=1;bh,bi,bn=MathUtil.solveCubic(coeffs[0],coeffs[1],coeffs[2],coeffs[3])a4=bh;bs=a4*a4-ag;a0=2*a4-ac;if MathUtil.isZero(bs)then bs=0 elseif bs>0 then bs=math.sqrt(bs)else return end;if MathUtil.isZero(a0)then a0=0 elseif a0>0 then a0=math.sqrt(a0)else return end;coeffs[2]=a4-bs;coeffs[1]=bj<0 and-a0 or a0;coeffs[0]=1;do local bw={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bo=#bw;bh,bi=bw[1],bw[2]end;coeffs[2]=a4+bs;coeffs[1]=bj<0 and a0 or-a0;coeffs[0]=1;if bo==0 then local bw={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bo=bo+#bw;bh,bi=bw[1],bw[2]end;if bo==1 then local bw={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bo=bo+#bw;bi,bn=bw[1],bw[2]end;if bo==2 then local bw={MathUtil.solveQuadratic(coeffs[0],coeffs[1],coeffs[2])}bo=bo+#bw;bn,bv=bw[1],bw[2]end end;bp=0.25*ai;if bo>0 then bh=bh-bp end;if bo>1 then bi=bi-bp end;if bo>2 then bn=bn-bp end;if bo>3 then bv=bv-bp end;return bh,bi,bn,bv end;function RingBuffer.RingBuffer(by)local bz={}bz.buf={}bz.capacity=by;bz.size=0;bz.head=1;local bb=getmetatable(bz)or{}bb.__index=RingBuffer.get;setmetatable(bz,bb)return bz end;function RingBuffer.isFull(bz)return bz.size>=bz.capacity end;function RingBuffer.push(bz,d)bz.buf[(bz.head+bz.size-1)%bz.capacity+1]=d;if bz.size==bz.capacity then bz.head=bz.head%bz.capacity+1 else bz.size=bz.size+1 end end;function RingBuffer.pop(bz)if bz.size==0 then return nil end;local C=bz.buf[bz.head]bz.buf[bz.head]=nil;bz.head=bz.head%bz.capacity+1;bz.size=bz.size-1;return C end;function RingBuffer.get(bz,p)if type(p)~="number"or math.floor(p)~=p then return nil end;if p<1 or p>bz.size then return nil end;return bz.buf[(bz.head+p-2)%bz.capacity+1]end;function InterpolatedSearch(bA,bB,t,u,bC,bD,bE)bE=bE or 50;local m,n,bF;local bG=0;while u>t do m=bB[t]if m==bC then return t end;if m>bC then return bD and t or nil end;n=bB[u]if n==bC then return u end;if n<bC then return bD and u or nil end;bF=math.floor((bC-m)/(n-m)*(u-t)+t)bF=math.min(math.max(bF,t+1),u-1)if bB[bF]==bC then return bF end;if bC<bB[bF]then if bD and math.abs(bB[bF-1]-bC)>math.abs(bB[bF]-bC)then return bF end;u=bF-1 else if bD and math.abs(bB[bF+1]-bC)>math.abs(bB[bF]-bC)then return bF end;t=bF+1 end;bG=bG+1;if bG>bE then break end end;return bD and t or nil end;VectorN.mt=getmetatable({})or{}VectorN.mt.__add=function(m,n)local bH=type(m)=="number"local bI=type(n)=="number"if not bH and bI then return n+m end;if bH and not bI then return MathUtil.combine(m,n,function(_,aF,bJ)return m+bJ end)else return MathUtil.combine(m,n,function(_,aF,bJ)return aF+bJ end)end end;VectorN.mt.__sub=function(m,n)return m+-n end;VectorN.mt.__mul=function(m,n)local bH=type(m)=="number"local bI=type(n)=="number"if not bH and bI then return n*m end;if bH and not bI then local z={}for _,a0 in pairs(n)do z[_]=m*a0 end;return z else return MathUtil.combine(m,n,function(_,aF,bJ)return aF*bJ end)end end;VectorN.mt.__div=function(m,n)local bH=type(m)=="number"local bI=type(n)=="number"if not bH and bI then return m*1/n end;if bH and not bI then local z={}for _,a0 in pairs(n)do z[_]=m/a0 end;return z else return MathUtil.combine(m,n,function(_,aF,bJ)return aF/bJ end)end end;VectorN.mt.__unm=function(m)local z={}for _,a0 in pairs(m)do z[_]=-a0 end;return z end;function VectorN.VectorN(B)local bK={}for _,a0 in pairs(B)do if type(a0)=="table"then bK[_]=VectorN.VectorN(a0)else bK[_]=a0 end end;setmetatable(bK,VectorN.mt)return bK end;function Control.PID(bL,bM,bN,bO,bP,bQ)local bR={}bR.kP=bL;bR.kI=bM;bR.kD=bN;bR.Iacc=Accumulator.Accumulator(bO,bP)if bQ and bQ~=0 then bR.period=bQ end;return bR end;function Control.processPID(bS,bT,e)bT=bS.period and(bT+bS.period/2)%bS.period-bS.period/2 or bT;local ac=bS.kP*bT;local F,bU=bS.kI*Accumulator.update(bS.Iacc,bT,e)F=F/bU;local h=bS.kD*(bT-(bS.lastError or bT))/e;bS.lastError=bT;return ac+F+h end;function Control.FF(coeffs,bQ)local bV={}bV.coeffs=coeffs;bV.degree=#coeffs-1;if bQ and bQ~=0 then bV.period=bQ end;bV.derivs={}return bV end;function Control.processFF(bS,bC,e)local bW=0*bC;local bX=bC;local bY=bC;for F=1,bS.degree+1 do bY=bS.derivs[F]bS.derivs[F]=bX;bW=bW+bS.coeffs[F]*bX;if bY then local aT=bX-bY;if F==1 and bS.period then aT=(aT+bS.period/2)%bS.period-bS.period/2 end;bX=aT/e else break end end;return bW end;function Nav.toLocal(bZ,b_,c0)local c1=bZ-b_;return Quaternion.Inverse(c0)*c1 end;function Nav.toGlobal(c2,b_,c0)local c1=c0*c2;return c1+b_ end;function Nav.cartToPol(c3)local ag=c3.magnitude;local ah=Vector3.SignedAngle(Vector3.forward,c3,Vector3.up)local bt=90-Vector3.Angle(Vector3.up,c3)return Vector3(ag,ah,bt)end;function Nav.cartToCyl(c3)local c4=Vector3(c3.x,0,c3.z)local c5=c4.magnitude;local bt=Vector3.SignedAngle(Vector3.forward,c3,Vector3.up)local a4=c3.y;return Vector3(c5,bt,a4)end;function Nav.polToCart(c3)local ag,ah,bt=c3.x,c3.y,c3.z;local aF=Mathf.Sin(ah)*Mathf.Cos(bt)local bJ=Mathf.Sin(bt)local a4=Mathf.Cos(ah)*Mathf.Cos(bt)return ag*Vector3(aF,bJ,a4)end;function Nav.cylToCart(c3)local c5,bt,c6=c3.x,c3.y,c3.z;local aF=c5*Mathf.Sin(bt)local bJ=c6;local a4=c5*Mathf.Cos(bt)return Vector3(aF,bJ,a4)end;function Targeting.firstOrderTargeting(c7,c8,c9)local ca=c7-Vector3.Project(c7,c8)local cb=Vector3.Dot(c8,c7-ca)/c8.sqrMagnitude;local m,n=MathUtil.solveQuadratic(cb-c9*c9,2*cb,ca.sqrMagnitude+cb*cb)local cc=nil;if m and m>=0 then cc=m end;if n and n>=0 and n<m then cc=n end;return cc and(c7+cc*c8).normalized or nil end;function Targeting.secondOrderTargeting(c7,cd,ce,c9,cf,cg)local m=-0.25*ce.sqrMagnitude;local n=-Vector3.Dot(cd,ce)local Q=-(cd.sqrMagnitude-c9*c9+Vector3.Dot(c7,ce))local h=-2*Vector3.Dot(c7,cd)local bT=-c7.sqrMagnitude;local g;local ch=ce.magnitude;local ci=cd.magnitude;local cj=c7.magnitude;local ck,cl=MathUtil.solveQuadratic(0.5*ch,ci+c9,-cj)local cm=math.max(ck,cl)local cn;local coeffs={0.5*ch,ci-c9,cj}if MathUtil.ruleOfSigns(coeffs,0)==2 then local co,cp=MathUtil.solveQuadratic(coeffs[1],coeffs[2],coeffs[3])if co then cn=math.min(co,cp)end end;if not cn or cn<cm then local bh,bi,bn=MathUtil.solveCubic(4*m,3*n,2*Q,h)if not bn then if bh>cm then cn=bh end else local co=math.min(bh,bn)local cp=math.max(bh,bn)if co>cm then cn=co elseif cp>cm then cn=cp end end;if not cn then return end end;local function cq(aF)return bT+aF*(h+aF*(Q+aF*(n+aF*m)))end;g=MathUtil.ITP(cq,cm,cn,1e-4,25)if not g then return end;if g>=cm and g<=cn then local cr=c7+cd*g+0.5*ce*g*g;if cr.sqrMagnitude>=cf*cf and cr.sqrMagnitude<=cg*cg then return cr,g end end end;function Targeting.AIPPN(cs,c7,ct,c8,cu)local cd=c8-ct;local cv=Vector3.Dot(-cd,c7.normalized)if cv<=0 then cv=10 end;local cw=c7.magnitude/cv;local cx=Vector3.Cross(c7,cd)/c7.sqrMagnitude;local cy=Vector3.Cross(c7,cu)/c7.sqrMagnitude*cw/2;local cz=cx+cy;local cA=Vector3.Cross(cz,c7.normalized)local cB=Vector3.ProjectOnPlane(cA,ct).normalized;local cC=cs*ct.magnitude*cz.magnitude;return cC*cB end;function Targeting.ATPN(cs,c7,ct,c8,cu)local cd=c8-ct;local cv=-Vector3.Dot(cd,c7.normalized)if cv<=0 then cv=10 end;local cx=Vector3.Cross(c7,cd)/c7.sqrMagnitude;local cA=Vector3.Cross(cx,c7.normalized)local cD=Vector3.ProjectOnPlane(cu,c7)return cs*cv*cA+0.5*cs*cu end;function BlockUtil.getWeaponsByName(bA,cE,ba,cF)if DEBUG then bA:Log("searching for "..cE)end;local cG=bA:GetAllSubConstructs()local cH={}ba=ba or-1;local Q=ba;if not cF or cF==0 or cF==2 then for F=0,bA:GetWeaponCount()-1 do if Q==0 then break end;if bA:GetWeaponBlockInfo(F).CustomName==cE then table.insert(cH,{subIdx=nil,wpnIdx=F})if DEBUG then bA:Log("found weapon "..cE.." on hull, type "..bA:GetWeaponInfo(F).WeaponType)end;Q=Q-1 end end end;if not cF or cF==1 or cF==2 then for p=1,#cG do local bp=cG[p]for F=0,bA:GetWeaponCountOnSubConstruct(bp)-1 do if Q==0 then break end;if bA:GetWeaponBlockInfoOnSubConstruct(bp,F).CustomName==cE then table.insert(cH,{subIdx=bp,wpnIdx=F})if DEBUG then bA:Log("found weapon "..cE.." on subobj "..bp..", type "..bA:GetWeaponInfo(F).WeaponType)end;Q=Q-1 end end end end;if DEBUG then bA:Log("weapon count: "..#cH)end;return cH end;function BlockUtil.getSubConstructsByName(bA,cE,ba)if DEBUG then bA:Log("searching for "..cE)end;local cG=bA:GetAllSubConstructs()local cI={}ba=ba or-1;local Q=ba;for p=1,#cG do local bp=cG[p]if Q==0 then break end;if bA:GetSubConstructInfo(bp).CustomName==cE then table.insert(cI,bp)if DEBUG then bA:Log("found subobj "..cE)end;Q=Q-1 end end;if DEBUG then bA:Log("subobj count: "..#cI)end;return cI end;function BlockUtil.getBlocksByName(bA,cE,type,ba)if DEBUG then bA:Log("searching for "..cE)end;local cJ={}ba=ba or-1;local Q=ba;for p=0,bA:Component_GetCount(type)-1 do if Q==0 then break end;if bA:Component_GetBlockInfo(type,p).CustomName==cE then table.insert(cJ,p)if DEBUG then bA:Log("found component "..cE)end;Q=Q-1 end end;if DEBUG then bA:Log("component count: "..#cJ)end;return cJ end;function BlockUtil.getWeaponInfo(bA,cK)if cK.subIdx then return bA:GetWeaponInfoOnSubConstruct(cK.subIdx,cK.wpnIdx)end;return bA:GetWeaponInfo(cK.wpnIdx)end;function BlockUtil.getWeaponBlockInfo(bA,cK)if cK.subIdx then return bA:GetWeaponBlockInfoOnSubConstruct(cK.subIdx,cK.wpnIdx)end;return bA:GetWeaponBlockInfo(cK.wpnIdx)end;function BlockUtil.aimWeapon(bA,cK,cL,cM)if cK.subIdx then bA:AimWeaponInDirectionOnSubConstruct(cK.subIdx,cK.wpnIdx,cL.x,cL.y,cL.z,cM)else bA:AimWeaponInDirection(cK.wpnIdx,cL.x,cL.y,cL.z,cM)end end;function BlockUtil.fireWeapon(bA,cK,cM)if cK.subIdx then return bA:FireWeaponOnSubConstruct(cK.subIdx,cK.wpnIdx,cM)end;return bA:FireWeapon(cK.wpnIdx,cM)end;function Combat.pickTarget(bA,cN,cO)cO=cO or function(U,cP)return cP.Priority end;local bC,cQ;for F in MathUtil.range(bA:GetNumberOfTargets(cN))do local cP=bA:GetTargetInfo(cN,F)local cR=cO(bA,cP)if not bC or cR>cQ then bC=cP;cQ=cR end end;return bC end;function Combat.CheckConstraints(bA,cS,cT,cU)local cV;if cU then cV=bA:GetWeaponConstraintsOnSubConstruct(cU,cT)else cV=bA:GetWeaponConstraints(cT)end;local cW=bA:GetConstructForwardVector()local cX=bA:GetConstructUpVector()local cY=Quaternion.LookRotation(cW,cX)cS=Quaternion.Inverse(cY)*cS;if cV.InParentConstructSpace and cU then local cZ=bA:GetSubConstructInfo(cU).localRotation;cS=Quaternion.inverse(cZ)*cS end;local c_=MathUtil.angleOnPlane(Vector3.forward,cS,Vector3.up)local d0=cS;d0.z=0;local O=Mathf.Atan2(cS.z,d0.magnitude)local d1=c_>cV.MinAzimuth and c_<cV.MaxAzimuth;local d2=O>cV.MinElevation and O<cV.MaxElevation;if cV.FlipAzimuth then d1=not d1 end;if d1 and d2 then return true end;c_=c_+180;O=180-O;if O>180 then O=O-360 end;if O<-180 then O=O+360 end;d1=c_>cV.MinAzimuth and c_<cV.MaxAzimuth;d2=O>cV.MinElevation and O<cV.MaxElevation;if cV.FlipAzimuth then d1=not d1 end;if d1 and d2 then return true end;return false end;function StringUtil.LogVector(bA,bK,d3)bA:Log(d3 .."("..bK.x..", "..bK.y..", "..bK.z..")")end

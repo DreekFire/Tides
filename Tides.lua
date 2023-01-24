@@ -748,11 +748,9 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
   end
   local rfn
   if fn(a) > fn(b) then
-    rfn = function(x)
+    fn = function(x)
       return -fn(x)
     end
-  else
-    rfn = fn
   end
   eps = eps or 1e-5
   iterlimit = iterlimit or 25
@@ -767,8 +765,11 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
   local j = 0
   while b - a > 2 * eps and j < iterlimit do
     -- Interpolate (I)
-    local x_bisect = (a + b) / 2
-    local x_falsi = (b * fn(a) - a * fn(b)) / (fn(a) - fn(b))
+    local x_bisect = 0.5 * (a + b)
+    local base = fn(a) - fn(b)
+    if base == 0 then return a end
+    local x_falsi = (b * fn(a) - a * fn(b)) / base
+
 
     -- Truncate (T)
     local diff = x_bisect - x_falsi
@@ -777,7 +778,7 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
     local x_t = delta <= math.abs(diff) and x_falsi + sigma * delta or x_bisect
 
     -- Project (P)
-    local rho_k = eps * 2 ^ (n_max - j) - (b - a) / 2
+    local rho_k = eps * 2 ^ (n_max - j) - 0.5 * (b - a)
     local x_p = math.abs(x_t - x_bisect) <= rho_k and x_t or x_bisect - sigma * rho_k
 
     -- Update
@@ -792,7 +793,9 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
     end
     j = j + 1
   end
-  return (a + b) / 2, j == iterlimit
+  local base = (fn(a) - fn(b))
+  if base ~= 0 then return (b * fn(a) - a * fn(b)) / base, j == iterlimit end
+  return a, j == iterlimit
 end
 
 -- thanks to Ribtoks and Frédéric van der Plancke on StackOverflow for algorithm
@@ -1217,9 +1220,10 @@ end
 
 -- Sets the size of the RingBuffer
 -- Equivalent to filling beginning with nils
-function RingBuffer.setSize(rb, size)
+-- todo: make compatible with capacity
+--[[function RingBuffer.setSize(rb, size)
   rb.size = size
-end
+end--]]
 
 -- Adds a value to the tail of the RingBuffer.
 function RingBuffer.push(rb, value)
@@ -1249,6 +1253,38 @@ function RingBuffer.get(rb, idx)
   return rb.buf[(rb.head + idx - 2) % rb.capacity + 1]
 end
 
+function InterpolatedSearch(I, list, left, right, target, findClosest, iterLim)
+    iterLim = iterLim or 50
+    local a, b, split
+    local totalIter = 0
+    while right > left do
+      a = list[left]
+      if a == target then return left end
+      if a > target then return findClosest and left or nil end
+      b = list[right]
+      if b == target then return right end
+      if b < target then return findClosest and right or nil end
+      split = math.floor((target - a) / (b - a) * (right - left) + left)
+      split = math.min(math.max(split, left + 1), right - 1)
+      if list[split] == target then return split end
+      if target < list[split] then
+        if findClosest and math.abs(list[split - 1] - target) > math.abs(list[split] - target) then
+          return split
+        end
+        right = split - 1
+      else
+        if findClosest and math.abs(list[split + 1] - target) > math.abs(list[split] - target) then
+          return split
+        end
+        left = split + 1
+      end
+      totalIter = totalIter + 1
+      if totalIter > iterLim then
+        break
+      end
+    end
+    return findClosest and left or nil
+  end
 VectorN.mt = getmetatable({}) or {}
 VectorN.mt.__add = function(a, b)
   local aInt = type(a) == "number"
@@ -1533,7 +1569,7 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
       end
     end
     if not t2 then
-      return nil
+      return
     end
   end
 
@@ -1543,7 +1579,7 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   end
   t = MathUtil.ITP(poly, t1, t2, 1e-4, 25)
 
-  if not t then return nil end
+  if not t then return end
   if t >= t1 and t <= t2 then
     local intercept = relPos + relVel * t + 0.5 * accel * t * t
     if intercept.sqrMagnitude >= minRange * minRange and intercept.sqrMagnitude <= maxRange * maxRange then

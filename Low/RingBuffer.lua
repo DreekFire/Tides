@@ -25,9 +25,10 @@ end
 
 -- Sets the size of the RingBuffer
 -- Equivalent to filling beginning with nils
-function RingBuffer.setSize(rb, size)
+-- todo: make compatible with capacity
+--[[function RingBuffer.setSize(rb, size)
   rb.size = size
-end
+end--]]
 
 -- Adds a value to the tail of the RingBuffer.
 function RingBuffer.push(rb, value)

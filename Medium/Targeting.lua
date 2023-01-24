@@ -74,7 +74,7 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
       end
     end
     if not t2 then
-      return nil
+      return
     end
   end
 
@@ -84,7 +84,7 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   end
   t = MathUtil.ITP(poly, t1, t2, 1e-4, 25)
 
-  if not t then return nil end
+  if not t then return end
   if t >= t1 and t <= t2 then
     local intercept = relPos + relVel * t + 0.5 * accel * t * t
     if intercept.sqrMagnitude >= minRange * minRange and intercept.sqrMagnitude <= maxRange * maxRange then
