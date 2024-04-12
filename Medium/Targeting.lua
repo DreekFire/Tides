@@ -5,13 +5,16 @@
 -- targetVel should be relative to the gun for projectiles, absolute for missiles
 -- Also use this for TPG guidance on missiles
 function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
+  if targetVel.sqrMagnitude == 0 then
+    return relPos.normalized
+  end
   local closest = relPos - Vector3.Project(relPos, targetVel)
   local timeAlongLine = Vector3.Dot(targetVel, relPos - closest) / targetVel.sqrMagnitude
   -- by pythagorean theorem, intercept time t occurs when
-  --   (t + timeAlongLine)^2 + closest.sqrMagnitude = (muzzle * t)^2
-  local a, b = MathUtil.solveQuadratic(timeAlongLine - muzzle * muzzle,
-                                                2 * timeAlongLine,
-                                                closest.sqrMagnitude + timeAlongLine * timeAlongLine)
+  --   (t + timeAlongLine)^2 * targetVel.sqrMagnitude + closest.sqrMagnitude = (muzzle * t)^2
+  local a, b = MathUtil.solveQuadratic(targetVel.sqrMagnitude - muzzle * muzzle,
+                                                2 * timeAlongLine * targetVel.sqrMagnitude,
+                                                closest.sqrMagnitude + timeAlongLine * timeAlongLine * targetVel.sqrMagnitude)
   local interceptTime = nil
   if a and a >= 0 then interceptTime = a end
   if b and b >= 0 and b < a then interceptTime = b end
@@ -87,7 +90,7 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   if not t then return end
   if t >= t1 and t <= t2 then
     local intercept = relPos + relVel * t + 0.5 * accel * t * t
-    if intercept.sqrMagnitude >= minRange * minRange and intercept.sqrMagnitude <= maxRange * maxRange then
+    if intercept.magnitude >= minRange and intercept.magnitude <= maxRange then
       return intercept, t
     end
   end

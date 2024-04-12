@@ -4,9 +4,9 @@ VectorN.mt.__add = function(a, b)
   local bInt = type(b) == "number"
   if not aInt and bInt then return b + a end
   if aInt and not bInt then
-    return MathUtil.combine(a, b, function(k, x, y) return a + y end)
+    return Stats.combine(a, b, function(k, x, y) return a + y end)
   else
-    return MathUtil.combine(a, b, function(k, x, y) return x + y end)
+    return Stats.combine(a, b, function(k, x, y) return x + y end)
   end
 end
 
@@ -25,7 +25,7 @@ VectorN.mt.__mul = function(a, b)
     end
     return res
   else
-    return MathUtil.combine(a, b, function(k, x, y) return x * y end)
+    return Stats.combine(a, b, function(k, x, y) return x * y end)
   end
 end
 
@@ -40,7 +40,7 @@ VectorN.mt.__div = function(a, b)
     end
     return res
   else
-    return MathUtil.combine(a, b, function(k, x, y) return x / y end)
+    return Stats.combine(a, b, function(k, x, y) return x / y end)
   end
 end
 

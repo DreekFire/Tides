@@ -123,104 +123,6 @@ function MathUtil.combine(a, b, fun)
 end
 
 --[[
-
-]]
-function MathUtil.distribution()
-  return { n = 0 }
-end
-
-function MathUtil.updateDistribution(distr, sample)
-  distr.n = distr.n + 1
-  if distr.n == 1 then
-    distr.mean = sample
-    distr.covariance = {}
-    local d = #sample
-    for i = 1, d do
-      local cov = {}
-      for j = 1, d do
-        cov[j] = 0
-      end
-      distr.covariance[i] = cov
-    end
-  else
-    distr.mean = distr.mean + (1 / (distr.n + 1)) * sample
-    -- todo: update covariance using online covariance update algorithm on wikipedia
-    -- correctness of that algorithm was disputed by a mathoverflow user so double-check before using
-  end
-end
-
-function MathUtil.mean(distr)
-  return distr.mean
-end
-
-function MathUtil.covariance(distr)
-  return distr.cov
-end
-
---[[
-  Returns:
-    z - a normally distributed random number
---]]
-function MathUtil.normal()
-  local z, z1 = MathUtil.boxMuller()
-  return z
-end
-
---[[
-  Arguments:
-    z - a z-score
-  Returns:
-    d - the standard normal probability density function at z
-]]
-function MathUtil.normalPDF(z)
-  return math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
-end
-
---[[
-  Arguments:
-    z - a z-score
-  Returns:
-    p - the p-value corresponding to that z-score. Approximately calculated using Zelen and Severo (1964) approximation
---]]
-function MathUtil.normalCDF(z)
-  local b0 = 0.2316419
-  local b1 = 0.319381530
-  local b2 = -0.356563782
-  local b3 = 1.781477937
-  local b4 = -1.821255978
-  local b5 = 1.330274429
-  local t = 1 / (1 + b0 * z)
-  return 1 - MathUtil.normalPDF(z) * (b1 * t + b2 * t^2 + b3 * t^3 + b4 * t^4 + b5 * t^5)
-end
-
---[[
-  Arguments:
-    p - a p-value
-  Returns:
-    z - the z-score corresponding to that p-value. Approximately calculated using Shore (1982) approximation
---]]
-function MathUtil.inverseNorm(p)
-  local pRight = p >= 0.5 and p or -p
-  local z = 5.55556 * (1 - ((1 - pRight) / pRight) ^ 0.1186) -- Shore (1982) approximation for normal quantile
-  if p < 0.5 then z = -z end
-  return z
-end
-
---[[
-  Returns:
-    z1, z2 - two normally distributed random numbers
---]]
-function MathUtil.boxMuller()
-  local u1 = math.random()
-  local u2 = math.random() -- idk what algorithm math.random uses, but it might be an LCG since it's simple and common
-  u2 = math.random() -- it's also not very high-quality, which also describes LCGs. Box-Muller performs poorly when the
-  u2 = math.random() -- input comes from two consecutive numbers of an LCG, so we throw away values in between.
-  local r = math.sqrt(-2 * math.log(u1))
-  local theta = 2 * math.pi * u2
-  return r * math.cos(theta), r * math.sin(theta)
-end
-
---[[
   Law of Cosines: a^2 = b^2 + c^2 - 2bc * cos(A)
   Law of Sines: a / sin(A) = b / sin(B) = c / sin(C)
 
@@ -440,7 +342,6 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
   if fn(a) * fn(b) > 0 then
     return nil
   end
-  local rfn
   if fn(a) > fn(b) then
     fn = function(x)
       return -fn(x)
@@ -456,14 +357,19 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
   local n_bisect = math.ceil(math.log((b - a) / (2 * eps), 2))
   local n_max = n_bisect + n0
 
-  local j = 0
-  while b - a > 2 * eps and j < iterlimit do
+  local iters = iterlimit
+  for j=1, iterlimit do
     -- Interpolate (I)
-    local x_bisect = 0.5 * (a + b)
-    local base = fn(a) - fn(b)
+    local fa = fn(a)
+    local fb = fn(b)
+    local base = fa - fb
     if base == 0 then return a end
-    local x_falsi = (b * fn(a) - a * fn(b)) / base
-
+    local x_bisect = 0.5 * (a + b)
+    local x_falsi = (b * fa + a * fb) / base
+    -- FtD Lua is a bit faulty so we need this duplicate line to prevent skipped instructions from causing problems
+    if x_bisect < a or x_bisect > b then
+      x_bisect = 0.5 * (a + b)
+    end
 
     -- Truncate (T)
     local diff = x_bisect - x_falsi
@@ -482,23 +388,27 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
     elseif y_p < 0 then
       a = x_p
     else
-      a = x_p
-      b = x_p
+      return x_p, j == iterlimit
     end
-    j = j + 1
+    if b - a < 2 * eps then
+      iters = j
+      break
+    end
   end
-  local base = (fn(a) - fn(b))
-  if base ~= 0 then return (b * fn(a) - a * fn(b)) / base, j == iterlimit end
-  return a, j == iterlimit
+  local fa = fn(a)
+  local fb = fn(b)
+  local base = fb - fa
+  if base ~= 0 then return (a * fb - b * fa) / base, iters == iterlimit end
+  return a, iters == iterlimit
 end
 
 -- thanks to Ribtoks and Frédéric van der Plancke on StackOverflow for algorithm
 function MathUtil.binomCoeffs(depth, calc_all)
   if calc_all then
-    coeffs = {}
+    local coeffs = {}
     -- WIP
   else
-    coeffs = {}
+    local coeffs = {}
     coeffs[1] = 1
     for k=1,depth do
       coeffs[k+1] = (coeffs[k] * (depth - k)) / (k + 1)

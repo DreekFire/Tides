@@ -15,8 +15,8 @@ end
 function Control.processPID(ctrl, e, time)
   e = ctrl.period and (e + ctrl.period / 2) % ctrl.period - ctrl.period / 2 or e
   local p = ctrl.kP * e
-  local i, wt = ctrl.kI * Accumulator.update(ctrl.Iacc, e, time)
-  i = i / wt
+  local i, wt = Accumulator.update(ctrl.Iacc, e, time)
+  i = ctrl.kI * i / wt
   local d = ctrl.kD * (e - (ctrl.lastError or e)) / time
   ctrl.lastError = e
   return p + i + d

@@ -429,104 +429,6 @@ function MathUtil.combine(a, b, fun)
 end
 
 --[[
-
-]]
-function MathUtil.distribution()
-  return { n = 0 }
-end
-
-function MathUtil.updateDistribution(distr, sample)
-  distr.n = distr.n + 1
-  if distr.n == 1 then
-    distr.mean = sample
-    distr.covariance = {}
-    local d = #sample
-    for i = 1, d do
-      local cov = {}
-      for j = 1, d do
-        cov[j] = 0
-      end
-      distr.covariance[i] = cov
-    end
-  else
-    distr.mean = distr.mean + (1 / (distr.n + 1)) * sample
-    -- todo: update covariance using online covariance update algorithm on wikipedia
-    -- correctness of that algorithm was disputed by a mathoverflow user so double-check before using
-  end
-end
-
-function MathUtil.mean(distr)
-  return distr.mean
-end
-
-function MathUtil.covariance(distr)
-  return distr.cov
-end
-
---[[
-  Returns:
-    z - a normally distributed random number
---]]
-function MathUtil.normal()
-  local z, z1 = MathUtil.boxMuller()
-  return z
-end
-
---[[
-  Arguments:
-    z - a z-score
-  Returns:
-    d - the standard normal probability density function at z
-]]
-function MathUtil.normalPDF(z)
-  return math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
-end
-
---[[
-  Arguments:
-    z - a z-score
-  Returns:
-    p - the p-value corresponding to that z-score. Approximately calculated using Zelen and Severo (1964) approximation
---]]
-function MathUtil.normalCDF(z)
-  local b0 = 0.2316419
-  local b1 = 0.319381530
-  local b2 = -0.356563782
-  local b3 = 1.781477937
-  local b4 = -1.821255978
-  local b5 = 1.330274429
-  local t = 1 / (1 + b0 * z)
-  return 1 - MathUtil.normalPDF(z) * (b1 * t + b2 * t^2 + b3 * t^3 + b4 * t^4 + b5 * t^5)
-end
-
---[[
-  Arguments:
-    p - a p-value
-  Returns:
-    z - the z-score corresponding to that p-value. Approximately calculated using Shore (1982) approximation
---]]
-function MathUtil.inverseNorm(p)
-  local pRight = p >= 0.5 and p or -p
-  local z = 5.55556 * (1 - ((1 - pRight) / pRight) ^ 0.1186) -- Shore (1982) approximation for normal quantile
-  if p < 0.5 then z = -z end
-  return z
-end
-
---[[
-  Returns:
-    z1, z2 - two normally distributed random numbers
---]]
-function MathUtil.boxMuller()
-  local u1 = math.random()
-  local u2 = math.random() -- idk what algorithm math.random uses, but it might be an LCG since it's simple and common
-  u2 = math.random() -- it's also not very high-quality, which also describes LCGs. Box-Muller performs poorly when the
-  u2 = math.random() -- input comes from two consecutive numbers of an LCG, so we throw away values in between.
-  local r = math.sqrt(-2 * math.log(u1))
-  local theta = 2 * math.pi * u2
-  return r * math.cos(theta), r * math.sin(theta)
-end
-
---[[
   Law of Cosines: a^2 = b^2 + c^2 - 2bc * cos(A)
   Law of Sines: a / sin(A) = b / sin(B) = c / sin(C)
 
@@ -746,7 +648,6 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
   if fn(a) * fn(b) > 0 then
     return nil
   end
-  local rfn
   if fn(a) > fn(b) then
     fn = function(x)
       return -fn(x)
@@ -762,14 +663,19 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
   local n_bisect = math.ceil(math.log((b - a) / (2 * eps), 2))
   local n_max = n_bisect + n0
 
-  local j = 0
-  while b - a > 2 * eps and j < iterlimit do
+  local iters = iterlimit
+  for j=1, iterlimit do
     -- Interpolate (I)
-    local x_bisect = 0.5 * (a + b)
-    local base = fn(a) - fn(b)
+    local fa = fn(a)
+    local fb = fn(b)
+    local base = fa - fb
     if base == 0 then return a end
-    local x_falsi = (b * fn(a) - a * fn(b)) / base
-
+    local x_bisect = 0.5 * (a + b)
+    local x_falsi = (b * fa + a * fb) / base
+    -- FtD Lua is a bit faulty so we need this duplicate line to prevent skipped instructions from causing problems
+    if x_bisect < a or x_bisect > b then
+      x_bisect = 0.5 * (a + b)
+    end
 
     -- Truncate (T)
     local diff = x_bisect - x_falsi
@@ -788,23 +694,27 @@ function MathUtil.ITP(fn, a, b, eps, iterlimit)
     elseif y_p < 0 then
       a = x_p
     else
-      a = x_p
-      b = x_p
+      return x_p, j == iterlimit
     end
-    j = j + 1
+    if b - a < 2 * eps then
+      iters = j
+      break
+    end
   end
-  local base = (fn(a) - fn(b))
-  if base ~= 0 then return (b * fn(a) - a * fn(b)) / base, j == iterlimit end
-  return a, j == iterlimit
+  local fa = fn(a)
+  local fb = fn(b)
+  local base = fb - fa
+  if base ~= 0 then return (a * fb - b * fa) / base, iters == iterlimit end
+  return a, iters == iterlimit
 end
 
 -- thanks to Ribtoks and Frédéric van der Plancke on StackOverflow for algorithm
 function MathUtil.binomCoeffs(depth, calc_all)
   if calc_all then
-    coeffs = {}
+    local coeffs = {}
     -- WIP
   else
-    coeffs = {}
+    local coeffs = {}
     coeffs[1] = 1
     for k=1,depth do
       coeffs[k+1] = (coeffs[k] * (depth - k)) / (k + 1)
@@ -1193,6 +1103,177 @@ function MathUtil.solveQuartic(c0, c1, c2, c3, c4)
   return s0, s1, s2, s3
 end
 
+function Matrix3.Matrix3(vals)
+  local mat = {}
+  for i=1,9 do
+    mat[i] = vals[i]
+  end
+  setmetatable(mat, Matrix3.meta)
+  return mat
+end
+
+function Matrix3.get(mat, row, col)
+  return mat[(row - 1) * 3 + col]
+end
+
+function Matrix3.set(mat, row, col, val)
+  mat[(row - 1) * 3 + col] = val
+end
+
+function Matrix3.scalarmul(mat, s)
+  local ret = {}
+  for i=1,9 do
+    ret[i] = s * mat[i]
+  end
+  return ret
+end
+
+function Matrix3.vecmul(mat, vec)
+  local ret = Vector3.zero
+  for row=0,2 do
+    local val = 0
+    for col=1,3 do
+      val = val + vec[Matrix3.vecIdx[col]] * mat[row * 3 + col]
+    end
+    ret[Matrix3.vecIdx[row + 1]] = val
+  end
+end
+
+function Matrix3.matmul(mat1, mat2)
+  local ret = {}
+  for i=0,2 do
+    for j=0,2 do
+      local val = 0
+      for k=0,2 do
+        val = val + mat1[i * 3 + k + 1] * mat2[k * 3 + j + 1]
+      end
+      ret[i * 3 + j + 1] = val
+    end
+  end
+end
+
+function Matrix3.mul(a, b)
+  if getmetatable(a) ~= Matrix3.meta then
+    if a.x then return Matrix3.vecmul(Matrix3.transpose(b), a) end
+    return Matrix3.mul(b, a)
+  end
+  if getmetatable(b) == Matrix3.meta then
+    return Matrix3.matmul(a, b)
+  end
+  if b.x then
+    return Matrix3.vecmul(a, b)
+  end
+  return Matrix3.scalarmul(a, b)
+end
+
+function Matrix3.Identity()
+  return {
+    1, 0, 0,
+    0, 1, 0,
+    0, 0, 1,
+  }
+end
+
+function Matrix3.Zero()
+  return {
+    0, 0, 0,
+    0, 0, 0,
+    0, 0, 0,
+  }
+end
+
+function Matrix3.pow(mat, pow)
+  local prod = mat
+  local temp = mat
+  while true do
+    pow = math.floor(pow / 2)
+    if pow % 2 == 1 then
+      prod = Matrix3.matmul(mat, temp)
+    end
+    if pow >= 2 then
+      temp = Matrix3.matmul(temp, temp)
+    else
+      break
+    end
+  end
+  return prod
+end
+
+function Matrix3.add(mat1, mat2)
+  local ret = {}
+  for i=1,9 do
+    ret[i] = mat1[i] + mat2[i]
+  end
+  return ret
+end
+
+function Matrix3.hadamard(mat1, mat2)
+  local ret = {}
+  for i=1,9 do
+    ret[i] = mat1[i] * mat2[i]
+  end
+  return ret
+end
+
+function Matrix3.transpose(mat)
+  local transposed = {}
+  for row=0,2 do
+    for col=0,2 do
+      transposed[col * 3 + row + 1] = mat[row * 3 + col + 1]
+    end
+  end
+  return transposed
+end
+
+function Matrix3.determinant(mat)
+  local diag1 = 0
+  local diag2 = 0
+  for d=0,2 do
+    for s=0,2 do
+      diag1 = diag1 + mat[s * 3 + (s + d) % 3 + 1]
+      diag2 = diag2 + mat[s * 3 + (-s + d) % 3 + 1]
+    end
+  end
+  return diag1 - diag2
+end
+
+function Matrix3.adjugate(mat)
+  local adj = {}
+  for row=0,2 do
+    for col=0,2 do
+      local cofac = 0
+      for i=0,1 do
+        local diag = 1
+        for j=1,2 do
+          -- this indexing is painful; I understand why most languages start from 0 now
+          diag = diag * mat[(row + j) % 3 * 3 + (col + i + j) % 3 + 1]
+        end
+        cofac = cofac + diag
+      end
+      adj[col * 3 + row + 1] = cofac
+    end
+  end
+  return adj
+end
+
+function Matrix3.inverse(mat)
+  local det = Matrix3.determinant(mat)
+  if Stats.isZero(det) then return end
+  local adj = Matrix3.cofactors(mat)
+  return adj / det
+end
+
+Matrix3.vecIdx = {
+  'x', 'y', 'z'
+}
+
+Matrix3.meta = {
+  __add = Matrix3.add,
+  __mul = Matrix3.mul,
+  __unm = function(m) return Matrix3.scalarmul(m, -1) end,
+  __pow = Matrix3.pow,
+}
+
 --[[
   A ringbuffer is an efficient FIFO buffer in the form of a circular
   array. This allows for fast removal from the ends (though the
@@ -1253,7 +1334,7 @@ function RingBuffer.get(rb, idx)
   return rb.buf[(rb.head + idx - 2) % rb.capacity + 1]
 end
 
-function InterpolatedSearch(I, list, left, right, target, findClosest, iterLim)
+function Search.interpolatedSearch(list, left, right, target, findClosest, iterLim)
     iterLim = iterLim or 50
     local a, b, split
     local totalIter = 0
@@ -1285,15 +1366,200 @@ function InterpolatedSearch(I, list, left, right, target, findClosest, iterLim)
     end
     return findClosest and left or nil
   end
+
+function Stats.Distribution(vars)
+  local distr = { n = 0, vars = vars }
+  if vars then
+    local mean = {}
+    local cov = {}
+    local nVars = #vars
+    for i, v in ipairs(vars) do
+      mean[v] = 0
+      for j=1, nVars do
+        cov[(i - 1) * nVars + j] = 0
+      end
+    end
+    distr.mean = mean
+    distr.cov = cov
+  else
+    distr.mean = 0
+    distr.cov = 0
+  end
+  return distr
+end
+
+function Stats.updateDistribution(distr, sample, weight)
+  local oldN = distr.n
+  weight = weight or 1
+  distr.n = distr.n + weight
+
+  if distr.vars then
+    local oldMeans = {}
+    local nVars = distr.vars and #distr.vars or 1
+    for i, v in ipairs(distr.vars) do
+      -- Update mean
+      oldMeans[i] = distr.mean[v]
+      local mu = oldMeans[i] + sample[v] * weight / distr.n
+
+      -- Update covariance
+      for j=i, nVars do
+        local v2 = distr.vars[j]
+        local mu2 = distr.mean[v2]
+        local upd = (weight or 1) * (sample[v] - mu) * (sample[v2] - mu2)
+        distr.cov[(i - 1) * nVars + j] = (distr.cov[(i - 1) * nVars + j] * oldN + upd) / distr.n
+        distr.cov[(j - 1) * nVars + i] = distr.cov[(i - 1) * nVars + j]
+      end
+
+      distr.mean[v] = mu
+    end
+  else
+    local mu = distr.mean + sample * weight / distr.n
+    distr.cov = (distr.cov * oldN + weight * (sample - mu) * (sample - distr.mean)) / distr.n
+
+    distr.mean = mu
+  end
+  return distr
+end
+
+function Stats.updateDistributionBatched(distr, samples, weights)
+  if #samples == 0 then return end
+  local sT
+  local nVars = distr.vars and #distr.vars or 1
+
+  local wSum = 0
+  for j=1, #samples do
+    wSum = wSum + (weights and weights[j] or 1)
+  end
+  distr.n = distr.n + wSum
+
+  local oldN = distr.n
+  if distr.vars then
+    for i, var in ipairs(distr.vars) do
+      local col = {}
+      for j=1, #samples do
+        col[j] = samples[j][var]
+      end
+      sT[i] = col
+    end
+
+    for i, v in ipairs(distr.vars) do
+      -- Update mean
+      local sum = 0
+      for j, s in ipairs(sT[i]) do
+        sum = sum + s * (weights and weights[j] or 1)
+      end
+      local mu = distr.mean[v] + sum / distr.n
+
+      -- Update covariance
+      for j=i, nVars do
+        local mu2 = distr.mean[distr.vars[j]]
+        sum = 0
+        for s=1, #samples do
+          sum = sum + (weights and weights[s] or 1) * (sT[i][s] - mu) * (sT[j][s] - mu2)
+        end
+        distr.cov[(i - 1) * nVars + j] = (distr.cov[(i - 1) * nVars + j] * oldN + sum) / distr.n
+        distr.cov[(j - 1) * nVars + i] = distr.cov[(i - 1) * nVars + j]
+      end
+
+      distr.mean[v] = mu
+    end
+  else
+    local sum = 0
+    for i, s in ipairs(samples) do
+      sum = sum + s * (weights and weights[i] or 1)
+    end
+
+    local mu = distr.mean + sum / distr.n
+
+    sum = 0
+    for i, s in ipairs(samples) do
+      sum = sum + (weights and weights[i] or 1) * (s - mu) * (s - distr.mean)
+    end
+    distr.cov = (distr.cov * oldN + sum) / distr.n
+  end
+  return distr
+end
+
+function Stats.mean(distr)
+  return distr.mean
+end
+
+function Stats.covariance(distr)
+  return distr.cov
+end
+
+--[[
+  Returns:
+    z - a normally distributed random number
+--]]
+function Stats.normal()
+  local z, z1 = Stats.boxMuller()
+  return z
+end
+
+--[[
+  Arguments:
+    z - a z-score
+  Returns:
+    d - the standard normal probability density function at z
+]]
+function Stats.normalPDF(z)
+  return math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+end
+
+--[[
+  Arguments:
+    z - a z-score
+  Returns:
+    p - the p-value corresponding to that z-score. Approximately calculated using Zelen and Severo (1964) approximation
+--]]
+function Stats.normalCDF(z)
+  local b0 = 0.2316419
+  local b1 = 0.319381530
+  local b2 = -0.356563782
+  local b3 = 1.781477937
+  local b4 = -1.821255978
+  local b5 = 1.330274429
+  local t = 1 / (1 + b0 * z)
+  return 1 - Stats.normalPDF(z) * (b1 * t + b2 * t^2 + b3 * t^3 + b4 * t^4 + b5 * t^5)
+end
+
+--[[
+  Arguments:
+    p - a p-value
+  Returns:
+    z - the z-score corresponding to that p-value. Approximately calculated using Shore (1982) approximation
+--]]
+function Stats.inverseNorm(p)
+  local pRight = p >= 0.5 and p or -p
+  local z = 5.55556 * (1 - ((1 - pRight) / pRight) ^ 0.1186) -- Shore (1982) approximation for normal quantile
+  if p < 0.5 then z = -z end
+  return z
+end
+
+--[[
+  Returns:
+    z1, z2 - two normally distributed random numbers
+--]]
+function Stats.boxMuller()
+  local u1 = math.random()
+  local u2 = math.random() -- idk what algorithm math.random uses, but it might be an LCG since it's simple and common
+  u2 = math.random() -- it's also not very high-quality, which also describes LCGs. Box-Muller performs poorly when the
+  u2 = math.random() -- input comes from two consecutive numbers of an LCG, so we throw away values in between.
+  local r = math.sqrt(-2 * math.log(u1))
+  local theta = 2 * math.pi * u2
+  return r * math.cos(theta), r * math.sin(theta)
+end
+
 VectorN.mt = getmetatable({}) or {}
 VectorN.mt.__add = function(a, b)
   local aInt = type(a) == "number"
   local bInt = type(b) == "number"
   if not aInt and bInt then return b + a end
   if aInt and not bInt then
-    return MathUtil.combine(a, b, function(k, x, y) return a + y end)
+    return Stats.combine(a, b, function(k, x, y) return a + y end)
   else
-    return MathUtil.combine(a, b, function(k, x, y) return x + y end)
+    return Stats.combine(a, b, function(k, x, y) return x + y end)
   end
 end
 
@@ -1312,7 +1578,7 @@ VectorN.mt.__mul = function(a, b)
     end
     return res
   else
-    return MathUtil.combine(a, b, function(k, x, y) return x * y end)
+    return Stats.combine(a, b, function(k, x, y) return x * y end)
   end
 end
 
@@ -1327,7 +1593,7 @@ VectorN.mt.__div = function(a, b)
     end
     return res
   else
-    return MathUtil.combine(a, b, function(k, x, y) return x / y end)
+    return Stats.combine(a, b, function(k, x, y) return x / y end)
   end
 end
 
@@ -1369,8 +1635,8 @@ end
 function Control.processPID(ctrl, e, time)
   e = ctrl.period and (e + ctrl.period / 2) % ctrl.period - ctrl.period / 2 or e
   local p = ctrl.kP * e
-  local i, wt = ctrl.kI * Accumulator.update(ctrl.Iacc, e, time)
-  i = i / wt
+  local i, wt = Accumulator.update(ctrl.Iacc, e, time)
+  i = ctrl.kI * i / wt
   local d = ctrl.kD * (e - (ctrl.lastError or e)) / time
   ctrl.lastError = e
   return p + i + d
@@ -1582,7 +1848,7 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   if not t then return end
   if t >= t1 and t <= t2 then
     local intercept = relPos + relVel * t + 0.5 * accel * t * t
-    if intercept.sqrMagnitude >= minRange * minRange and intercept.sqrMagnitude <= maxRange * maxRange then
+    if intercept.magnitude >= minRange and intercept.magnitude <= maxRange then
       return intercept, t
     end
   end
@@ -1647,7 +1913,7 @@ end
     I - the variable passed to Update
     name - the name of the weapons to search for
            can be set by pressing shift-N in build mode
-    count - the number of blocks to search for
+    count - the number of weapons to search for
     mode - whether to search for weapons on the main hull
            or on subconstructs:
            0 = hull, 1 = subconstructs, 2 = both
@@ -1661,7 +1927,6 @@ end
 ]]--
 function BlockUtil.getWeaponsByName(I, name, count, mode)
   if DEBUG then I:Log("searching for "..name) end
-  local subcs = I:GetAllSubConstructs()
   local weapons = {}
   count = count or -1
   local c = count
@@ -1676,13 +1941,14 @@ function BlockUtil.getWeaponsByName(I, name, count, mode)
     end
   end
   if not mode or mode == 1 or mode == 2 then
+    local subcs = I:GetAllSubConstructs()
     for idx=1, #subcs do -- for some reason not an actual table so can't use pairs
       local sub = subcs[idx]
       for i=0, I:GetWeaponCountOnSubConstruct(sub) - 1 do
         if c == 0 then break end
         if I:GetWeaponBlockInfoOnSubConstruct(sub, i).CustomName == name then
           table.insert(weapons, {subIdx = sub, wpnIdx = i})
-          if DEBUG then I:Log("found weapon "..name.." on subobj "..sub..", type "..I:GetWeaponInfo(i).WeaponType) end
+          if DEBUG then I:Log("found weapon "..name.." on subobj "..sub..", type "..I:GetWeaponInfoOnSubConstruct(sub, i).WeaponType) end
           c = c - 1
         end
       end
@@ -1697,7 +1963,7 @@ end
     I - the variable passed to Update
     name - the name of the subconstructs to search for
            can be set by pressing shift-N in build mode
-    count - the number of blocks to search for
+    count - the number of subconstructs to search for
   Returns:
     subobjs - a list of subconstruct IDs where each ID
               corresponds to a subconstruct with a matching name
@@ -1726,27 +1992,167 @@ end
     I - the variable passed to Update
     type - the type of block to search for
            see help menu in lua block for list
-    name - the name of the subconstructs to search for
+    name - the name of the components to search for
            can be set by pressing shift-N in build mode
     count - the number of blocks to search for
   Returns:
     comps - a list of block indices where each index
               corresponds to a block with a matching name
 ]]--
-function BlockUtil.getBlocksByName(I, name, type, count)
+function BlockUtil.getBlocksByName(I, name, id, count)
 	if DEBUG then I:Log("searching for "..name) end
   local comps = {}
   count = count or -1
   local c = count
-  for idx=0, I:Component_GetCount(type) - 1 do
+  for idx=0, I:Component_GetCount(id) - 1 do
     if c == 0 then break end
-    if I:Component_GetBlockInfo(type, idx).CustomName == name then
+    if I:Component_GetBlockInfo(id, idx).CustomName == name then
       table.insert(comps, idx)
       if DEBUG then I:Log("found component "..name) end
       c = c - 1
     end
   end
   if DEBUG then I:Log("component count: "..#comps) end
+  return comps
+end
+
+--[[
+  If you have many names to search for, instead of
+  searching for each name individually, you can populate
+  a table containing all blocks grouped by their name.
+
+  Unnamed blocks will be placed in the array proprtion of
+  the table (i.e. t[1], t[2], ...)
+
+  For example:
+  {
+    3, 14, 15
+    "main": {2, 7, 18}
+    "secondary": {1, 4}
+  }
+
+  Arguments:
+    I - the variable passed to Update
+    mode - the same as getWeaponsByName
+  Returns:
+    weapons - a table with weapons grouped by name. Each weapon
+              is in the format {subIdx, wpnIdx}.
+              See getWeaponsByName for more
+]]--
+function BlockUtil.populateWeaponsByName(I, mode)
+	if DEBUG then I:Log("populating all weapons, mode "..mode) end
+  local weapons = {}
+  for idx=0, I:GetWeaponCount() - 1 do
+    local name = I:Component_GetBlockInfo(type, idx).CustomName
+    if name and name ~= '' then
+      weapons[name] = weapons[name] or {}
+      table.insert(weapons[name], {subIdx = nil, wpnIdx = idx})
+      if DEBUG then I:Log("found weapon "..name.." on hull, type "..I:GetWeaponInfo(idx).WeaponType) end
+    else
+      table.insert(weapons, {subIdx = nil, wpnIdx = idx})
+      if DEBUG then I:Log("found unnamed weapon on hull, type "..I:GetWeaponInfo(idx).WeaponType) end
+    end
+  end
+  if not mode or mode == 1 or mode == 2 then
+    local subcs = I:GetAllSubConstructs()
+    for idx=1, #subcs do
+      local sub = subcs[idx]
+      for i=0, I:GetWeaponCountOnSubConstruct(sub) - 1 do
+        local name = I:Component_GetBlockInfo(type, i).CustomName
+        if name and name ~= '' then
+          weapons[name] = weapons[name] or {}
+          table.insert(weapons[name], {subIdx = sub, wpnIdx = i})
+          if DEBUG then I:Log("found weapon "..name.." on subobj "..sub..", type "..I:GetWeaponInfoOnSubConstruct(sub, i).WeaponType) end
+        else
+          table.insert(weapons, {subIdx = sub, wpnIdx = i})
+          if DEBUG then I:Log("found unnamed weapon on subobj "..sub..", type "..I:GetWeaponInfoOnSubConstruct(sub, i).WeaponType) end
+        end
+      end
+    end
+  end
+  if DEBUG then
+    local count = 0
+    for k, v in pairs(weapons) do
+      if type(v) == "table" then
+        count = count + #v
+      else
+        count = count + 1 end
+    end
+    I:Log("weapon count: "..count)
+  end
+  return weapons
+end
+
+--[[
+  Arguments:
+    I - the variable passed to Update
+  Returns:
+    subobjs - a table with names as keys and a list of subconstructs
+              with that name as the value. See populateWeaponsByName
+]]--
+function BlockUtil.populateSubConstructsByName(I)
+	if DEBUG then I:Log("populating all subconstructs") end
+  local subcs = I:GetAllSubConstructs()
+  local subobjs = {}
+  for idx=1, #subcs do -- for some reason not an actual table so can't use pairs
+    local sub = subcs[idx]
+    local name = I:GetSubConstructInfo(sub).CustomName
+    if name and name ~= '' then
+      subobjs[name] = subobjs[name] or {}
+      table.insert(subobjs[name], sub)
+      if DEBUG then I:Log("found subobj "..name) end
+    else
+      table.insert(subobjs, sub)
+      if DEBUG then I:Log("found unnamed subobj") end
+    end
+  end
+  if DEBUG then
+    local count = 0
+    for k, v in pairs(subobjs) do
+      if type(v) == "table" then
+        count = count + #v
+      else
+        count = count + 1 end
+    end
+    I:Log("subobject count: "..count)
+  end
+  return subobjs
+end
+
+--[[
+  Arguments:
+    I - the variable passed to Update
+    id - the type of block to search for
+         see help menu in lua block for list
+  Returns:
+    comps - a table with names as keys and a list of indices
+            corresponding to blocks with that name as the value
+            See populateWeaponsByName
+]]--
+function BlockUtil.populateBlocksByName(I, id)
+	if DEBUG then I:Log("populating all blocks of type "..id) end
+  local comps = {}
+  for idx=0, I:Component_GetCount(id) - 1 do
+    local name = I:Component_GetBlockInfo(id, idx).CustomName
+    if name and name ~= '' then
+      comps[name] = comps[name] or {}
+      table.insert(comps[name], idx)
+      if DEBUG then I:Log("found component "..name) end
+    else
+      table.insert(comps, idx)
+      if DEBUG then I:Log("found unnamed component of type "..id) end
+    end
+  end
+  if DEBUG then
+    local count = 0
+    for k, v in pairs(comps) do
+      if type(v) == "table" then
+        count = count + #v
+      else
+        count = count + 1 end
+    end
+    I:Log("component count: "..count)
+  end
   return comps
 end
 
