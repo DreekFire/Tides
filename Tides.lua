@@ -328,7 +328,7 @@ end
 
 --[[
   Arguments:
-    set - an iterator or table
+    set - an iterator
     comp (optional) - a comparison function which
                         takes 2 arguments and
                         returns true if the first
@@ -1488,6 +1488,20 @@ function Stats.covariance(distr)
   return distr.cov
 end
 
+function Stats.namedCovariance(distr, var1, var2)
+  if not distr.vars then return distr.cov end
+  local nVars = distr.vars and #distr.vars or 1
+  for i=1,nVars do
+    if distr.vars[i] == var1 then
+      for j=1,nVars do
+        if distr.vars[j] == var2 then
+          return distr.cov[(i - 1) * nVars + j]
+        end
+      end
+    end
+  end
+end
+
 --[[
   Returns:
     z - a normally distributed random number
@@ -1765,22 +1779,34 @@ end
 -- Assumes both target and projectile travel in a straight line (i.e. no gravity)
 -- targetVel should be relative to the gun for projectiles, absolute for missiles
 -- Also use this for TPG guidance on missiles
+--[[
+  Arguments:
+    relPos - position of the target relative to muzzle
+    targetVel - absolute velocity of the target
+    muzzle - muzzle velocity of the projectile
+  Returns:
+    intercept - the position of the target at time of intercept
+    interceptTime - the time at which intercept occurs
+]]
 function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
+  if targetVel.sqrMagnitude == 0 then
+    return relPos.normalized
+  end
   local closest = relPos - Vector3.Project(relPos, targetVel)
   local timeAlongLine = Vector3.Dot(targetVel, relPos - closest) / targetVel.sqrMagnitude
   -- by pythagorean theorem, intercept time t occurs when
-  --   (t + timeAlongLine)^2 + closest.sqrMagnitude = (muzzle * t)^2
-  local a, b = MathUtil.solveQuadratic(timeAlongLine - muzzle * muzzle,
-                                                2 * timeAlongLine,
-                                                closest.sqrMagnitude + timeAlongLine * timeAlongLine)
+  --   (t + timeAlongLine)^2 * targetVel.sqrMagnitude + closest.sqrMagnitude = (muzzle * t)^2
+  local a, b = MathUtil.solveQuadratic(targetVel.sqrMagnitude - muzzle * muzzle,
+                                                2 * timeAlongLine * targetVel.sqrMagnitude,
+                                                closest.sqrMagnitude + timeAlongLine * timeAlongLine * targetVel.sqrMagnitude)
   local interceptTime = nil
   if a and a >= 0 then interceptTime = a end
   if b and b >= 0 and b < a then interceptTime = b end
-  return interceptTime and (relPos + interceptTime * targetVel).normalized or nil
+  if interceptTime then
+    return relPos + interceptTime * targetVel, interceptTime
+  end
 end
 
--- originally based on wltrup's answer to math.stackexchange.com question number 1419643
--- then switched to Newton's method, then switched to ITP
 --[[
   Arguments:
     relPos - position of the target relative to own vehicle
@@ -1789,6 +1815,7 @@ end
     muzzle - muzzle velocity of the projectile
     minRange - the minimum distance of intercept (see return values)
     maxRange - the maximum distance of intercept (see return values)
+    guess - [optional] initial guess for intercept time
   Returns:
     intercept - the position of the target at time of intercept if between minRange and maxRange
       nil otherwise
@@ -1796,7 +1823,29 @@ end
       traveled if gravity didn't exist.
     interceptTime - the time at which intercept occurs
 ]]
-function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange, maxRange)
+function Targeting.secondOrderTargetingNewton(relPos, relVel, accel, muzzle, minRange, maxRange, guess)
+  local diff = 10000
+  local lastT = 0
+  local iters = 0
+  if not guess then guess = 0 end
+  local newPos = relPos + guess * relVel + 0.5 * guess * guess * accel
+  while math.abs(diff) > 0.001 and iters < 10 do
+    local t = newPos.magnitude / muzzle
+    diff = t - lastT
+    lastT = t
+    iters = iters + 1
+    newPos = relPos + t * relVel + 0.5 * t * t * accel
+  end
+  return newPos, lastT, iters
+end
+
+Targeting.secondOrderTargeting = Targeting.secondOrderTargetingNewton
+
+-- Same arguments and return values as secondOrderTargetingNewton.
+-- This version uses ITP, and is guaranteed to return an answer if one exists, unlike Newton's method.
+-- However, it is much more complicated and, for most scenarios found in FtD, probably slower.
+function Targeting.secondOrderTargetingITP(relPos, relVel, accel, muzzle, minRange, maxRange, guess)
+  if not guess then guess = 0 end
   local a = -0.25 * accel.sqrMagnitude
   local b = -Vector3.Dot(relVel, accel)
   local c = -(relVel.sqrMagnitude - muzzle * muzzle + Vector3.Dot(relPos, accel))
@@ -1842,6 +1891,13 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   local function poly(x)
     -- Horner's method of evaluating polynomials is slightly faster
     return e + x * (d + x * (c + x * (b + x * a)))
+  end
+  if guess > t1 and t2 > guess then
+    if poly(t1) * poly(t) < 0 then
+      t2 = guess
+    else
+      t1 = guess
+    end
   end
   t = MathUtil.ITP(poly, t1, t2, 1e-4, 25)
 
@@ -2261,6 +2317,7 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   else
     con = I:GetWeaponConstraints(wepId)
   end
+  if not con or not con.Valid then return true end
   local fore = I:GetConstructForwardVector()
   local up = I:GetConstructUpVector()
   local constructRot = Quaternion.LookRotation(fore, up)
@@ -2271,8 +2328,8 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   end
   local azi = MathUtil.angleOnPlane(Vector3.forward, direction, Vector3.up)
   local aziDir = direction
-  aziDir.z = 0
-  local ele = Mathf.Atan2(direction.z, aziDir.magnitude)
+  aziDir.y = 0
+  local ele = Mathf.Atan2(direction.y, aziDir.magnitude)
   local aziValid = azi > con.MinAzimuth and azi < con.MaxAzimuth
   local eleValid = ele > con.MinElevation and ele < con.MaxElevation
   if con.FlipAzimuth then aziValid = not aziValid end
@@ -2287,7 +2344,6 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   if aziValid and eleValid then return true end
   return false
 end
-
 function StringUtil.LogVector(I, vec, label)
   I:Log(label.."("..vec.x..", "..vec.y..", "..vec.z..")")
 end

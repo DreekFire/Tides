@@ -120,7 +120,7 @@ function Stats.covariance(distr)
 end
 
 function Stats.namedCovariance(distr, var1, var2)
-  if ~distr.vars then return distr.cov end
+  if not distr.vars then return distr.cov end
   local nVars = distr.vars and #distr.vars or 1
   for i=1,nVars do
     if distr.vars[i] == var1 then
