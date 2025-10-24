@@ -9,7 +9,7 @@ If you have any questions on how to use it, how it works, or how to program in g
 
 ## Installation
 
-Unfortunately, FtD does not provide a nice way to import libraries. The easiest way to do it is to copy the content of `Header.lua` to the beginning of your lua script (outside of the Update function) and the content of `Tides.lua` or `Tides.min.lua` anywhere else in your script, such as the very end (again, outside of any functions).
+Unfortunately, FtD does not provide a nice way to import libraries. The easiest way to do it is to replace the default Lua box contents with the contents of `Wrapper.lua`. Alternatively, copy the content of `Header.lua` to the beginning of your lua script (outside of the Update function) and the content of `Tides.lua` or `Tides.min.lua` anywhere else in your script, such as the very end (again, outside of any functions).
 
 If you wish to reduce the size of your code, you can remove any classes that you don't need.
 
@@ -33,12 +33,12 @@ The classes in Tides are divided into four categories based on their level of ab
 2. Vehicle Missile Interceptor:
 * Drone that rams incoming huge missiles
 * Spreads out arms mounted on spinblocks prior to collision
-* Rolls to rotate arms into place, using information about which arms have already been destroyed (thump missiles only take out one arm at a time, allowing 5 uses)
+* Rolls to rotate arms into place, using information about which arms have already been destroyed (obsolete, now that thump propagates through subobjects)
 
 3. Counterbattery:
 * Uses projectile avoidance routine to measure trajectories of incoming shells
-* Validates those trajectories to make sure they come from a single ballistic projectile
 * Traces those trajectories back to the time of closest approach to the enemy ship based on recorded enemy positions and returns fire
+* Uses multiple AIs to gather aimpoints to track rotation
 
 4. Ship Identification (WIP):
 * Uses target prioritization cards to measure stats of enemy ships

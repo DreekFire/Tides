@@ -22,7 +22,7 @@ end
 
 --[[
   Arguments:
-    set - an iterator or table
+    set - an iterator
     comp (optional) - a comparison function which
                         takes 2 arguments and
                         returns true if the first

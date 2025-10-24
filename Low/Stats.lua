@@ -11,7 +11,7 @@ function Stats.Distribution(vars)
       end
     end
     distr.mean = mean
-    distr.cov = cov
+    distr.cov = Matrix3.Matrix3(cov)
   else
     distr.mean = 0
     distr.cov = 0
@@ -49,12 +49,11 @@ function Stats.updateDistribution(distr, sample, weight)
 
     distr.mean = mu
   end
-  return distr
 end
 
 function Stats.updateDistributionBatched(distr, samples, weights)
   if #samples == 0 then return end
-  local sT
+  local sT = {}
   local nVars = distr.vars and #distr.vars or 1
 
   local wSum = 0
@@ -108,7 +107,6 @@ function Stats.updateDistributionBatched(distr, samples, weights)
     end
     distr.cov = (distr.cov * oldN + sum) / distr.n
   end
-  return distr
 end
 
 function Stats.mean(distr)
@@ -120,7 +118,7 @@ function Stats.covariance(distr)
 end
 
 function Stats.namedCovariance(distr, var1, var2)
-  if ~distr.vars then return distr.cov end
+  if not distr.vars then return distr.cov end
   local nVars = distr.vars and #distr.vars or 1
   for i=1,nVars do
     if distr.vars[i] == var1 then
