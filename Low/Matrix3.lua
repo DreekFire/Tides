@@ -167,6 +167,29 @@ function Matrix3.inverse(mat)
   return (1 / det) * adj 
 end
 
+-- swaps rows r1 and r2 in place
+function Matrix3.rowSwap(mat, r1, r2)
+  for col=1,3 do
+    local v = mat[(r1 - 1) * 3 + col]
+    mat[(r1 - 1) * 3 + col] = mat[(r2 - 1) * 3 + col]
+    mat[(r2 - 1) * 3 + col] = v
+  end
+end
+
+-- scale row r1 by s
+function Matrix3.rowScale(mat, r, s)
+  for col=1,3 do
+    mat[(r - 1) * 3 + col] = s * mat[(r - 1) * 3 + col]
+  end
+end
+
+-- add s times r1 to r2
+function Matrix3.rowAdd(mat, r1, r2, s)
+  for col=1,3 do
+    mat[(r2 - 1) * 3 + col] = mat[(r2 - 1) * 3 + col] + s * mat[(r1 - 1) * 3 + col]
+  end
+end
+
 function Matrix3.tostring(mat)
   local str = string.format("%f, %f, %f\n%f, %f, %f\n%f, %f, %f", unpack(mat))
   return str
