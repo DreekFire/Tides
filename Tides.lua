@@ -328,7 +328,7 @@ end
 
 --[[
   Arguments:
-    set - an iterator or table
+    set - an iterator
     comp (optional) - a comparison function which
                         takes 2 arguments and
                         returns true if the first
@@ -1103,6 +1103,8 @@ function MathUtil.solveQuartic(c0, c1, c2, c3, c4)
   return s0, s1, s2, s3
 end
 
+-- Why all these -1s? Because apparently FtD's Lua interpreter can't correctly handle loops which start from 0 (is my working theory)
+
 function Matrix3.Matrix3(vals)
   local mat = {}
   for i=1,9 do
@@ -1125,61 +1127,67 @@ function Matrix3.scalarmul(mat, s)
   for i=1,9 do
     ret[i] = s * mat[i]
   end
-  return ret
+  return Matrix3.Matrix3(ret)
 end
 
 function Matrix3.vecmul(mat, vec)
   local ret = Vector3.zero
-  for row=0,2 do
+  for row=1,3 do
     local val = 0
     for col=1,3 do
-      val = val + vec[Matrix3.vecIdx[col]] * mat[row * 3 + col]
+      val = val + vec[col] * mat[(row - 1) * 3 + col]
     end
-    ret[Matrix3.vecIdx[row + 1]] = val
+    ret[row] = val
   end
+  return ret
 end
 
 function Matrix3.matmul(mat1, mat2)
   local ret = {}
-  for i=0,2 do
-    for j=0,2 do
+  for i=1,3 do
+    for j=1,3 do
       local val = 0
-      for k=0,2 do
-        val = val + mat1[i * 3 + k + 1] * mat2[k * 3 + j + 1]
+      for k=1,3 do
+        val = val + mat1[(i - 1) * 3 + k] * mat2[(k - 1) * 3 + j]
       end
-      ret[i * 3 + j + 1] = val
+      ret[(i - 1) * 3 + j] = val
     end
   end
+  return Matrix3.Matrix3(ret)
 end
 
 function Matrix3.mul(a, b)
   if getmetatable(a) ~= Matrix3.meta then
-    if a.x then return Matrix3.vecmul(Matrix3.transpose(b), a) end
+    if type(a) == "table" and a.x then return Matrix3.vecmul(Matrix3.transpose(b), a) end
     return Matrix3.mul(b, a)
   end
   if getmetatable(b) == Matrix3.meta then
     return Matrix3.matmul(a, b)
   end
-  if b.x then
+  if type(b) == "table" and b.x then
     return Matrix3.vecmul(a, b)
   end
   return Matrix3.scalarmul(a, b)
 end
 
+function Matrix3.quadform(vec1, mat, vec2)
+  return Vector3.Dot(vec1, mat * vec2)
+end
+
 function Matrix3.Identity()
-  return {
+  return Matrix3.Matrix3({
     1, 0, 0,
     0, 1, 0,
     0, 0, 1,
-  }
+  })
 end
 
 function Matrix3.Zero()
-  return {
+  return Matrix3.Matrix3({
     0, 0, 0,
     0, 0, 0,
     0, 0, 0,
-  }
+  })
 end
 
 function Matrix3.pow(mat, pow)
@@ -1204,7 +1212,7 @@ function Matrix3.add(mat1, mat2)
   for i=1,9 do
     ret[i] = mat1[i] + mat2[i]
   end
-  return ret
+  return Matrix3.Matrix3(ret)
 end
 
 function Matrix3.hadamard(mat1, mat2)
@@ -1212,66 +1220,69 @@ function Matrix3.hadamard(mat1, mat2)
   for i=1,9 do
     ret[i] = mat1[i] * mat2[i]
   end
-  return ret
+  return Matrix3.Matrix3(ret)
 end
 
 function Matrix3.transpose(mat)
   local transposed = {}
-  for row=0,2 do
-    for col=0,2 do
-      transposed[col * 3 + row + 1] = mat[row * 3 + col + 1]
+  for row=1,3 do
+    for col=1,3 do
+      transposed[(col - 1) * 3 + row] = mat[(row - 1) * 3 + col ]
     end
   end
-  return transposed
+  return Matrix3.Matrix3(transposed)
 end
 
 function Matrix3.determinant(mat)
-  local diag1 = 0
-  local diag2 = 0
-  for d=0,2 do
-    for s=0,2 do
-      diag1 = diag1 + mat[s * 3 + (s + d) % 3 + 1]
-      diag2 = diag2 + mat[s * 3 + (-s + d) % 3 + 1]
+  local sum1 = 0
+  local sum2 = 0
+  for d=1,3 do
+    local diag1 = 1
+    local diag2 = 1
+    for s=1,3 do
+      diag1 = diag1 * mat[(s - 1) * 3 + (s + d - 2) % 3 + 1]
+      diag2 = diag2 * mat[(s - 1) * 3 + (-s + d) % 3 + 1]
     end
+    sum1 = sum1 + diag1
+    sum2 = sum2 + diag2
   end
-  return diag1 - diag2
+  return sum1 - sum2
 end
 
 function Matrix3.adjugate(mat)
   local adj = {}
-  for row=0,2 do
-    for col=0,2 do
-      local cofac = 0
-      for i=0,1 do
-        local diag = 1
-        for j=1,2 do
-          -- this indexing is painful; I understand why most languages start from 0 now
-          diag = diag * mat[(row + j) % 3 * 3 + (col + i + j) % 3 + 1]
-        end
-        cofac = cofac + diag
+  for row=1,3 do
+    for col=1,3 do
+      local diag1 = 1
+      local diag2 = 1
+      for i=1,2 do
+        diag1 = diag1 * mat[(row + i - 1) % 3 * 3 + (col + i - 1) % 3 + 1]
+        diag2 = diag2 * mat[(row + i - 1) % 3 * 3 + (col - i - 1) % 3 + 1]
       end
-      adj[col * 3 + row + 1] = cofac
+      adj[(col - 1) * 3 + row] = diag1 - diag2
     end
   end
-  return adj
+  return Matrix3.Matrix3(adj)
 end
 
 function Matrix3.inverse(mat)
   local det = Matrix3.determinant(mat)
-  if Stats.isZero(det) then return end
-  local adj = Matrix3.cofactors(mat)
-  return adj / det
+  if MathUtil.isZero(det) then return end
+  local adj = Matrix3.adjugate(mat)
+  return (1 / det) * adj 
 end
 
-Matrix3.vecIdx = {
-  'x', 'y', 'z'
-}
+function Matrix3.tostring(mat)
+  local str = string.format("%f, %f, %f\n%f, %f, %f\n%f, %f, %f", unpack(mat))
+  return str
+end
 
 Matrix3.meta = {
   __add = Matrix3.add,
   __mul = Matrix3.mul,
   __unm = function(m) return Matrix3.scalarmul(m, -1) end,
   __pow = Matrix3.pow,
+  __tostring = Matrix3.tostring,
 }
 
 --[[
@@ -1380,7 +1391,7 @@ function Stats.Distribution(vars)
       end
     end
     distr.mean = mean
-    distr.cov = cov
+    distr.cov = Matrix3.Matrix3(cov)
   else
     distr.mean = 0
     distr.cov = 0
@@ -1418,12 +1429,11 @@ function Stats.updateDistribution(distr, sample, weight)
 
     distr.mean = mu
   end
-  return distr
 end
 
 function Stats.updateDistributionBatched(distr, samples, weights)
   if #samples == 0 then return end
-  local sT
+  local sT = {}
   local nVars = distr.vars and #distr.vars or 1
 
   local wSum = 0
@@ -1477,7 +1487,6 @@ function Stats.updateDistributionBatched(distr, samples, weights)
     end
     distr.cov = (distr.cov * oldN + sum) / distr.n
   end
-  return distr
 end
 
 function Stats.mean(distr)
@@ -1486,6 +1495,20 @@ end
 
 function Stats.covariance(distr)
   return distr.cov
+end
+
+function Stats.namedCovariance(distr, var1, var2)
+  if not distr.vars then return distr.cov end
+  local nVars = distr.vars and #distr.vars or 1
+  for i=1,nVars do
+    if distr.vars[i] == var1 then
+      for j=1,nVars do
+        if distr.vars[j] == var2 then
+          return distr.cov[(i - 1) * nVars + j]
+        end
+      end
+    end
+  end
 end
 
 --[[
@@ -1765,22 +1788,34 @@ end
 -- Assumes both target and projectile travel in a straight line (i.e. no gravity)
 -- targetVel should be relative to the gun for projectiles, absolute for missiles
 -- Also use this for TPG guidance on missiles
+--[[
+  Arguments:
+    relPos - position of the target relative to muzzle
+    targetVel - absolute velocity of the target
+    muzzle - muzzle velocity of the projectile
+  Returns:
+    intercept - the position of the target at time of intercept
+    interceptTime - the time at which intercept occurs
+]]
 function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
+  if targetVel.sqrMagnitude == 0 then
+    return relPos.normalized
+  end
   local closest = relPos - Vector3.Project(relPos, targetVel)
   local timeAlongLine = Vector3.Dot(targetVel, relPos - closest) / targetVel.sqrMagnitude
   -- by pythagorean theorem, intercept time t occurs when
-  --   (t + timeAlongLine)^2 + closest.sqrMagnitude = (muzzle * t)^2
-  local a, b = MathUtil.solveQuadratic(timeAlongLine - muzzle * muzzle,
-                                                2 * timeAlongLine,
-                                                closest.sqrMagnitude + timeAlongLine * timeAlongLine)
+  --   (t + timeAlongLine)^2 * targetVel.sqrMagnitude + closest.sqrMagnitude = (muzzle * t)^2
+  local a, b = MathUtil.solveQuadratic(targetVel.sqrMagnitude - muzzle * muzzle,
+                                                2 * timeAlongLine * targetVel.sqrMagnitude,
+                                                closest.sqrMagnitude + timeAlongLine * timeAlongLine * targetVel.sqrMagnitude)
   local interceptTime = nil
   if a and a >= 0 then interceptTime = a end
   if b and b >= 0 and b < a then interceptTime = b end
-  return interceptTime and (relPos + interceptTime * targetVel).normalized or nil
+  if interceptTime then
+    return relPos + interceptTime * targetVel, interceptTime
+  end
 end
 
--- originally based on wltrup's answer to math.stackexchange.com question number 1419643
--- then switched to Newton's method, then switched to ITP
 --[[
   Arguments:
     relPos - position of the target relative to own vehicle
@@ -1789,6 +1824,7 @@ end
     muzzle - muzzle velocity of the projectile
     minRange - the minimum distance of intercept (see return values)
     maxRange - the maximum distance of intercept (see return values)
+    guess - [optional] initial guess for intercept time
   Returns:
     intercept - the position of the target at time of intercept if between minRange and maxRange
       nil otherwise
@@ -1796,7 +1832,29 @@ end
       traveled if gravity didn't exist.
     interceptTime - the time at which intercept occurs
 ]]
-function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange, maxRange)
+function Targeting.secondOrderTargetingNewton(relPos, relVel, accel, muzzle, minRange, maxRange, guess)
+  local diff = 10000
+  local lastT = 0
+  local iters = 0
+  if not guess then guess = 0 end
+  local newPos = relPos + guess * relVel + 0.5 * guess * guess * accel
+  while math.abs(diff) > 0.001 and iters < 10 do
+    local t = newPos.magnitude / muzzle
+    diff = t - lastT
+    lastT = t
+    iters = iters + 1
+    newPos = relPos + t * relVel + 0.5 * t * t * accel
+  end
+  return newPos, lastT, iters
+end
+
+Targeting.secondOrderTargeting = Targeting.secondOrderTargetingNewton
+
+-- Same arguments and return values as secondOrderTargetingNewton.
+-- This version uses ITP, and is guaranteed to return an answer if one exists, unlike Newton's method.
+-- However, it is much more complicated and, for most scenarios found in FtD, probably slower.
+function Targeting.secondOrderTargetingITP(relPos, relVel, accel, muzzle, minRange, maxRange, guess)
+  if not guess then guess = 0 end
   local a = -0.25 * accel.sqrMagnitude
   local b = -Vector3.Dot(relVel, accel)
   local c = -(relVel.sqrMagnitude - muzzle * muzzle + Vector3.Dot(relPos, accel))
@@ -1842,6 +1900,13 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   local function poly(x)
     -- Horner's method of evaluating polynomials is slightly faster
     return e + x * (d + x * (c + x * (b + x * a)))
+  end
+  if guess > t1 and t2 > guess then
+    if poly(t1) * poly(t) < 0 then
+      t2 = guess
+    else
+      t1 = guess
+    end
   end
   t = MathUtil.ITP(poly, t1, t2, 1e-4, 25)
 
@@ -2261,6 +2326,7 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   else
     con = I:GetWeaponConstraints(wepId)
   end
+  if not con or not con.Valid then return true end
   local fore = I:GetConstructForwardVector()
   local up = I:GetConstructUpVector()
   local constructRot = Quaternion.LookRotation(fore, up)
@@ -2271,8 +2337,8 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   end
   local azi = MathUtil.angleOnPlane(Vector3.forward, direction, Vector3.up)
   local aziDir = direction
-  aziDir.z = 0
-  local ele = Mathf.Atan2(direction.z, aziDir.magnitude)
+  aziDir.y = 0
+  local ele = Mathf.Atan2(direction.y, aziDir.magnitude)
   local aziValid = azi > con.MinAzimuth and azi < con.MaxAzimuth
   local eleValid = ele > con.MinElevation and ele < con.MaxElevation
   if con.FlipAzimuth then aziValid = not aziValid end

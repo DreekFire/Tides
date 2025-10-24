@@ -42,6 +42,7 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   else
     con = I:GetWeaponConstraints(wepId)
   end
+  if not con or not con.Valid then return true end
   local fore = I:GetConstructForwardVector()
   local up = I:GetConstructUpVector()
   local constructRot = Quaternion.LookRotation(fore, up)
@@ -52,8 +53,8 @@ function Combat.CheckConstraints(I, direction, wepId, subObjId)
   end
   local azi = MathUtil.angleOnPlane(Vector3.forward, direction, Vector3.up)
   local aziDir = direction
-  aziDir.z = 0
-  local ele = Mathf.Atan2(direction.z, aziDir.magnitude)
+  aziDir.y = 0
+  local ele = Mathf.Atan2(direction.y, aziDir.magnitude)
   local aziValid = azi > con.MinAzimuth and azi < con.MaxAzimuth
   local eleValid = ele > con.MinElevation and ele < con.MaxElevation
   if con.FlipAzimuth then aziValid = not aziValid end

@@ -4,6 +4,15 @@
 -- Assumes both target and projectile travel in a straight line (i.e. no gravity)
 -- targetVel should be relative to the gun for projectiles, absolute for missiles
 -- Also use this for TPG guidance on missiles
+--[[
+  Arguments:
+    relPos - position of the target relative to muzzle
+    targetVel - absolute velocity of the target
+    muzzle - muzzle velocity of the projectile
+  Returns:
+    intercept - the position of the target at time of intercept
+    interceptTime - the time at which intercept occurs
+]]
 function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
   if targetVel.sqrMagnitude == 0 then
     return relPos.normalized
@@ -18,11 +27,11 @@ function Targeting.firstOrderTargeting(relPos, targetVel, muzzle)
   local interceptTime = nil
   if a and a >= 0 then interceptTime = a end
   if b and b >= 0 and b < a then interceptTime = b end
-  return interceptTime and (relPos + interceptTime * targetVel).normalized or nil
+  if interceptTime then
+    return relPos + interceptTime * targetVel, interceptTime
+  end
 end
 
--- originally based on wltrup's answer to math.stackexchange.com question number 1419643
--- then switched to Newton's method, then switched to ITP
 --[[
   Arguments:
     relPos - position of the target relative to own vehicle
@@ -31,6 +40,7 @@ end
     muzzle - muzzle velocity of the projectile
     minRange - the minimum distance of intercept (see return values)
     maxRange - the maximum distance of intercept (see return values)
+    guess - [optional] initial guess for intercept time
   Returns:
     intercept - the position of the target at time of intercept if between minRange and maxRange
       nil otherwise
@@ -38,7 +48,29 @@ end
       traveled if gravity didn't exist.
     interceptTime - the time at which intercept occurs
 ]]
-function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange, maxRange)
+function Targeting.secondOrderTargetingNewton(relPos, relVel, accel, muzzle, minRange, maxRange, guess)
+  local diff = 10000
+  local lastT = 0
+  local iters = 0
+  if not guess then guess = 0 end
+  local newPos = relPos + guess * relVel + 0.5 * guess * guess * accel
+  while math.abs(diff) > 0.001 and iters < 10 do
+    local t = newPos.magnitude / muzzle
+    diff = t - lastT
+    lastT = t
+    iters = iters + 1
+    newPos = relPos + t * relVel + 0.5 * t * t * accel
+  end
+  return newPos, lastT, iters
+end
+
+Targeting.secondOrderTargeting = Targeting.secondOrderTargetingNewton
+
+-- Same arguments and return values as secondOrderTargetingNewton.
+-- This version uses ITP, and is guaranteed to return an answer if one exists, unlike Newton's method.
+-- However, it is much more complicated and, for most scenarios found in FtD, probably slower.
+function Targeting.secondOrderTargetingITP(relPos, relVel, accel, muzzle, minRange, maxRange, guess)
+  if not guess then guess = 0 end
   local a = -0.25 * accel.sqrMagnitude
   local b = -Vector3.Dot(relVel, accel)
   local c = -(relVel.sqrMagnitude - muzzle * muzzle + Vector3.Dot(relPos, accel))
@@ -84,6 +116,13 @@ function Targeting.secondOrderTargeting(relPos, relVel, accel, muzzle, minRange,
   local function poly(x)
     -- Horner's method of evaluating polynomials is slightly faster
     return e + x * (d + x * (c + x * (b + x * a)))
+  end
+  if guess > t1 and t2 > guess then
+    if poly(t1) * poly(t) < 0 then
+      t2 = guess
+    else
+      t1 = guess
+    end
   end
   t = MathUtil.ITP(poly, t1, t2, 1e-4, 25)
 
