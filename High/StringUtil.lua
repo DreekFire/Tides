@@ -2,21 +2,18 @@ function StringUtil.LogVector(I, vec, label)
   I:Log(label.."("..vec.x..", "..vec.y..", "..vec.z..")")
 end
 
---[[
-does not work because the Lua interpreter used by From The Depths
-does not support table.concat
-
-function StringUtil.LogTable(I, tab, label, depth, indent)
-  depth = depth or 0
-  indent = indent or string.rep("  ", depth)
-  local lines = {}
-  for k, v in pairs(tab) do
-    if type(v) == "table" then
-      lines.insert(k..": "..StringUtil.LogTable(I, v, "", depth + 1, indent))
-    else
-      lines.insert(k..": "..v)
-    end
+function StringUtil.Join(tab, delimiter, start, stop)
+  start = start or 1
+  stop = stop or #tab
+  delimiter = delimiter or ','
+  if stop > 8 then
+    local l = StringUtil.Join(tab, delimiter, start, math.floor(stop * 0.5))
+    local r = StringUtil.Join(tab, delimiter, math.floor(stop * 0.5) + 1, stop)
+    return l..r
   end
-  return label.."{\n"..indent..table.concat(lines, "\n"..indent).."\n}"
+  local str = ''
+  for i, s in ipairs(tab) do
+    str = str..(s..',')
+  end
+  return str
 end
-]]

@@ -17,6 +17,34 @@ function Matrix3.set(mat, row, col, val)
   mat[(row - 1) * 3 + col] = val
 end
 
+function Matrix3.getCol(mat, col)
+  local ret = {}
+  for row=1,3 do
+    ret[row] = mat[(row - 1) * 3 + col]
+  end
+  return ret
+end
+
+function Matrix3.setCol(mat, col, v)
+  for row=1,3 do
+    mat[(row - 1) * 3 + col] = v[row]
+  end
+end
+
+function Matrix3.getRow(mat, row)
+  local ret = {}
+  for col=1,3 do
+    ret[row] = mat[(row - 1) * 3 + col]
+  end
+  return ret
+end
+
+function Matrix3.setRow(mat, row, v)
+  for col=1,3 do
+    mat[(row - 1) * 3 + col] = v[col]
+  end
+end
+
 function Matrix3.scalarmul(mat, s)
   local ret = {}
   for i=1,9 do

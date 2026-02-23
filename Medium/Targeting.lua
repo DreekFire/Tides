@@ -136,21 +136,19 @@ function Targeting.secondOrderTargetingITP(relPos, relVel, accel, muzzle, minRan
 end
 
 --[[
-  Modified version of IPPN guidance law from
-  "An Improvement in Three-Dimensional Pure
-  Proportional Navigation Guidance",
-  by Hyo-Sang Shin and Ke-Bo Li
-  with added acceleration term for augmentation.
-  I have no idea if this is better than IPPN alone
-  or even theoretically correct because I do not
-  know how to perform the relevant mathematical
-  analyses.
-]]
-function Targeting.AIPPN(gain, relPos, missileVel, targetVel, targetAccel)
+  Augmented Pure Proportional Navigation
+  guidance law. FtD APN is actually pure
+  PN, not APN.
+
+  Pure proportional guidance commands
+  acceleration perpendicular to missile
+  velocity instead of line of sight
+  between missile and target like true
+  proportional guidance does.
+--]]
+function Targeting.APPN(gain, relPos, missileVel, targetVel, targetAccel)
   local relVel = targetVel - missileVel
-  local closingRate = Vector3.Dot(-relVel, relPos.normalized)
-  if closingRate <= 0 then closingRate = 10 end
-  local tgo = relPos.magnitude / closingRate
+  local tgo = relPos.magnitude / missileVel.magnitude
 
   local losRot = Vector3.Cross(relPos, relVel) / relPos.sqrMagnitude
   local aRot = Vector3.Cross(relPos, targetAccel) / relPos.sqrMagnitude * tgo / 2
@@ -165,9 +163,8 @@ end
 
 --[[
   Augmented True Proportional Navigation
-  guidance law which FTD missiles use
-  when APN guidance is equipped
-  (if my understanding is correct)
+  guidance law. FtD APN uses pure PN,
+  not true PN.
 
   True proportional guidance commands
   acceleration perpendicular to line of

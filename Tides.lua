@@ -383,7 +383,7 @@ function MathUtil.range(a, b, c)
   local step
   if not a then return end
   if not b then
-    start = 0
+    start = 1
     stop = a
     step = start < stop and 1 or -1
   elseif c then
@@ -391,7 +391,7 @@ function MathUtil.range(a, b, c)
   end
   return function(_, last)
     local next = last + step
-    if next == stop then return nil end
+    if last == stop then return nil end
     return next
   end, nil, start - step
 end
@@ -1949,9 +1949,7 @@ end
 
 --[[
   Augmented True Proportional Navigation
-  guidance law which FTD missiles use
-  when APN guidance is equipped
-  (if my understanding is correct)
+  guidance law
 
   True proportional guidance commands
   acceleration perpendicular to line of
