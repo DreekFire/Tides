@@ -24,6 +24,46 @@ local function put(matrix, row, col, value)
         + col * matrix.stride[2] + 1] = value
 end
 
+local function vectorLength(vector)
+    assert(vector and vector.shape and #vector.shape == 1, "expected a vector")
+    return vector.shape[1]
+end
+
+local function vectorValue(vector, index)
+    return vector.data[(vector.offset or 0) + index * vector.stride[1] + 1]
+end
+
+local function rhsInfo(rhs, rows)
+    assert(rhs and rhs.shape and rhs.data, "expected an NdArray right hand side")
+    if #rhs.shape == 1 then
+        assert(rhs.shape[1] == rows, "right hand side dimensions do not match")
+        return 1, true
+    end
+    assert(#rhs.shape == 2 and rhs.shape[1] == rows, "right hand side dimensions do not match")
+    return rhs.shape[2], false
+end
+
+local function rhsValue(rhs, row, column, vector)
+    if vector then return rhs.data[(rhs.offset or 0) + row * rhs.stride[1] + 1] end
+    return at(rhs, row, column)
+end
+
+local function solveUpper(u, rhs, columns, vector)
+    local rows = matrixShape(u)
+    local result = vector and {} or NdArray.zeros({rows, columns})
+    for column = 0, columns - 1 do
+        local solution = {}
+        for row = rows - 1, 0, -1 do
+            local value = vector and rhs[row + 1] or rhs[row + 1][column + 1]
+            for nextColumn = row + 1, rows - 1 do value = value - at(u, row, nextColumn) * solution[nextColumn + 1] end
+            solution[row + 1] = value / at(u, row, row)
+            if not vector then put(result, row, column, solution[row + 1]) end
+        end
+        if vector then result = solution end
+    end
+    return vector and NdArray.array(result) or result
+end
+
 local function identity(size)
     return NdArray.eye(size)
 end
@@ -113,20 +153,24 @@ function Linalg.solveLU(p, l, u, b)
     local n = matrixShape(l)
     local ur, uc = matrixShape(u)
     assert(ur == n and uc == n, "LU dimensions do not match")
-    assert(#b.shape == 1 and b.shape[1] == n, "solveLU currently requires a vector right hand side")
+    local columns, vector = rhsInfo(b, n)
     local permutation = permutationRows(p, n)
-    local y, x = {}, {}
-    for row = 0, n - 1 do
-        local value = b.data[(b.offset or 0) + permutation[row + 1] * b.stride[1] + 1]
-        for col = 0, row - 1 do value = value - at(l, row, col) * y[col + 1] end
-        y[row + 1] = value
+    local y = {}
+    for column = 0, columns - 1 do
+        y[column + 1] = {}
+        for row = 0, n - 1 do
+            local value = rhsValue(b, permutation[row + 1], column, vector)
+            for previous = 0, row - 1 do value = value - at(l, row, previous) * y[column + 1][previous + 1] end
+            y[column + 1][row + 1] = value
+        end
     end
-    for row = n - 1, 0, -1 do
-        local value = y[row + 1]
-        for col = row + 1, n - 1 do value = value - at(u, row, col) * x[col + 1] end
-        x[row + 1] = value / at(u, row, row)
+    if vector then return solveUpper(u, y[1], 1, true) end
+    local result = NdArray.zeros({n, columns})
+    for column = 0, columns - 1 do
+        local solution = solveUpper(u, y[column + 1], 1, true)
+        for row = 0, n - 1 do put(result, row, column, solution.data[row + 1]) end
     end
-    return NdArray.array(x)
+    return result
 end
 
 -- Householder QR.  Q is square (m by m), R is m by n, and A = Q*R.
@@ -170,19 +214,51 @@ function Linalg.solveQR(q, r, b)
     local rows, cols = matrixShape(r)
     local qr, qc = matrixShape(q)
     assert(qr == qc and qr == rows and cols == rows, "solveQR currently requires a square factorization")
-    assert(#b.shape == 1 and b.shape[1] == rows, "solveQR currently requires a vector right hand side")
-    local y, x = {}, {}
-    for row = 0, rows - 1 do
-        local value = 0
-        for col = 0, rows - 1 do value = value + at(q, col, row) * b.data[(b.offset or 0) + col * b.stride[1] + 1] end
-        y[row + 1] = value
+    local columns, vector = rhsInfo(b, rows)
+    local transformed = {}
+    for column = 0, columns - 1 do
+        transformed[column + 1] = {}
+        for row = 0, rows - 1 do
+            local value = 0
+            for source = 0, rows - 1 do value = value + at(q, source, row) * rhsValue(b, source, column, vector) end
+            transformed[column + 1][row + 1] = value
+        end
     end
-    for row = rows - 1, 0, -1 do
-        local value = y[row + 1]
-        for col = row + 1, rows - 1 do value = value - at(r, row, col) * x[col + 1] end
-        x[row + 1] = value / at(r, row, row)
+    if vector then return solveUpper(r, transformed[1], 1, true) end
+    local result = NdArray.zeros({rows, columns})
+    for column = 0, columns - 1 do
+        local solution = solveUpper(r, transformed[column + 1], 1, true)
+        for row = 0, rows - 1 do put(result, row, column, solution.data[row + 1]) end
     end
-    return NdArray.array(x)
+    return result
+end
+
+-- Full-column-rank least-squares solve using the Householder QR factorization.
+-- The vector/matrix shape of b is preserved in the result.
+function Linalg.solveLeastSquares(matrix, b, tolerance)
+    local rows, cols = matrixShape(matrix)
+    assert(rows >= cols, "least-squares QR requires at least as many rows as columns")
+    local rhsColumns, vector = rhsInfo(b, rows)
+    local q, r = Linalg.qr(matrix)
+    local transformed = {}
+    for column = 0, rhsColumns - 1 do
+        transformed[column + 1] = {}
+        for row = 0, cols - 1 do
+            local value = 0
+            for source = 0, rows - 1 do value = value + at(q, source, row) * rhsValue(b, source, column, vector) end
+            transformed[column + 1][row + 1] = value
+        end
+    end
+    tolerance = tolerance or 1e-14
+    for row = 0, cols - 1 do assert(math.abs(at(r, row, row)) > tolerance, "least-squares matrix is rank deficient") end
+    if vector then return solveUpper(NdArray.get(r, {NdArray.slice(0, cols), NdArray.slice(0, cols)}), transformed[1], 1, true) end
+    local leading = NdArray.get(r, {NdArray.slice(0, cols), NdArray.slice(0, cols)})
+    local result = NdArray.zeros({cols, rhsColumns})
+    for column = 0, rhsColumns - 1 do
+        local solution = solveUpper(leading, transformed[column + 1], 1, true)
+        for row = 0, cols - 1 do put(result, row, column, solution.data[row + 1]) end
+    end
+    return result
 end
 
 function Linalg.cholesky(matrix)
@@ -202,6 +278,158 @@ function Linalg.cholesky(matrix)
         end
     end
     return l
+end
+
+function Linalg.solveCholesky(l, b)
+    local n, cols = matrixShape(l)
+    assert(cols == n, "Cholesky factor must be square")
+    local columns, vector = rhsInfo(b, n)
+    local forward = {}
+    for column = 0, columns - 1 do
+        forward[column + 1] = {}
+        for row = 0, n - 1 do
+            local value = rhsValue(b, row, column, vector)
+            for previous = 0, row - 1 do value = value - at(l, row, previous) * forward[column + 1][previous + 1] end
+            forward[column + 1][row + 1] = value / at(l, row, row)
+        end
+    end
+    if vector then
+        local x = {}
+        for row = n - 1, 0, -1 do
+            local value = forward[1][row + 1]
+            for nextRow = row + 1, n - 1 do value = value - at(l, nextRow, row) * x[nextRow + 1] end
+            x[row + 1] = value / at(l, row, row)
+        end
+        return NdArray.array(x)
+    end
+    local result = NdArray.zeros({n, columns})
+    for column = 0, columns - 1 do
+        local x = {}
+        for row = n - 1, 0, -1 do
+            local value = forward[column + 1][row + 1]
+            for nextRow = row + 1, n - 1 do value = value - at(l, nextRow, row) * x[nextRow + 1] end
+            x[row + 1] = value / at(l, row, row)
+        end
+        for row = 0, n - 1 do put(result, row, column, x[row + 1]) end
+    end
+    return result
+end
+
+function Linalg.normalize(vector, tolerance)
+    local length = Linalg.norm(vector)
+    assert(length > (tolerance or 1e-14), "cannot normalize a zero vector")
+    local result = NdArray.copy(vector)
+    for i = 1, result.size do result.data[i] = result.data[i] / length end
+    return result, length
+end
+
+function Linalg.cross(a, b)
+    assert(vectorLength(a) == 3 and vectorLength(b) == 3, "cross requires three-dimensional vectors")
+    return NdArray.array({
+        vectorValue(a, 1) * vectorValue(b, 2) - vectorValue(a, 2) * vectorValue(b, 1),
+        vectorValue(a, 2) * vectorValue(b, 0) - vectorValue(a, 0) * vectorValue(b, 2),
+        vectorValue(a, 0) * vectorValue(b, 1) - vectorValue(a, 1) * vectorValue(b, 0),
+    })
+end
+
+function Linalg.outer(a, b)
+    local rows, cols = vectorLength(a), vectorLength(b)
+    local result = NdArray.zeros({rows, cols})
+    for row = 0, rows - 1 do
+        local left = a.data[(a.offset or 0) + row * a.stride[1] + 1]
+        for col = 0, cols - 1 do put(result, row, col, left * b.data[(b.offset or 0) + col * b.stride[1] + 1]) end
+    end
+    return result
+end
+
+function Linalg.skew(vector)
+    assert(vectorLength(vector) == 3, "skew requires a three-dimensional vector")
+    local x, y, z = vectorValue(vector, 0), vectorValue(vector, 1), vectorValue(vector, 2)
+    return NdArray.array({{0, -z, y}, {z, 0, -x}, {-y, x, 0}})
+end
+
+function Linalg.det(matrix)
+    local rows, cols = matrixShape(matrix)
+    assert(rows == cols, "det requires a square matrix")
+    local p, _, u = Linalg.lu(matrix)
+    local sign = 1
+    local permutation, invalid = {}, false
+    for row = 0, rows - 1 do
+        for col = 0, rows - 1 do
+            if at(p, row, col) ~= 0 then permutation[row + 1] = col; break end
+        end
+        invalid = invalid or permutation[row + 1] == nil
+    end
+    assert(not invalid, "invalid permutation matrix")
+    local visited = {}
+    for start = 0, rows - 1 do
+        if not visited[start] then
+            local length, current = 0, start
+            while not visited[current] do visited[current], current, length = true, permutation[current + 1], length + 1 end
+            if length % 2 == 0 then sign = -sign end
+        end
+    end
+    local result = sign
+    for row = 0, rows - 1 do result = result * at(u, row, row) end
+    return result
+end
+
+function Linalg.inverse(matrix)
+    local rows, cols = matrixShape(matrix)
+    assert(rows == cols, "inverse requires a square matrix")
+    local p, l, u = Linalg.lu(matrix)
+    return Linalg.solveLU(p, l, u, NdArray.eye(rows))
+end
+
+function Linalg.dampedLeastSquares(jacobian, damping)
+    local _, cols = matrixShape(jacobian)
+    damping = damping or 1e-6
+    assert(damping > 0, "damping must be positive")
+    local transpose = NdArray.transpose(jacobian)
+    local normal = NdArray.add(NdArray.matMul(transpose, jacobian),
+        NdArray.mul(NdArray.eye(cols), NdArray.full({}, damping * damping)))
+    return Linalg.solveCholesky(Linalg.cholesky(normal), transpose)
+end
+
+function Linalg.composeTransform(first, second)
+    local rows, cols = matrixShape(first)
+    local otherRows, otherCols = matrixShape(second)
+    assert(rows == 4 and cols == 4 and otherRows == 4 and otherCols == 4, "transforms must be 4 by 4")
+    return NdArray.matMul(first, second)
+end
+
+function Linalg.rigidInverse(transform)
+    local rows, cols = matrixShape(transform)
+    assert(rows == 4 and cols == 4, "rigid transforms must be 4 by 4")
+    local result = NdArray.eye(4)
+    for row = 0, 2 do
+        for col = 0, 2 do put(result, row, col, at(transform, col, row)) end
+    end
+    for row = 0, 2 do
+        local value = 0
+        for col = 0, 2 do value = value - at(result, row, col) * at(transform, col, 3) end
+        put(result, row, 3, value)
+    end
+    return result
+end
+
+function Linalg.transformPoints(transform, points)
+    local rows, cols = matrixShape(transform)
+    assert(rows == 4 and cols == 4, "transform must be 4 by 4")
+    if #points.shape == 1 then
+        assert(points.shape[1] == 3, "a point must have three coordinates")
+        local homogeneous = NdArray.array({vectorValue(points, 0), vectorValue(points, 1), vectorValue(points, 2), 1})
+        local transformed = NdArray.matMul(transform, homogeneous)
+        return NdArray.array({transformed.data[1], transformed.data[2], transformed.data[3]})
+    end
+    assert(#points.shape == 2 and points.shape[2] == 3, "points must be a vector or an N by 3 matrix")
+    local result = NdArray.zeros(points.shape)
+    for row = 0, points.shape[1] - 1 do
+        local homogeneous = NdArray.array({at(points, row, 0), at(points, row, 1), at(points, row, 2), 1})
+        local transformed = NdArray.matMul(transform, homogeneous)
+        for col = 0, 2 do put(result, row, col, transformed.data[col + 1]) end
+    end
+    return result
 end
 
 local function offDiagonalNorm(matrix)

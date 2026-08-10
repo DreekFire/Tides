@@ -82,14 +82,21 @@ operands; large-stride axes are outer and the smallest-stride axis is inner.
   elementwise implementation directly. `reshape` delegates view eligibility
   to `_reshapeIsView`, including compatible non-contiguous stride blocks;
   incompatible broadcasts report the operand shapes in their formatted error
-  messages. Fancy indexing now routes both full and partial index traversal
-  through scalar `nditer`; copy, masked copy, where, and axis sort paths use
-  the zero-based offset contract at their Lua data boundaries.
+  messages. `get` and `set` now share one normalized plan: integer/slice/
+  ellipsis/newaxis indexing returns writable views, while broadcasted fancy
+  integer indices and full or one-dimensional boolean masks materialize or
+  update through one scalar offset path. Scalar copy/where/nonzero operations
+  use explicit Lua truth semantics for boolean arrays.
 - `Low/Linalg.lua` — NdArray-based partial-pivoted LU, Householder QR,
-  Cholesky, vector solves, power iteration, and symmetric QR eigendecomposition.
+  Cholesky, vector/matrix solves, full-column-rank least squares, determinant,
+  inverse, damped least-squares pseudoinverse, normalization, cross/outer/skew
+  products, rigid-transform composition/inversion, point transforms, power
+  iteration, and symmetric QR eigendecomposition.
 - `tests/ndarray/ndarray_math_test.lua` and
   `tests/linalg/linalg_ndarray_test.lua` — numerical reconstruction,
-  broadcasting, copy/where, sorting, solve, and eigendecomposition checks.
+  broadcasting, simple/fancy/boolean indexing, writable views, copy/where,
+  sorting, reductions, solve, robotics vector/transform helpers, and
+  eigendecomposition checks.
 
 ### Reusable math verification workflow
 
@@ -98,6 +105,14 @@ operands; large-stride axes are outer and the smallest-stride axis is inner.
 .venv/bin/python tests/run_linalg_ndarray_tests.py
 .venv/bin/python tests/run_ndarray_core_iterator_tests.py
 .venv/bin/python Util/concat.py
+```
+
+The focused math runners load `Low/NdArray.lua` or `Low/Linalg.lua` directly;
+the generated paste-ready artifact is `Tides.lua` and should be regenerated
+after source changes. The complete repository workflow is:
+
+```sh
+.venv/bin/python tests/run_tests.py
 ```
 
 To check that a public method has only one retained definition:
