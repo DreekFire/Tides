@@ -3690,6 +3690,9 @@ function NdArray._callbackIter(func, dst, ...)
     return dst
 end
 
+-- These remain named functions intentionally.  Lua comparison metamethods
+-- (__eq/__lt/__le, where supported) must produce one boolean for the
+-- comparison expression; they cannot return an elementwise NdArray.
 local function ndComparison(func, a, b) return ndElementwise(func, a, b) end
 NdArray.equal = function(a, b) return ndComparison(function(x, y) return x == y end, a, b) end
 NdArray.notEqual = function(a, b) return ndComparison(function(x, y) return x ~= y end, a, b) end

@@ -40,6 +40,8 @@ assert(reduced.shape[1] == 2 and reduced.shape[2] == nil)
 close(reduced.data[1], 6)
 close(reduced.data[2], 15)
 close(NdArray.mean(vector), 2)
+local comparison = NdArray.greater(vector, NdArray.array({0, 3, 2}))
+assert(comparison.data[1] == true and comparison.data[2] == false and comparison.data[3] == true)
 
 local destination = NdArray.zeros({2, 3})
 NdArray._callbackIter(function(x, y) return x + y end, destination,
