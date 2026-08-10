@@ -37,12 +37,15 @@ Use `tests/run_tests.sh --ale` when the local runtime provides the ALE
   `NdArray.coreIter`, and single-output `NdArray.gufunc`. Operands use the
   generic `{shape, stride, data, offset}` representation; user-facing axis
   indices are zero-based and `-1` in `nditer` `opAxes` means newaxis.
-  The generic offset-only `NdArray._strideIter` is now a compatibility
-  adapter over the same traversal used by `nditer`; the specialized
-  `_strideIter1/2/3` helpers remain separate hot-path variants.
+  `NdArray._strideIter` is the lowest-level generic offset-only traversal:
+  it advances reusable zero-based offsets without reading operand data.
+  Passing its internal `withIndices` flag makes the same walker additionally
+  return reusable zero-based coordinates for scalar/core/gufunc layers.
+  `_strideIter1/2/3` remain separate constant-operand-count hot paths with
+  scalar offset locals and reusable coordinate tables.
 - `tests/ndarray/ndarray_core_iterator_test.lua` — broadcasting, complete
-  `opAxes`, reusable core views, exact gufunc core dimensions, and output-axis
-  placement.
+  `opAxes`, reusable core views, exact gufunc core dimensions, output-axis
+  placement, and direct generic/specialized offset traversal.
 - `tests/run_ndarray_core_iterator_tests.py` — reproducible Lua/lupa test
   runner; run it with `.venv/bin/python tests/run_ndarray_core_iterator_tests.py`.
 
@@ -72,12 +75,13 @@ layer is read-only and returns reused index/value tables.
   to `_reshapeIsView`, including compatible non-contiguous stride blocks;
   incompatible broadcasts report the operand shapes in their formatted error
   messages. Fancy indexing now routes both full and partial index traversal
-  through scalar `nditer`.
+  through scalar `nditer`; copy, masked copy, where, and axis sort paths use
+  the zero-based offset contract at their Lua data boundaries.
 - `Low/Linalg.lua` — NdArray-based partial-pivoted LU, Householder QR,
   Cholesky, vector solves, power iteration, and symmetric QR eigendecomposition.
 - `tests/ndarray/ndarray_math_test.lua` and
   `tests/linalg/linalg_ndarray_test.lua` — numerical reconstruction,
-  broadcasting, solve, and eigendecomposition checks.
+  broadcasting, copy/where, sorting, solve, and eigendecomposition checks.
 
 ### Reusable math verification workflow
 
@@ -92,4 +96,10 @@ To check that a public method has only one retained definition:
 
 ```sh
 rg -n '^function NdArray\.|^NdArray\.[A-Za-z0-9_]+\s*=' Low/NdArray.lua
+```
+
+To scan for removed traversal symbols after a refactor:
+
+```sh
+rg -n 'nditerPacked|_nditer|ndTraversal|ndComparison|shallowCopyWithMeta' Low tests --glob '*.lua'
 ```

@@ -11,6 +11,33 @@ local function assertEqual(actual, expected, message)
     assert(actual == expected, (message or "values differ") .. ": " .. tostring(actual) .. " ~= " .. tostring(expected))
 end
 
+local offsetOrder = {}
+for offsets in NdArray._strideIter({2, 3}, {{3, 1}, {0, 2}}, {0, 1}) do
+    offsetOrder[#offsetOrder + 1] = offsets[1] .. ":" .. offsets[2]
+end
+assertEqual(table.concat(offsetOrder, ","), "0:1,1:3,2:5,3:1,4:3,5:5",
+    "generic stride traversal should yield reusable zero-based offsets")
+
+local hotArray = array({2, 3}, {1, 2, 3, 4, 5, 6})
+local oneOperand = {}
+for _, offset in NdArray._strideIter1(hotArray) do oneOperand[#oneOperand + 1] = hotArray.data[offset + 1] end
+assertEqual(table.concat(oneOperand, ","), "1,2,3,4,5,6", "one-operand stride traversal")
+
+local hotSecond = array({2, 3}, {10, 20, 30, 40, 50, 60})
+local twoOperand = {}
+for _, offset1, offset2 in NdArray._strideIter2(hotArray, hotSecond) do
+    twoOperand[#twoOperand + 1] = hotArray.data[offset1 + 1] + hotSecond.data[offset2 + 1]
+end
+assertEqual(table.concat(twoOperand, ","), "11,22,33,44,55,66", "two-operand stride traversal")
+
+local threeOperand = {}
+local hotThird = array({2, 3}, {100, 200, 300, 400, 500, 600})
+for _, offset1, offset2, offset3 in NdArray._strideIter3(hotArray, hotSecond, hotThird) do
+    threeOperand[#threeOperand + 1] = hotArray.data[offset1 + 1]
+        + hotSecond.data[offset2 + 1] + hotThird.data[offset3 + 1]
+end
+assertEqual(table.concat(threeOperand, ","), "111,222,333,444,555,666", "three-operand stride traversal")
+
 local rows = array({2, 1}, {10, 20})
 local columns = array({3}, {1, 2, 3})
 local broadcasted = {}

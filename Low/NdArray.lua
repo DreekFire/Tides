@@ -184,43 +184,57 @@ function NdArray.ndindex(shape)
     end
 end
 
+-- Specialized C-order walkers retain the same zero-based offset contract as
+-- _strideIter, but keep operand offsets in locals for the 1/2/3-operand paths.
 function NdArray._strideIter1(arr)
     local shape = arr.shape
     local stride = arr.stride
     local ndim = #shape
-    local idxs = {}
-    for i=1,ndim do
-        idxs[i] = 1
+    local idxs, offset = {}, arr.offset or 0
+    for axis = 1, ndim do idxs[axis] = 0 end
+    if ndim == 0 then
+        local first = true
+        return function()
+            if not first then return nil end
+            first = false
+            return idxs, offset
+        end
     end
-    local ofs = -stride[ndim]
-    local inner_limit = shape[ndim]
-    local inner_stride = stride[ndim]
-    local inner_idx = 0
+    local inner_limit, inner_stride = shape[ndim], stride[ndim]
+    local inner_idx, done = 0, ndSizeLocal(shape) == 0
+    offset = offset - inner_stride
     return function()
+        if done then return nil end
         if inner_idx < inner_limit then
             inner_idx = inner_idx + 1
-            ofs = ofs + inner_stride
+            offset = offset + inner_stride
             idxs[ndim] = inner_idx
-            return idxs, ofs
+            return idxs, offset
         end
-        inner_idx = 1
-        ofs = ofs - inner_stride * (inner_limit - 1)
-        idxs[ndim - 1] = idxs[ndim - 1] + 1
-        for d=ndim - 1, 1, -1 do
-            if idxs[d] < shape[d] then
+        inner_idx = 0
+        idxs[ndim] = 0
+        offset = offset - inner_stride * (inner_limit - 1)
+        if ndim == 1 then
+            done = true
+            return nil
+        end
+        for d = ndim - 1, 1, -1 do
+            if idxs[d] + 1 < shape[d] then
                 idxs[d] = idxs[d] + 1
-                ofs = ofs + stride[d]
+                offset = offset + stride[d]
                 break
             else
-                if d == 1 then return nil end
                 idxs[d] = 0
-                idxs[d - 1] = idxs[d - 1] + 1
-                ofs = ofs - stride[d] * shape[d]
-                ofs = ofs + stride[d - 1]
+                offset = offset - stride[d] * (shape[d] - 1)
+                if d == 1 then
+                    done = true
+                    return nil
+                end
             end
         end
+        inner_idx = 1
         idxs[ndim] = 1
-        return idxs, ofs
+        return idxs, offset
     end
 end
 
@@ -229,46 +243,54 @@ function NdArray._strideIter2(arr1, arr2)
     local stride1 = arr1.stride
     local stride2 = arr2.stride
     local ndim = #shape
-    local idxs = {}
-    for i=1,ndim do
-        idxs[i] = 1
+    local idxs, offset1, offset2 = {}, arr1.offset or 0, arr2.offset or 0
+    for axis = 1, ndim do idxs[axis] = 0 end
+    if ndim == 0 then
+        local first = true
+        return function()
+            if not first then return nil end
+            first = false
+            return idxs, offset1, offset2
+        end
     end
-    local ofs1 = -stride1[ndim]
-    local ofs2 = -stride2[ndim]
     local inner_limit = shape[ndim]
-    local inner_stride1 = stride1[ndim]
-    local inner_stride2 = stride2[ndim]
-    local inner_idx = 0
+    local inner_stride1, inner_stride2 = stride1[ndim], stride2[ndim]
+    local inner_idx, done = 0, ndSizeLocal(shape) == 0
+    offset1, offset2 = offset1 - inner_stride1, offset2 - inner_stride2
     return function()
+        if done then return nil end
         if inner_idx < inner_limit then
             inner_idx = inner_idx + 1
-            ofs1 = ofs1 + inner_stride1
-            ofs2 = ofs2 + inner_stride2
+            offset1, offset2 = offset1 + inner_stride1, offset2 + inner_stride2
             idxs[ndim] = inner_idx
-            return idxs, ofs1, ofs2
+            return idxs, offset1, offset2
         end
-        inner_idx = 1
-        ofs1 = ofs1 - inner_stride1 * (inner_limit - 1)
-        ofs2 = ofs2 - inner_stride2 * (inner_limit - 1)
-        idxs[ndim - 1] = idxs[ndim - 1] + 1
-        for d=ndim - 1, 1, -1 do
-            if idxs[d] < shape[d] then
+        inner_idx = 0
+        idxs[ndim] = 0
+        offset1 = offset1 - inner_stride1 * (inner_limit - 1)
+        offset2 = offset2 - inner_stride2 * (inner_limit - 1)
+        if ndim == 1 then
+            done = true
+            return nil
+        end
+        for d = ndim - 1, 1, -1 do
+            if idxs[d] + 1 < shape[d] then
                 idxs[d] = idxs[d] + 1
-                ofs1 = ofs1 + stride1[d]
-                ofs2 = ofs2 + stride2[d]
+                offset1, offset2 = offset1 + stride1[d], offset2 + stride2[d]
                 break
             else
-                if d == 1 then return nil end
                 idxs[d] = 0
-                idxs[d - 1] = idxs[d - 1] + 1
-                ofs1 = ofs1 - stride1[d] * shape[d]
-                ofs1 = ofs1 + stride1[d - 1]
-                ofs2 = ofs2 - stride2[d] * shape[d]
-                ofs2 = ofs2 + stride2[d - 1]
+                offset1 = offset1 - stride1[d] * (shape[d] - 1)
+                offset2 = offset2 - stride2[d] * (shape[d] - 1)
+                if d == 1 then
+                    done = true
+                    return nil
+                end
             end
         end
+        inner_idx = 1
         idxs[ndim] = 1
-        return idxs, ofs1, ofs2
+        return idxs, offset1, offset2
     end
 end
 
@@ -278,53 +300,56 @@ function NdArray._strideIter3(arr1, arr2, arr3)
     local stride2 = arr2.stride
     local stride3 = arr3.stride
     local ndim = #shape
-    local idxs = {}
-    for i=1,ndim do
-        idxs[i] = 1
+    local idxs, offset1, offset2, offset3 = {}, arr1.offset or 0, arr2.offset or 0, arr3.offset or 0
+    for axis = 1, ndim do idxs[axis] = 0 end
+    if ndim == 0 then
+        local first = true
+        return function()
+            if not first then return nil end
+            first = false
+            return idxs, offset1, offset2, offset3
+        end
     end
-    local ofs1 = -stride1[ndim]
-    local ofs2 = -stride2[ndim]
-    local ofs3 = -stride3[ndim]
     local inner_limit = shape[ndim]
-    local inner_stride1 = stride1[ndim]
-    local inner_stride2 = stride2[ndim]
-    local inner_stride3 = stride3[ndim]
-    local inner_idx = 0
+    local inner_stride1, inner_stride2, inner_stride3 = stride1[ndim], stride2[ndim], stride3[ndim]
+    local inner_idx, done = 0, ndSizeLocal(shape) == 0
+    offset1, offset2, offset3 = offset1 - inner_stride1, offset2 - inner_stride2, offset3 - inner_stride3
     return function()
+        if done then return nil end
         if inner_idx < inner_limit then
             inner_idx = inner_idx + 1
-            ofs1 = ofs1 + inner_stride1
-            ofs2 = ofs2 + inner_stride2
-            ofs3 = ofs3 + inner_stride3
+            offset1, offset2, offset3 = offset1 + inner_stride1, offset2 + inner_stride2, offset3 + inner_stride3
             idxs[ndim] = inner_idx
-            return idxs, ofs1, ofs2, ofs3
+            return idxs, offset1, offset2, offset3
         end
-        inner_idx = 1
-        ofs1 = ofs1 - inner_stride1 * (inner_limit - 1)
-        ofs2 = ofs2 - inner_stride2 * (inner_limit - 1)
-        ofs3 = ofs3 - inner_stride3 * (inner_limit - 1)
-        idxs[ndim - 1] = idxs[ndim - 1] + 1
-        for d=ndim - 1, 1, -1 do
-            if idxs[d] < shape[d] then
+        inner_idx = 0
+        idxs[ndim] = 0
+        offset1 = offset1 - inner_stride1 * (inner_limit - 1)
+        offset2 = offset2 - inner_stride2 * (inner_limit - 1)
+        offset3 = offset3 - inner_stride3 * (inner_limit - 1)
+        if ndim == 1 then
+            done = true
+            return nil
+        end
+        for d = ndim - 1, 1, -1 do
+            if idxs[d] + 1 < shape[d] then
                 idxs[d] = idxs[d] + 1
-                ofs1 = ofs1 + stride1[d]
-                ofs2 = ofs2 + stride2[d]
-                ofs3 = ofs3 + stride3[d]
+                offset1, offset2, offset3 = offset1 + stride1[d], offset2 + stride2[d], offset3 + stride3[d]
                 break
             else
-                if d == 1 then return nil end
                 idxs[d] = 0
-                idxs[d - 1] = idxs[d - 1] + 1
-                ofs1 = ofs1 - stride1[d] * shape[d]
-                ofs1 = ofs1 + stride1[d - 1]
-                ofs2 = ofs2 - stride2[d] * shape[d]
-                ofs2 = ofs2 + stride2[d - 1]
-                ofs3 = ofs3 - stride3[d] * shape[d]
-                ofs3 = ofs3 + stride3[d - 1]
+                offset1 = offset1 - stride1[d] * (shape[d] - 1)
+                offset2 = offset2 - stride2[d] * (shape[d] - 1)
+                offset3 = offset3 - stride3[d] * (shape[d] - 1)
+                if d == 1 then
+                    done = true
+                    return nil
+                end
             end
         end
+        inner_idx = 1
         idxs[ndim] = 1
-        return idxs, ofs1, ofs2, ofs3
+        return idxs, offset1, offset2, offset3
     end
 end
 
@@ -343,14 +368,14 @@ function NdArray.copyTo(dst, src, where)
     if where == nil or where == true then
         dst, src = table.unpack(NdArray.broadcastArrays({dst, src}))
         for offsets in NdArray._strideIter(dst.shape, {dst.stride, src.stride}, {dst.offset or 0, src.offset or 0}) do
-            dst.data[offsets[1]] = src.data[offsets[2]]
+            dst.data[offsets[1] + 1] = src.data[offsets[2] + 1]
         end
     else
         dst, src, where = table.unpack(NdArray.broadcastArrays({dst, src, where}))
         for offsets in NdArray._strideIter(dst.shape, {dst.stride, src.stride, where.stride},
             {dst.offset or 0, src.offset or 0, where.offset or 0}) do
-            if where.data[offsets[3]] then
-                dst.data[offsets[1]] = src.data[offsets[2]]
+            if where.data[offsets[3] + 1] then
+                dst.data[offsets[1] + 1] = src.data[offsets[2] + 1]
             end
         end
     end
@@ -756,11 +781,11 @@ function NdArray.sort(arr, axis)
         for _, offset in NdArray._strideIter1(ret) do
             local values = {}
             for i=1,n do
-                values[i] = arr.data[offset + (i - 1) * stride]
+                values[i] = arr.data[offset + (i - 1) * stride + 1]
             end
             table.sort(values)
             for i=1,n do
-                ret.data[offset + (i - 1) * stride] = values[i]
+                ret.data[offset + (i - 1) * stride + 1] = values[i]
             end
         end
         ret.stride[axis] = stride
@@ -785,13 +810,13 @@ function NdArray.argsort(arr, axis)
         ret.stride[axis] = 1
         ret.shape[axis] = 1
         local idxs = {}
-        for i=1, arr.size do
+        for i=1, n do
             idxs[i] = i - 1
         end
         for _, offset in NdArray._strideIter1(ret) do
-            table.sort(idxs, function(a, b) return arr.data[offset + a * stride] < arr.data[offset + b * stride] end)
+            table.sort(idxs, function(a, b) return arr.data[offset + a * stride + 1] < arr.data[offset + b * stride + 1] end)
             for i=1,n do
-                ret.data[offset + (i - 1) * stride] = idxs[i]
+                ret.data[offset + (i - 1) * stride + 1] = idxs[i]
             end
         end
         ret.stride[axis] = stride
@@ -929,7 +954,7 @@ function NdArray.where(cond, ifTrue, ifFalse)
         {ret.offset or 0, cond.offset or 0, ifTrue.offset or 0, ifFalse.offset or 0}
     ) do
         local retOfs, condOfs, trueOfs, falseOfs = offsets[1], offsets[2], offsets[3], offsets[4]
-        ret.data[retOfs] = cond.data[condOfs] and ifTrue.data[trueOfs] or ifFalse.data[falseOfs]
+        ret.data[retOfs + 1] = cond.data[condOfs + 1] and ifTrue.data[trueOfs + 1] or ifFalse.data[falseOfs + 1]
     end
     
     return ret
@@ -1337,10 +1362,14 @@ local function ndOrder(order, ndim)
     return result
 end
 
-local function ndTraversal(shape, strides, baseOffsets, order)
+-- Lowest-level generic traversal.  It advances logical offsets only; it never
+-- reads an operand and it reuses its offset table on every yield.  The
+-- optional `withIndices` result is for layers that also need coordinates.
+function NdArray._strideIter(shape, strides, baseOffsets, order, withIndices)
     local ndim = #shape
-    local indices, offsets = {}, {}
-    for axis = 1, ndim do indices[axis] = 0 end
+    local positions, offsets = {}, {}
+    for axis = 1, ndim do positions[axis] = 0 end
+    local indices = withIndices and positions or nil
     for operand, offset in ipairs(baseOffsets) do offsets[operand] = offset or 0 end
     local axisOrder = ndOrder(order, ndim)
     local first, done = true, ndSize(shape) == 0
@@ -1348,37 +1377,27 @@ local function ndTraversal(shape, strides, baseOffsets, order)
         if done then return nil end
         if first then
             first = false
-            return indices, offsets
+            if indices then return indices, offsets end
+            return offsets
         end
         if ndim == 0 then done = true; return nil end
         for position = ndim, 1, -1 do
             local axis = axisOrder[position]
-            if indices[axis] + 1 < shape[axis] then
-                indices[axis] = indices[axis] + 1
+            local index = positions[axis]
+            if index + 1 < shape[axis] then
+                positions[axis] = index + 1
                 for operand, stride in ipairs(strides) do
                     offsets[operand] = offsets[operand] + stride[axis]
                 end
-                return indices, offsets
+                if indices then return indices, offsets end
+                return offsets
             end
-            indices[axis] = 0
+            positions[axis] = 0
             for operand, stride in ipairs(strides) do
                 offsets[operand] = offsets[operand] - stride[axis] * (shape[axis] - 1)
             end
             if position == 1 then done = true; return nil end
         end
-    end
-end
-
--- Offset-only consumers use the same traversal as nditer.  Keep this
--- compatibility wrapper so there is one generic coordinate/stride walker.
-function NdArray._strideIter(shape, strides, baseOffsets, order)
-    local iterator = ndTraversal(shape, strides, baseOffsets, order)
-    local dataOffsets = {}
-    return function()
-        local _, offsets = iterator()
-        if not offsets then return nil end
-        for operand, offset in ipairs(offsets) do dataOffsets[operand] = offset + 1 end
-        return dataOffsets
     end
 end
 
@@ -1491,7 +1510,7 @@ function NdArray.nditer(arrs, opFlags, order, opAxes, iterShape)
     local shape, strides = ndOpAxes(arrs, opAxes, iterShape)
     local offsets = {}
     for operand, arr in ipairs(arrs) do offsets[operand] = arr.offset or 0 end
-    local iterator = ndTraversal(shape, strides, offsets, order)
+    local iterator = NdArray._strideIter(shape, strides, offsets, order, true)
     local values = {}
     return function()
         local indices, currentOffsets = iterator()
@@ -1567,7 +1586,7 @@ function NdArray.coreIter(arrs, coreAxes, order, iterShape)
     coreAxes = coreAxes or {}
     local loopShape, loopStrides, offsets, coreShapes, coreStrides =
         ndNormalizeCore(arrs, coreAxes, iterShape)
-    local iterator = ndTraversal(loopShape, loopStrides, offsets, order)
+    local iterator = NdArray._strideIter(loopShape, loopStrides, offsets, order, true)
     local views = {}
     for operand, arr in ipairs(arrs) do
         views[operand] = ndView(arr, coreShapes[operand], coreStrides[operand], offsets[operand])
@@ -1660,7 +1679,7 @@ local function ndCopyCore(result, output, outputBase, outputAxes, coreShape)
     ndCheckArray(result)
     assert(#result.shape == rank, "gufunc result rank does not match its signature")
     for axis = 1, rank do assert(result.shape[axis] == coreShape[axis], "gufunc result shape does not match its signature") end
-    local iterator = ndTraversal(coreShape, {result.stride}, {result.offset or 0}, "C")
+    local iterator = NdArray._strideIter(coreShape, {result.stride}, {result.offset or 0}, "C", true)
     while true do
         local indices, offsets = iterator()
         if not indices then break end
@@ -1708,7 +1727,7 @@ function NdArray.gufunc(func, signature, axes)
         end
         local outputShape, normalizedOutputAxes = ndOutputLayout(loopShape, outputCoreShape, outputAxes)
         local output = ndContiguousArray(outputShape)
-        local iterator = ndTraversal(loopShape, loopStrides, offsets, "C")
+        local iterator = NdArray._strideIter(loopShape, loopStrides, offsets, "C", true)
         local views = {}
         for operand, arr in ipairs(args) do
             views[operand] = ndView(arr, coreShapes[operand], coreStrides[operand], offsets[operand])
@@ -1752,8 +1771,8 @@ NdArray.lessEqual = function(a, b) return NdArray._elementwise(function(x, y) re
 NdArray.greater = function(a, b) return NdArray._elementwise(function(x, y) return x > y end, a, b) end
 NdArray.greaterEqual = function(a, b) return NdArray._elementwise(function(x, y) return x >= y end, a, b) end
 
-local function ndWriteTraversal(source, output, axisOffset, axisLength, axis)
-    local iterator = ndTraversal(source.shape, {source.stride}, {source.offset or 0}, "C")
+local function ndWriteTraversal(source, output, axisOffset, axis)
+    local iterator = NdArray._strideIter(source.shape, {source.stride}, {source.offset or 0}, "C", true)
     while true do
         local indices, offsets = iterator()
         if not indices then break end
@@ -1781,7 +1800,7 @@ function NdArray.concatenate(arrays, axis)
     end
     local result, offset = ndContiguousArray(shape), 0
     for _, arr in ipairs(arrays) do
-        ndWriteTraversal(arr, result, offset, arr.shape[axis + 1], axis)
+        ndWriteTraversal(arr, result, offset, axis)
         offset = offset + arr.shape[axis + 1]
     end
     return result
