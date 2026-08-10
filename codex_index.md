@@ -70,6 +70,15 @@ Use `order = "K"` with `NdArray.nditer`, `coreIter`, or the generic
 the iterator is created by the largest nonzero absolute stride across all
 operands; large-stride axes are outer and the smallest-stride axis is inner.
 
+The focused math/indexing workflow is:
+
+```sh
+./.venv/bin/python tests/run_ndarray_math_tests.py
+./.venv/bin/python tests/run_ndarray_core_iterator_tests.py
+./.venv/bin/python tests/run_linalg_ndarray_tests.py
+./.venv/bin/python tests/run_tests.py
+```
+
 ### NdArray math and linear algebra
 
 - `Low/NdArray.lua` — the original WIP public implementations for
@@ -84,9 +93,18 @@ operands; large-stride axes are outer and the smallest-stride axis is inner.
   incompatible broadcasts report the operand shapes in their formatted error
   messages. `get` and `set` now share one normalized plan: integer/slice/
   ellipsis/newaxis indexing returns writable views, while broadcasted fancy
-  integer indices and full or one-dimensional boolean masks materialize or
-  update through one scalar offset path. Scalar copy/where/nonzero operations
-  use explicit Lua truth semantics for boolean arrays.
+  integer indices and boolean masks materialize or update through one scalar
+  offset path. Separated advanced-index dimensions move to the front, and
+  multidimensional boolean masks consume matching leading source axes as
+  paired nonzero coordinates. Explicitly typed empty masks are supported;
+  Lua `true`/`false` indices add length-one/zero selection dimensions. Scalar
+  copy/where/nonzero operations use explicit Lua truth semantics for boolean
+  arrays. Arrays expose inferred or explicit `dtype` metadata (`any`, `bool`,
+  `int`, `float`, or `object`); metadata does not implicitly cast values.
+  Rank-zero arrays remain tables in Lua and expose `NdArray.item`/`scalar` for
+  explicit extraction, while rank-zero integer arrays are accepted as scalar
+  indices. Assignments whose source shares the destination backing table emit
+  a warning; overlapping-copy semantics remain intentionally unspecified.
 - `Low/Linalg.lua` — NdArray-based partial-pivoted LU, Householder QR,
   Cholesky, vector/matrix solves, full-column-rank least squares, determinant,
   inverse, damped least-squares pseudoinverse, normalization, cross/outer/skew

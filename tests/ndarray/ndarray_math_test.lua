@@ -146,6 +146,60 @@ assert(selectedRowsBoolean.shape[1] == 1 and selectedRowsBoolean.shape[2] == 3
 NdArray.set(booleanSource, {fullMask}, 9)
 assert(table.concat(booleanSource.data, ",") == "9,2,9,4,9,6", "boolean assignment")
 
+-- Advanced dimensions move to the front when advanced indices are separated
+-- by basic indices. Multidimensional masks consume their leading axes and
+-- become paired coordinate arrays.
+local placementSource = NdArray.reshape(NdArray.arange(2 * 3 * 4 * 5), {2, 3, 4, 5})
+local placement = NdArray.get(placementSource, {
+    NdArray.sliceAll, NdArray.array({0, 2}), NdArray.sliceAll, NdArray.array({1, 4})
+})
+assert(placement.shape[1] == 2 and placement.shape[2] == 2 and placement.shape[3] == 4,
+    "separated advanced indices should move their broadcast dimensions to the front")
+assert(placement.data[1] == 1 and placement.data[2] == 6 and placement.data[9] == 44,
+    "separated advanced indices should preserve coordinate mapping")
+local maskedSource = NdArray.reshape(NdArray.arange(2 * 3 * 2), {2, 3, 2})
+local leadingMask = NdArray.array({{true, false, true}, {false, true, false}})
+local masked = NdArray.get(maskedSource, {leadingMask, NdArray.sliceAll})
+assert(masked.shape[1] == 3 and masked.shape[2] == 2
+    and table.concat(masked.data, ",") == "0,1,4,5,8,9",
+    "multidimensional boolean masks should consume leading axes")
+
+-- An explicitly typed empty mask remains a boolean mask even though it has
+-- no values to inspect. Boolean scalars select a new leading dimension.
+local emptyAxisSource = NdArray.empty({0, 3}, "int")
+local emptyAxisMask = NdArray.empty({0}, "bool")
+local emptySelected = NdArray.get(emptyAxisSource, {emptyAxisMask, NdArray.sliceAll})
+assert(emptySelected.shape[1] == 0 and emptySelected.shape[2] == 3,
+    "empty boolean masks should produce empty selections")
+local allFalse = NdArray.full({2, 3}, false, "bool")
+local noSelected = NdArray.get(booleanSource, {allFalse})
+assert(noSelected.shape[1] == 0 and #noSelected.data == 0,
+    "a mask with no true entries should select no values")
+local trueSelected = NdArray.get(booleanSource, {true})
+assert(trueSelected.shape[1] == 1 and trueSelected.shape[2] == 2 and trueSelected.shape[3] == 3,
+    "true should add a length-one selection dimension")
+local falseSelected = NdArray.get(booleanSource, {false})
+assert(falseSelected.shape[1] == 0 and falseSelected.shape[2] == 2 and falseSelected.shape[3] == 3,
+    "false should add an empty selection dimension")
+
+-- Rank-zero arrays have explicit scalar extraction and can be used as scalar
+-- integer indices, but Lua cannot implicitly coerce them to numbers.
+local scalarArray = NdArray.array(7)
+assert(#scalarArray.shape == 0 and NdArray.item(scalarArray) == 7 and NdArray.scalar(scalarArray) == 7,
+    "rank-zero arrays should expose their scalar value explicitly")
+local scalarIndexed = NdArray.get(booleanSource, {NdArray.array(1), NdArray.array(2)})
+assert(#scalarIndexed.shape == 0 and NdArray.item(scalarIndexed) == 6,
+    "rank-zero integer arrays should act as scalar indices")
+
+-- Dtype is metadata, not an implicit conversion policy.
+assert(NdArray.array({true, false}).dtype == "bool", "boolean dtype metadata")
+assert(NdArray.array({1, 2}).dtype == "int", "integer dtype metadata")
+assert(NdArray.array({1, 2.5}).dtype == "float", "float dtype metadata")
+assert(NdArray.empty({0}, "bool").dtype == "bool", "empty dtype metadata")
+assert(NdArray.zeros({2}, "float").dtype == "float", "explicit constructor dtype metadata")
+local warningSource = NdArray.array({1, 2, 3})
+NdArray.set(warningSource, {NdArray.sliceAll}, warningSource)
+
 -- Other high-value array paths used by robotics code.
 local concat = NdArray.concatenate({NdArray.array({{1, 2}, {3, 4}}), NdArray.array({{5, 6}})}, 0)
 assert(concat.shape[1] == 3 and concat.shape[2] == 2 and table.concat(concat.data, ",") == "1,2,3,4,5,6",

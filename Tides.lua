@@ -1866,6 +1866,47 @@ local function ndTruthy(value)
     return value ~= nil and value ~= false and value ~= 0
 end
 
+local function ndNormalizeDType(dtype)
+    if dtype == nil then return "any" end
+    assert(dtype == "any" or dtype == "bool" or dtype == "int"
+        or dtype == "float" or dtype == "object", "unsupported dtype")
+    return dtype
+end
+
+local function ndValueDType(value)
+    if type(value) == "boolean" then return "bool" end
+    if type(value) ~= "number" then return "object" end
+    return value == math.floor(value) and "int" or "float"
+end
+
+local function ndInferDType(data)
+    if #data == 0 then return "any" end
+    local dtype = ndValueDType(data[1])
+    for index = 2, #data do
+        local valueType = ndValueDType(data[index])
+        if valueType == "object" or dtype == "object" then
+            dtype = "object"
+        elseif valueType == "bool" and dtype ~= "bool" then
+            dtype = "object"
+        elseif dtype == "bool" and valueType ~= "bool" then
+            dtype = "object"
+        elseif valueType == "float" or dtype == "float" then
+            dtype = "float"
+        end
+    end
+    return dtype
+end
+
+local function ndRefreshDType(arr)
+    if arr.size > 0 then arr.dtype = ndInferDType(arr.data) end
+    return arr
+end
+
+local function ndWarning(message)
+    local text = "NdArray warning: " .. message .. "\n"
+    if io and io.stderr then io.stderr:write(text) else print(text) end
+end
+
 local function ndBroadcastError(shapes)
     local formatted = {}
     for index, shape in ipairs(shapes) do formatted[index] = ndShapeString(shape) end
@@ -1880,6 +1921,7 @@ local function ndViewLocal(arr, shape, stride)
         data = arr.data,
         offset = arr.offset or 0,
         size = ndSizeLocal(shape),
+        dtype = arr.dtype or "any",
     }
 end
 
@@ -1911,27 +1953,32 @@ local function ndInferShapeLocal(value)
     return shape
 end
 
-function NdArray.array(lst)
-    if type(lst) == "table" and lst.shape and lst.data then return NdArray.copy(lst) end
+function NdArray.array(lst, dtype)
+    if type(lst) == "table" and lst.shape and lst.data then
+        local result = NdArray.copy(lst)
+        if dtype ~= nil then result.dtype = ndNormalizeDType(dtype) end
+        return result
+    end
     local shape = ndInferShapeLocal(lst)
-    local result = NdArray.empty(shape)
+    local result = NdArray.empty(shape, dtype)
     ndFlattenLocal(lst, result.data)
     assert(#result.data == result.size, "array values must be rectangular")
+    if dtype == nil then result.dtype = ndInferDType(result.data) end
     return result
 end
 
 NdArray.Array = NdArray.array
 
-function NdArray.zeros(shape)
-    return NdArray.full(shape, 0)
+function NdArray.zeros(shape, dtype)
+    return NdArray.full(shape, 0, dtype or "int")
 end
 
-function NdArray.ones(shape)
-    return NdArray.full(shape, 1)
+function NdArray.ones(shape, dtype)
+    return NdArray.full(shape, 1, dtype or "int")
 end
 
-function NdArray.full(shape, fill)
-    local arr = NdArray.empty(shape)
+function NdArray.full(shape, fill, dtype)
+    local arr = NdArray.empty(shape, dtype or ndValueDType(fill))
     local data = arr.data
     for i=1, arr.size do
         data[i] = fill
@@ -1939,7 +1986,7 @@ function NdArray.full(shape, fill)
     return arr
 end
 
-function NdArray.empty(shape)
+function NdArray.empty(shape, dtype)
     local size = 1
     local stride = {}
     local shape_copy = {}
@@ -1958,26 +2005,37 @@ function NdArray.empty(shape)
         shape = shape_copy,
         data = data,
         offset = 0,
+        dtype = ndNormalizeDType(dtype),
     }
     setmetatable(arr, NdArray.meta)
     return arr
 end
 
 function NdArray.zerosLike(arr)
-    return NdArray.zeros(arr.shape)
+    return NdArray.zeros(arr.shape, arr.dtype)
 end
 
 function NdArray.onesLike(arr)
-    return NdArray.ones(arr.shape)
+    return NdArray.ones(arr.shape, arr.dtype)
 end
 
 function NdArray.fullLike(arr, fill)
-    return NdArray.full(arr.shape, fill)
+    return NdArray.full(arr.shape, fill, arr.dtype)
 end
 
 function NdArray.emptyLike(arr)
-    return NdArray.empty(arr.shape)
+    return NdArray.empty(arr.shape, arr.dtype)
 end
+
+-- Lua cannot implicitly coerce a table to a number.  This is the explicit
+-- scalar boundary for rank-zero arrays and is also used by scalar indexing.
+function NdArray.item(arr)
+    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
+    assert(#arr.shape == 0, "item requires a zero-dimensional NdArray")
+    return arr.data[(arr.offset or 0) + 1]
+end
+
+NdArray.scalar = NdArray.item
 
 function NdArray.arange(a, b, c)
     assert(type(a) == "number", "arange requires at least one number")
@@ -2203,12 +2261,12 @@ end
 
 function NdArray.copy(arr)
     assert(type(arr) == "table" and arr.shape and arr.stride and arr.data, "expected an NdArray")
-    local ret = NdArray.empty(arr.shape)
+    local ret = NdArray.empty(arr.shape, arr.dtype)
     local position = 1
     for _, values in NdArray.nditer(arr, nil, "C") do
         ret.data[position], position = values[1], position + 1
     end
-    return ret
+    return ndRefreshDType(ret)
 end
 
 function NdArray.copyTo(dst, src, where)
@@ -2366,7 +2424,7 @@ function NdArray._elementwise(func, ...)
         for i = 1, n do args[i] = values[i] end
         ret.data[position], position = func(table.unpack(args, 1, n)), position + 1
     end
-    return ret
+    return ndRefreshDType(ret)
 end
 
 function NdArray.add(arr1, arr2)
@@ -2762,7 +2820,9 @@ function NdArray.nonzero(arr)
             for axis = 1, ndim do coordinates[axis][count] = idxs[axis] end
         end
     end
-    for axis = 1, ndim do coordinates[axis] = NdArray.array(coordinates[axis]) end
+    for axis = 1, ndim do
+        coordinates[axis] = NdArray.array(coordinates[axis], "int")
+    end
     return table.unpack(coordinates, 1, ndim)
 end
 
@@ -2787,7 +2847,7 @@ function NdArray.argwhere(arr)
             end
         end
     end
-    return NdArray.reshape(NdArray.array(data), {count, ndim})
+    return NdArray.reshape(NdArray.array(data, "int"), {count, ndim})
 end
 
 function NdArray.where(cond, ifTrue, ifFalse)
@@ -2809,7 +2869,7 @@ function NdArray.where(cond, ifTrue, ifFalse)
         end
     end
     
-    return ret
+    return ndRefreshDType(ret)
 end
 
 NdArray._sliceMt = {
@@ -2862,6 +2922,7 @@ local function ndSliceBounds(dim, start, stop, step)
 end
 
 local function ndIsBooleanArray(arr)
+    if arr.dtype == "bool" then return true end
     if arr.size == 0 then return false end
     for _, values in NdArray.nditer(arr, nil, "C") do
         if type(values[1]) ~= "boolean" then return false end
@@ -2873,6 +2934,20 @@ local function ndIndexArray(index)
     if type(index) == "table" and index.shape and index.data then return index end
     assert(type(index) == "table", "advanced indices must be arrays or Lua tables")
     return NdArray.array(index)
+end
+
+local function ndIndexBooleanRank(index)
+    if type(index) ~= "table" or getmetatable(index) == NdArray._sliceMt then return nil end
+    local advanced = ndIndexArray(index)
+    if ndIsBooleanArray(advanced) then return #advanced.shape end
+    return nil
+end
+
+local function ndScalarIndexToken(token)
+    if type(token) == "table" and token.shape and token.data and #token.shape == 0 then
+        return NdArray.item(token)
+    end
+    return token
 end
 
 local function ndNormalizeIndex(index, dimension, axis)
@@ -2890,22 +2965,15 @@ local function ndIndexPlan(arr, idxs)
     idxs = idxs or {}
     assert(type(idxs) == "table", "indices must be supplied as a table")
     local raw = {}
-    for position, token in ipairs(idxs) do raw[position] = token end
-    if #raw == 1 and type(raw[1]) == "table" and getmetatable(raw[1]) ~= NdArray._sliceMt then
-        local mask = ndIndexArray(raw[1])
-        if ndIsBooleanArray(mask) and #mask.shape == #arr.shape then
-            for axis = 1, #arr.shape do
-                assert(mask.shape[axis] == arr.shape[axis], ndBroadcastError({mask.shape, arr.shape}))
-            end
-            raw = {NdArray.nonzero(mask)}
-        end
-    end
+    for position, token in ipairs(idxs) do raw[position] = ndScalarIndexToken(token) end
     local consumed, ellipsis = 0, nil
     for position, token in ipairs(raw) do
         if token == NdArray.ellipsis then
             assert(not ellipsis, "an index may contain only one ellipsis")
             ellipsis = position
-        elseif token ~= NdArray.newaxis then consumed = consumed + 1 end
+        elseif token ~= NdArray.newaxis and type(token) ~= "boolean" then
+            consumed = consumed + (ndIndexBooleanRank(token) or 1)
+        end
     end
     assert(consumed <= #arr.shape, "too many indices for array")
     local expanded, inserted = {}, false
@@ -2921,45 +2989,100 @@ local function ndIndexPlan(arr, idxs)
     for position, token in ipairs(expanded) do
         if token == NdArray.newaxis then
             entries[#entries + 1] = {kind = "newaxis"}
+        elseif type(token) == "boolean" then
+            entries[#entries + 1] = {kind = "boolScalar", value = token}
         else
             assert(sourceAxis <= #arr.shape, "too many indices for array")
             if type(token) == "number" then
                 entries[#entries + 1] = {kind = "index", axis = sourceAxis,
                     value = ndNormalizeIndex(token, arr.shape[sourceAxis], sourceAxis)}
+                sourceAxis = sourceAxis + 1
             elseif type(token) == "table" and getmetatable(token) == NdArray._sliceMt then
                 local start, stop, step, size = ndSliceBounds(arr.shape[sourceAxis], token.start, token.stop, token.step)
                 entries[#entries + 1] = {kind = "slice", axis = sourceAxis, start = start, step = step, size = size}
+                sourceAxis = sourceAxis + 1
             elseif type(token) == "table" then
                 local advanced = ndIndexArray(token)
                 if ndIsBooleanArray(advanced) then
-                    assert(#advanced.shape == 1, "a boolean index must be one-dimensional when used on an axis")
-                    assert(advanced.shape[1] == arr.shape[sourceAxis],
-                        ndBroadcastError({advanced.shape, {arr.shape[sourceAxis]}}))
-                    advanced = ({NdArray.nonzero(advanced)})[1]
+                    local rank = #advanced.shape
+                    assert(rank > 0, "a zero-dimensional boolean index must be a scalar boolean")
+                    assert(sourceAxis + rank - 1 <= #arr.shape,
+                        "boolean index has more dimensions than the indexed array")
+                    for axis = 1, rank do
+                        assert(advanced.shape[axis] == arr.shape[sourceAxis + axis - 1],
+                            ndBroadcastError({advanced.shape, {table.unpack(arr.shape, sourceAxis, sourceAxis + rank - 1)}}))
+                    end
+                    local coordinates = {NdArray.nonzero(advanced)}
+                    for axis = 1, rank do
+                        local coordinate = coordinates[axis]
+                        entries[#entries + 1] = {kind = "fancy", axis = sourceAxis + axis - 1,
+                            array = coordinate}
+                        fancyArrays[#fancyArrays + 1] = coordinate
+                    end
+                    sourceAxis = sourceAxis + rank
+                else
+                    entries[#entries + 1] = {kind = "fancy", axis = sourceAxis, array = advanced}
+                    fancyArrays[#fancyArrays + 1] = advanced
+                    sourceAxis = sourceAxis + 1
                 end
-                entries[#entries + 1] = {kind = "fancy", axis = sourceAxis, array = advanced}
-                fancyArrays[#fancyArrays + 1] = advanced
             else
                 error(string.format("unsupported index type %s at position %d", type(token), position))
             end
-            sourceAxis = sourceAxis + 1
         end
     end
     local fancyShape
     if #fancyArrays > 0 then
+        for _, entry in ipairs(entries) do
+            if entry.kind == "boolScalar" then
+                error("boolean scalar indices cannot be combined with array indices")
+            end
+        end
         local broadcasted = NdArray.broadcastArrays(fancyArrays)
         fancyShape = broadcasted[1].shape
         local fancyIndex = 0
         for _, entry in ipairs(entries) do
             if entry.kind == "fancy" then fancyIndex = fancyIndex + 1; entry.array = broadcasted[fancyIndex] end
         end
-    else fancyShape = {} end
+    else
+        for _, entry in ipairs(entries) do
+            if entry.kind == "boolScalar" then
+                fancyShape = {entry.value and 1 or 0}
+                break
+            end
+        end
+        fancyShape = fancyShape or {}
+    end
+    local firstFancy, advancedSeparated, sawBasicAfterFancy = nil, false, false
+    for position, entry in ipairs(entries) do
+        local isFancy = entry.kind == "fancy" or entry.kind == "boolScalar"
+        if isFancy then
+            if not firstFancy then firstFancy = position end
+            if sawBasicAfterFancy then advancedSeparated = true end
+        elseif firstFancy then
+            sawBasicAfterFancy = true
+        end
+    end
     local shape, fancyStart = {}, nil
-    for _, entry in ipairs(entries) do
-        if entry.kind == "fancy" then
-            if not fancyStart then fancyStart = #shape + 1; for _, size in ipairs(fancyShape) do shape[#shape + 1] = size end end
-        elseif entry.kind == "slice" then entry.outputAxis = #shape + 1; shape[#shape + 1] = entry.size
-        elseif entry.kind == "newaxis" then entry.outputAxis = #shape + 1; shape[#shape + 1] = 1 end
+    if firstFancy and advancedSeparated then
+        fancyStart = 1
+        for _, size in ipairs(fancyShape) do shape[#shape + 1] = size end
+        for _, entry in ipairs(entries) do
+            if entry.kind == "slice" then entry.outputAxis = #shape + 1; shape[#shape + 1] = entry.size
+            elseif entry.kind == "newaxis" then entry.outputAxis = #shape + 1; shape[#shape + 1] = 1 end
+        end
+    else
+        for _, entry in ipairs(entries) do
+            if entry.kind == "fancy" or entry.kind == "boolScalar" then
+                if not fancyStart then
+                    fancyStart = #shape + 1
+                    for _, size in ipairs(fancyShape) do shape[#shape + 1] = size end
+                end
+            elseif entry.kind == "slice" then
+                entry.outputAxis = #shape + 1; shape[#shape + 1] = entry.size
+            elseif entry.kind == "newaxis" then
+                entry.outputAxis = #shape + 1; shape[#shape + 1] = 1
+            end
+        end
     end
     return {entries = entries, shape = shape, fancyShape = fancyShape, fancyStart = fancyStart}
 end
@@ -3028,7 +3151,7 @@ function NdArray.get(arr, idxs)
         ret.shape, ret.stride, ret.offset, ret.size = shape, stride, offset, ndSizeLocal(shape)
         return ret
     end
-    local ret, position = NdArray.empty(plan.shape), 1
+    local ret, position = NdArray.empty(plan.shape, arr.dtype), 1
     local zeroStride = {}; for axis = 1, #plan.shape do zeroStride[axis] = 0 end
     local iterator = NdArray._strideIter(plan.shape, {zeroStride}, {0}, "C", true)
     while true do
@@ -3044,9 +3167,15 @@ function NdArray.set(arr, idxs, vals)
     local plan = ndIndexPlan(arr, idxs)
     if not plan.fancyStart then
         if type(vals) ~= "table" or not vals.shape or not vals.data then vals = NdArray.array(vals) end
+        if vals.data == arr.data then
+            ndWarning("assignment source shares storage with destination; use an explicit copy to avoid overlap ambiguity")
+        end
         NdArray.copyTo(NdArray.get(arr, idxs), vals); return
     end
     if type(vals) ~= "table" or not vals.shape or not vals.data then vals = NdArray.array(vals) end
+    if vals.data == arr.data then
+        ndWarning("assignment source shares storage with destination; use an explicit copy to avoid overlap ambiguity")
+    end
     vals = NdArray.broadcastTo(NdArray.copy(vals), plan.shape)
     local zeroStride = {}; for axis = 1, #plan.shape do zeroStride[axis] = 0 end
     local iterator = NdArray._strideIter(plan.shape, {zeroStride}, {0}, "C", true)
@@ -3352,7 +3481,10 @@ local function ndNormalizeCore(arrs, coreAxes, iterShape)
 end
 
 local function ndView(arr, shape, stride, offset)
-    return {shape = shape, stride = stride, data = arr.data, offset = offset, size = ndSize(shape)}
+    return {
+        shape = shape, stride = stride, data = arr.data, offset = offset,
+        size = ndSize(shape), dtype = arr.dtype or "any",
+    }
 end
 
 -- Direct-axis core iterator.  Unlike nditer, this preserves the selected
@@ -3412,14 +3544,15 @@ local function ndDefaultCoreAxes(arr, rank)
     return result
 end
 
-local function ndContiguousArray(shape)
+local function ndContiguousArray(shape, dtype)
     local result, stride = {}, {}
     local step = 1
     for axis = #shape, 1, -1 do
         stride[axis] = step
         step = step * shape[axis]
     end
-    result.shape, result.stride, result.data, result.offset, result.size = ndCopyShape(shape), stride, {}, 0, step
+    result.shape, result.stride, result.data, result.offset, result.size, result.dtype =
+        ndCopyShape(shape), stride, {}, 0, step, ndNormalizeDType(dtype)
     return result
 end
 
