@@ -54,6 +54,13 @@ layer is read-only and returns reused index/value tables.
 ```sh
 .venv/bin/python tests/run_ndarray_core_iterator_tests.py
 .venv/bin/python Util/concat.py
+
+To check that the consolidated public API has no duplicate definitions:
+
+```sh
+rg -n '^function NdArray\\.|^NdArray\\.[A-Za-z0-9_]+\\s*=' Low/NdArray.lua \
+  | sed -E 's/^[0-9]+://' | sort | uniq -d
+```
 ```
 
 ### NdArray math and linear algebra
