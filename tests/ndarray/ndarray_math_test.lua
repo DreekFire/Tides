@@ -54,5 +54,9 @@ local diagonal = NdArray.diag(NdArray.array({1, 2, 3}))
 assert(diagonal.shape[1] == 3 and diagonal.data[1] == 1 and diagonal.data[5] == 2 and diagonal.data[9] == 3)
 local coordinates = NdArray.argwhere(NdArray.array({{0, 2}, {3, 0}}))
 assert(coordinates.shape[1] == 2 and coordinates.shape[2] == 2 and coordinates.data[1] == 0 and coordinates.data[4] == 0)
+assert(table.concat(coordinates.data, ",") == "0,1,1,0", "argwhere should preserve C-order coordinates")
+local noCoordinates = NdArray.argwhere(NdArray.zeros({2, 2}))
+assert(noCoordinates.shape[1] == 0 and noCoordinates.shape[2] == 2 and #noCoordinates.data == 0,
+    "argwhere should preserve the coordinate width for empty results")
 
 print("ndarray math tests passed")

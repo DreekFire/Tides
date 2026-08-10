@@ -2544,9 +2544,11 @@ function NdArray.nonzero(arr)
     local ndim = #arr.shape
     local coordinates = {}
     for axis = 1, ndim do coordinates[axis] = {} end
+    local count = 0
     for idxs, values in NdArray.nditer(arr, nil, "C") do
         if values[1] ~= 0 then
-            for axis = 1, ndim do coordinates[axis][#coordinates[axis] + 1] = idxs[axis] end
+            count = count + 1
+            for axis = 1, ndim do coordinates[axis][count] = idxs[axis] end
         end
     end
     for axis = 1, ndim do coordinates[axis] = NdArray.array(coordinates[axis]) end
@@ -2563,15 +2565,18 @@ end
 
 function NdArray.argwhere(arr)
     assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
-    local rows = {}
+    local ndim, count, position = #arr.shape, 0, 0
+    local data = {}
     for idx, values in NdArray.nditer(arr, nil, "C") do
         if values[1] ~= 0 then
-            local row = {}
-            for axis = 1, #arr.shape do row[axis] = idx[axis] end
-            rows[#rows + 1] = row
+            count = count + 1
+            for axis = 1, ndim do
+                position = position + 1
+                data[position] = idx[axis]
+            end
         end
     end
-    return NdArray.array(rows)
+    return NdArray.reshape(NdArray.array(data), {count, ndim})
 end
 
 function NdArray.where(cond, ifTrue, ifFalse)
@@ -3384,13 +3389,12 @@ NdArray.identity = NdArray.eye
 -- These remain named functions intentionally.  Lua comparison metamethods
 -- (__eq/__lt/__le, where supported) must produce one boolean for the
 -- comparison expression; they cannot return an elementwise NdArray.
-local function ndComparison(func, a, b) return NdArray._elementwise(func, a, b) end
-NdArray.equal = function(a, b) return ndComparison(function(x, y) return x == y end, a, b) end
-NdArray.notEqual = function(a, b) return ndComparison(function(x, y) return x ~= y end, a, b) end
-NdArray.less = function(a, b) return ndComparison(function(x, y) return x < y end, a, b) end
-NdArray.lessEqual = function(a, b) return ndComparison(function(x, y) return x <= y end, a, b) end
-NdArray.greater = function(a, b) return ndComparison(function(x, y) return x > y end, a, b) end
-NdArray.greaterEqual = function(a, b) return ndComparison(function(x, y) return x >= y end, a, b) end
+NdArray.equal = function(a, b) return NdArray._elementwise(function(x, y) return x == y end, a, b) end
+NdArray.notEqual = function(a, b) return NdArray._elementwise(function(x, y) return x ~= y end, a, b) end
+NdArray.less = function(a, b) return NdArray._elementwise(function(x, y) return x < y end, a, b) end
+NdArray.lessEqual = function(a, b) return NdArray._elementwise(function(x, y) return x <= y end, a, b) end
+NdArray.greater = function(a, b) return NdArray._elementwise(function(x, y) return x > y end, a, b) end
+NdArray.greaterEqual = function(a, b) return NdArray._elementwise(function(x, y) return x >= y end, a, b) end
 
 local function ndWriteTraversal(source, output, axisOffset, axisLength, axis)
     local iterator = ndTraversal(source.shape, {source.stride}, {source.offset or 0}, "C")
