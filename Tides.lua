@@ -2852,18 +2852,6 @@ function NdArray.all(arr)
     return NdArray.countNonzero(arr) == arr.size
 end
 
-function NdArray.truthValue(arr)
-    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
-    if arr.size == 1 then return ndTruthy(arr.data[(arr.offset or 0) + 1]) end
-    if arr.size == 0 then
-        error("The truth value of an empty NdArray is ambiguous; use NdArray.any(...) or NdArray.all(...)", 2)
-    end
-    error("The truth value of an NdArray with more than one element is ambiguous; "
-        .. "use NdArray.any(...) or NdArray.all(...)", 2)
-end
-
-NdArray.bool = NdArray.truthValue
-
 function NdArray.argwhere(arr)
     assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
     local ndim, count, position = #arr.shape, 0, 0
@@ -3961,20 +3949,19 @@ function Search.interpolatedSearch(list, left, right, target, findClosest, iterL
     return findClosest and left or nil
   end
 
+Stats = Stats or {}
+
 function Stats.Distribution(vars)
   local distr = { n = 0, vars = vars }
   if vars then
     local mean = {}
-    local cov = {}
     local nVars = #vars
+    local cov = NdArray.zeros({nVars, nVars})
     for i, v in ipairs(vars) do
       mean[v] = 0
-      for j=1, nVars do
-        cov[(i - 1) * nVars + j] = 0
-      end
     end
     distr.mean = mean
-    distr.cov = Matrix3.Matrix3(cov)
+    distr.cov = cov
   else
     distr.mean = 0
     distr.cov = 0
@@ -4000,8 +3987,10 @@ function Stats.updateDistribution(distr, sample, weight)
         local v2 = distr.vars[j]
         local mu2 = distr.mean[v2]
         local upd = (weight or 1) * (sample[v] - mu) * (sample[v2] - mu2)
-        distr.cov[(i - 1) * nVars + j] = (distr.cov[(i - 1) * nVars + j] * oldN + upd) / distr.n
-        distr.cov[(j - 1) * nVars + i] = distr.cov[(i - 1) * nVars + j]
+        local index = (i - 1) * nVars + j
+        local symmetricIndex = (j - 1) * nVars + i
+        distr.cov.data[index] = (distr.cov.data[index] * oldN + upd) / distr.n
+        distr.cov.data[symmetricIndex] = distr.cov.data[index]
       end
 
       distr.mean[v] = mu
@@ -4050,8 +4039,10 @@ function Stats.updateDistributionBatched(distr, samples, weights)
         for s=1, #samples do
           sum = sum + (weights and weights[s] or 1) * (sT[i][s] - mu) * (sT[j][s] - mu2)
         end
-        distr.cov[(i - 1) * nVars + j] = (distr.cov[(i - 1) * nVars + j] * oldN + sum) / distr.n
-        distr.cov[(j - 1) * nVars + i] = distr.cov[(i - 1) * nVars + j]
+        local index = (i - 1) * nVars + j
+        local symmetricIndex = (j - 1) * nVars + i
+        distr.cov.data[index] = (distr.cov.data[index] * oldN + sum) / distr.n
+        distr.cov.data[symmetricIndex] = distr.cov.data[index]
       end
 
       distr.mean[v] = mu
@@ -4087,7 +4078,7 @@ function Stats.namedCovariance(distr, var1, var2)
     if distr.vars[i] == var1 then
       for j=1,nVars do
         if distr.vars[j] == var2 then
-          return distr.cov[(i - 1) * nVars + j]
+          return distr.cov.data[(i - 1) * nVars + j]
         end
       end
     end

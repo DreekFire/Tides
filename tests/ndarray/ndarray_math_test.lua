@@ -67,12 +67,6 @@ assertComparisonOperatorError(function() return leftComparison > rightComparison
 assertComparisonOperatorError(function() return leftComparison >= rightComparison end)
 assert(NdArray.any(NdArray.array({0, 1})) and not NdArray.all(NdArray.array({0, 1})),
     "any/all truth helpers")
-assert(NdArray.truthValue(NdArray.array(1)) == true and NdArray.truthValue(NdArray.array(0)) == false,
-    "single-element arrays should have a scalar truth value")
-local truthOk, truthMessage = pcall(function() return NdArray.truthValue(NdArray.array({1, 2})) end)
-assert(not truthOk and truthMessage:match("truth value of an NdArray with more than one element is ambiguous")
-    and truthMessage:match("NdArray%.any") and truthMessage:match("NdArray%.all"),
-    "explicit array truth-value checks should use the NumPy-style message")
 
 local destination = NdArray.zeros({2, 3})
 NdArray._callbackIter(function(x, y) return x + y end, destination,

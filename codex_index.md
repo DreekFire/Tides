@@ -108,10 +108,8 @@ The focused math/indexing workflow is:
   `NdArray.matMul` operation because Lua has no `@` operator. Comparison
   operators intentionally error and direct callers to `NdArray.equal`,
   `notEqual`, `less`, `lessEqual`, `greater`, or `greaterEqual`. Lua has no
-  truth-value metamethod, so `if arr` cannot be intercepted; use `NdArray.any`,
-  `NdArray.all`, or the explicit `NdArray.truthValue` guard. The guard follows
-  NumPy's primary scalar rule (one element returns a boolean; empty and
-  multi-element arrays raise an ambiguous-truth error). Assignments whose
+  truth-value metamethod, so `if arr` cannot be intercepted; use `NdArray.any`
+  or `NdArray.all` when an explicit reduction is intended. Assignments whose
   source shares the destination backing table emit a warning; overlapping-copy
   semantics remain intentionally unspecified.
 - `Low/Linalg.lua` — NdArray-based partial-pivoted LU, Householder QR,
@@ -119,6 +117,9 @@ The focused math/indexing workflow is:
   inverse, damped least-squares pseudoinverse, normalization, cross/outer/skew
   products, rigid-transform composition/inversion, point transforms, power
   iteration, and symmetric QR eigendecomposition.
+- `Low/Stats.lua` — named distribution statistics with an NdArray covariance
+  matrix; `tests/run_stats_ndarray_tests.py` verifies the generic shape and
+  update path.
 - `tests/ndarray/ndarray_math_test.lua` and
   `tests/linalg/linalg_ndarray_test.lua` — numerical reconstruction,
   broadcasting, simple/fancy/boolean indexing, writable views, copy/where,

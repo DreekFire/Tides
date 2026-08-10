@@ -1008,18 +1008,6 @@ function NdArray.all(arr)
     return NdArray.countNonzero(arr) == arr.size
 end
 
-function NdArray.truthValue(arr)
-    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
-    if arr.size == 1 then return ndTruthy(arr.data[(arr.offset or 0) + 1]) end
-    if arr.size == 0 then
-        error("The truth value of an empty NdArray is ambiguous; use NdArray.any(...) or NdArray.all(...)", 2)
-    end
-    error("The truth value of an NdArray with more than one element is ambiguous; "
-        .. "use NdArray.any(...) or NdArray.all(...)", 2)
-end
-
-NdArray.bool = NdArray.truthValue
-
 function NdArray.argwhere(arr)
     assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
     local ndim, count, position = #arr.shape, 0, 0
