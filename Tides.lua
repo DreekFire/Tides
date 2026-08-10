@@ -2951,10 +2951,38 @@ local function ndAxis(axis, ndim)
     return axis
 end
 
-local function ndOrder(order, ndim)
-    if order == nil or order == "C" or order == "K" then
+local function ndOrder(order, ndim, strides)
+    if order == nil or order == "C" then
         local result = {}
         for axis = 1, ndim do result[axis] = axis end
+        return result
+    end
+    if order == "K" then
+        assert(strides, "K order requires operand strides")
+        local result, costs = {}, {}
+        for axis = 1, ndim do
+            local cost = 0
+            for _, operandStrides in ipairs(strides) do
+                local stride = math.abs(operandStrides[axis] or 0)
+                if stride > cost then cost = stride end
+            end
+            costs[axis] = cost
+            result[axis] = axis
+        end
+
+        -- `result` is ordered from outermost to innermost. Keep the
+        -- largest-stride axes outermost so the smallest stride is advanced
+        -- most frequently. Insertion sort keeps ties in logical-axis order
+        -- and avoids a comparator closure in this one-time setup path.
+        for position = 2, ndim do
+            local axis, cost = result[position], costs[result[position]]
+            local insert = position - 1
+            while insert >= 1 and costs[result[insert]] < cost do
+                result[insert + 1] = result[insert]
+                insert = insert - 1
+            end
+            result[insert + 1] = axis
+        end
         return result
     end
     if order == "F" then
@@ -2987,7 +3015,7 @@ function NdArray._strideIter(shape, strides, baseOffsets, order, withIndices)
     for axis = 1, ndim do positions[axis] = 0 end
     local indices = withIndices and positions or nil
     for operand, offset in ipairs(baseOffsets) do offsets[operand] = offset or 0 end
-    local axisOrder = ndOrder(order, ndim)
+    local axisOrder = ndOrder(order, ndim, strides)
     local first, done = true, ndSize(shape) == 0
     return function()
         if done then return nil end

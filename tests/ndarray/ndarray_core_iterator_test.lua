@@ -18,7 +18,35 @@ end
 assertEqual(table.concat(offsetOrder, ","), "0:1,1:3,2:5,3:1,4:3,5:5",
     "generic stride traversal should yield reusable zero-based offsets")
 
+local kOrder = {}
+for indices, offsets in NdArray._strideIter(
+    {2, 3}, {{1, 2}, {4, 8}}, {0, 0}, "K", true
+) do
+    kOrder[#kOrder + 1] = indices[1] .. ":" .. indices[2] .. "=" .. offsets[1] .. ":" .. offsets[2]
+end
+assertEqual(table.concat(kOrder, ","),
+    "0:0=0:0,1:0=1:4,0:1=2:8,1:1=3:12,0:2=4:16,1:2=5:20",
+    "K order should make the smallest combined stride the inner axis")
+
+local kBroadcast = {}
+for indices in NdArray._strideIter(
+    {2, 3}, {{1, 2}, {0, 8}}, {0, 0}, "K", true
+) do
+    kBroadcast[#kBroadcast + 1] = indices[1] .. ":" .. indices[2]
+end
+assertEqual(table.concat(kBroadcast, ","),
+    "0:0,1:0,0:1,1:1,0:2,1:2",
+    "K order should ignore broadcast strides when ranking axes")
+
 local hotArray = array({2, 3}, {1, 2, 3, 4, 5, 6})
+local transposedK = NdArray.transpose(hotArray)
+local kValues = {}
+for _, values in NdArray.nditer(transposedK, nil, "K") do
+    kValues[#kValues + 1] = values[1]
+end
+assertEqual(table.concat(kValues, ","), "1,2,3,4,5,6",
+    "public nditer K order should follow the transposed array's memory layout")
+
 local oneOperand = {}
 for _, offset in NdArray._strideIter1(hotArray) do oneOperand[#oneOperand + 1] = hotArray.data[offset + 1] end
 assertEqual(table.concat(oneOperand, ","), "1,2,3,4,5,6", "one-operand stride traversal")

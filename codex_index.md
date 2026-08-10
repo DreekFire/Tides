@@ -39,6 +39,9 @@ Use `tests/run_tests.sh --ale` when the local runtime provides the ALE
   indices are zero-based and `-1` in `nditer` `opAxes` means newaxis.
   `NdArray._strideIter` is the lowest-level generic offset-only traversal:
   it advances reusable zero-based offsets without reading operand data.
+  Its explicit `"K"` order sorts logical axes by the largest nonzero absolute
+  stride across operands, keeping large-stride axes outermost and the
+  smallest-stride axis innermost; `"C"`/default and `"F"` retain fixed orders.
   Passing its internal `withIndices` flag makes the same walker additionally
   return reusable zero-based coordinates for scalar/core/gufunc layers.
   `_strideIter1/2/3` remain separate constant-operand-count hot paths with
@@ -61,6 +64,11 @@ layer is read-only and returns reused index/value tables.
 .venv/bin/python tests/run_ndarray_core_iterator_tests.py
 .venv/bin/python Util/concat.py
 ```
+
+Use `order = "K"` with `NdArray.nditer`, `coreIter`, or the generic
+`_strideIter` to opt into stride-aware traversal. Axes are ranked once when
+the iterator is created by the largest nonzero absolute stride across all
+operands; large-stride axes are outer and the smallest-stride axis is inner.
 
 ### NdArray math and linear algebra
 
