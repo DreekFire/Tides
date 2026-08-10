@@ -58,9 +58,12 @@ layer is read-only and returns reused index/value tables.
 
 ### NdArray math and linear algebra
 
-- `Low/NdArray.lua` — contiguous constructors, copy/view operations,
-  broadcasting elementwise arithmetic, reductions, and NumPy-like
-  `matMul` with vector promotion and leading-batch broadcasting.
+- `Low/NdArray.lua` — the original WIP public implementations for
+  constructors, copy/view operations, broadcasting elementwise arithmetic,
+  reductions, and NumPy-like `matMul` are retained; iterator-compatible fixes
+  are made in those definitions. The later unique APIs include
+  `coreIter`, `gufunc`, concatenate/stack/expandDims/squeeze/diag, and
+  arg-reductions.
 - `Low/Linalg.lua` — NdArray-based partial-pivoted LU, Householder QR,
   Cholesky, vector solves, power iteration, and symmetric QR eigendecomposition.
 - `tests/ndarray/ndarray_math_test.lua` and
@@ -74,4 +77,10 @@ layer is read-only and returns reused index/value tables.
 .venv/bin/python tests/run_linalg_ndarray_tests.py
 .venv/bin/python tests/run_ndarray_core_iterator_tests.py
 .venv/bin/python Util/concat.py
+```
+
+To check that a public method has only one retained definition:
+
+```sh
+rg -n '^function NdArray\.|^NdArray\.[A-Za-z0-9_]+\s*=' Low/NdArray.lua
 ```

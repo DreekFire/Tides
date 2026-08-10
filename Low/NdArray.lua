@@ -1,9 +1,65 @@
 NdArray = {}
 
-function NdArray.array(lst)
-    local stack = {}
-
+local function ndCopyShapeLocal(shape)
+    local result = {}
+    for axis, size in ipairs(shape) do result[axis] = size end
+    return result
 end
+
+local function ndSizeLocal(shape)
+    local size = 1
+    for _, dimension in ipairs(shape) do size = size * dimension end
+    return size
+end
+
+local function ndViewLocal(arr, shape, stride)
+    return {
+        shape = ndCopyShapeLocal(shape),
+        stride = ndCopyShapeLocal(stride),
+        data = arr.data,
+        offset = arr.offset or 0,
+        size = ndSizeLocal(shape),
+    }
+end
+
+local function ndAxisLocal(axis, ndim)
+    assert(type(axis) == "number" and axis == math.floor(axis), "axis must be an integer")
+    if axis < 0 then axis = ndim + axis end
+    assert(axis >= 0 and axis < ndim, "axis is out of bounds")
+    return axis
+end
+
+local function ndFlattenLocal(value, data)
+    if type(value) ~= "table" then
+        data[#data + 1] = value
+        return
+    end
+    for index = 1, #value do ndFlattenLocal(value[index], data) end
+end
+
+local function ndInferShapeLocal(value)
+    if type(value) ~= "table" then return {} end
+    local childShape = ndInferShapeLocal(value[1])
+    for index = 2, #value do
+        local shape = ndInferShapeLocal(value[index])
+        assert(#shape == #childShape, "array values must be rectangular")
+        for axis = 1, #shape do assert(shape[axis] == childShape[axis], "array values must be rectangular") end
+    end
+    local shape = {#value}
+    for axis, size in ipairs(childShape) do shape[#shape + 1] = size end
+    return shape
+end
+
+function NdArray.array(lst)
+    if type(lst) == "table" and lst.shape and lst.data then return NdArray.copy(lst) end
+    local shape = ndInferShapeLocal(lst)
+    local result = NdArray.empty(shape)
+    ndFlattenLocal(lst, result.data)
+    assert(#result.data == result.size, "array values must be rectangular")
+    return result
+end
+
+NdArray.Array = NdArray.array
 
 function NdArray.zeros(shape)
     return NdArray.full(shape, 0)
@@ -14,7 +70,7 @@ function NdArray.ones(shape)
 end
 
 function NdArray.full(shape, fill)
-    local arr = NdArray.Empty(shape)
+    local arr = NdArray.empty(shape)
     local data = arr.data
     for i=1, arr.size do
         data[i] = fill
@@ -63,27 +119,34 @@ function NdArray.emptyLike(arr)
 end
 
 function NdArray.arange(a, b, c)
-    local start, stop = a, b
-    local step
-    if not a then return end
-    if not b then
-        start = 0
-        stop = a
-        step = start < stop and 1 or -1
-    elseif c then
-        step = c
+    assert(type(a) == "number", "arange requires at least one number")
+    local start, stop = 0, a
+    if b ~= nil then start, stop = a, b end
+    local step = c or (start <= stop and 1 or -1)
+    assert(step ~= 0, "arange step must not be zero")
+    local data, value = {}, start
+    if step > 0 then
+        while value < stop do data[#data + 1], value = value, value + step end
+    else
+        while value > stop do data[#data + 1], value = value, value + step end
     end
-    local n = math.floor((stop - start) / step)
-    local ret = NdArray.empty({n})
-    ret.data = {}
-    for i=0,n-1 do
-        ret.data[i+1] = start + i * step
-    end
-    return ret
+    return NdArray.array(data)
 end
 
 function NdArray._callbackIter(func, dst, ...)
-
+    assert(type(dst) == "table" and dst.shape and dst.data, "expected an NdArray destination")
+    local operands = {dst, ...}
+    local coreAxes = {}
+    for operand = 1, #operands do coreAxes[operand] = {} end
+    local iterator = NdArray.coreIter(operands, coreAxes)
+    local indices, views = iterator()
+    while indices do
+        local args = {}
+        for operand = 2, #views do args[operand - 1] = views[operand].data[views[operand].offset + 1] end
+        views[1].data[views[1].offset + 1] = func(table.unpack(args, 1, #args))
+        indices, views = iterator()
+    end
+    return dst
 end
 
 function NdArray.ndindex(shape)
@@ -105,81 +168,6 @@ function NdArray.ndindex(shape)
             end
         end
         return start_idxs
-    end
-end
-
-function NdArray.nditer(arrs, opFlags, order, opAxes, iterShape)
-    local shape
-    local strides = {}
-    local baseOffsets = {}
-    local iter
-    if not opAxes then
-        if not iterShape then
-            arrs = NdArray.broadcastArrays(arrs)
-            shape = arrs[1].shape
-        else
-            local broadcasted = {}
-            for i, arr in ipairs(arrs) do
-                broadcasted[i] = NdArray.broadcastTo(arr, iterShape)
-            end
-            arrs = broadcasted
-            shape = iterShape
-        end
-        iter = NdArray._strideIter(shape, strides, baseOffsets)
-    else
-        local coreShapes = {}
-        local coreStrides = {}
-        local arrShapes = {}
-        for i, arr in ipairs(arrs) do
-            if not opAxes[i] then
-                strides[i] = arr.stride
-                arrShapes[i] = arr.shape
-            else
-                local stride = {}
-                local arrShape = {}
-                local coreShape = {}
-                local coreStride = {}
-                local coreNdim = 0
-                local isIter = {}
-                for j, ax in ipairs(opAxes[i]) do
-                    stride[j] = arr.stride[ax]
-                    arrShape[j] = arr.shape[ax]
-                    isIter[ax] = true
-                end
-                for ax, n in ipairs(arrs[i].shape) do
-                    if not isIter[ax] then
-                        coreNdim = coreNdim + 1
-                        coreShape[coreNdim] = n
-                        coreStride[coreNdim] = arr.stride[ax]
-                    end
-                end
-                strides[i] = stride
-                arrShapes[i] = arrShape
-                coreShapes[i] = coreShape
-            end
-            baseOffsets[i] = arr.offset or 1
-        end
-        if not iterShape then
-            shape = NdArray.broadcastShapes(arrShapes)
-        else
-            shape = iterShape
-        end
-        local broadcastedStrides = {}
-        for i, arr in ipairs(arrs) do
-            broadcastedStrides[i] = NdArray.broadcastStride(arrShapes[i], shape, strides[i])
-        end
-        iter = NdArray._strideIter(shape, broadcastedStrides, baseOffsets)
-    end
-
-    local vals = {}
-    return function()
-        local idxs, offsets = iter()
-        if idxs and offsets then
-            for i, arr in ipairs(arrs) do
-                vals[i] = arr.data[offsets[i]]
-            end
-            return idxs, vals
-        end
     end
 end
 
@@ -374,37 +362,28 @@ function NdArray._strideIter(shape, strides, baseOffsets)
 end
 
 function NdArray.copy(arr)
-    local shape = arr.shape
-    local ndim = #shape
-    local data = {}
-    local k = 1
-    for _, x in NdArray.nditer(arr) do
-        data[k] = x
-        k = k + 1
+    assert(type(arr) == "table" and arr.shape and arr.stride and arr.data, "expected an NdArray")
+    local ret = NdArray.empty(arr.shape)
+    local position = 1
+    for _, values in NdArray.nditer(arr, nil, "C") do
+        ret.data[position], position = values[1], position + 1
     end
-    local stride = {}
-    stride[ndim] = 1
-    for d=ndim-1,1,-1 do
-        stride[d] = stride[d+1] * shape[d+1]
-    end
-    local ret = Util.shallowCopyWithMeta(arr)
-    ret.data = data
-    ret.stride = stride
     return ret
 end
 
 function NdArray.copyTo(dst, src, where)
     if where == false then return end
     if where == true then
-        dst, src = NdArray.broadcastArrays(dst, src)
-        for _, dstOfs, srcOfs in NdArray._strideIter(dst.shape, dst.stride, src.stride) do
-            dst.data[dstOfs] = src.data[srcOfs]
+        dst, src = table.unpack(NdArray.broadcastArrays({dst, src}))
+        for offsets in NdArray._strideIter(dst.shape, {dst.stride, src.stride}, {dst.offset or 0, src.offset or 0}) do
+            dst.data[offsets[1]] = src.data[offsets[2]]
         end
     else
-        dst, src, where = NdArray.broadcastArrays(dst, src, where)
-        for _, dstOfs, srcOfs, whereOfs in NdArray._strideIter(dst.shape, dst.stride, src.stride, where.stride) do
-            if where.data[whereOfs] then
-                dst.data[dstOfs] = src.data[srcOfs]
+        dst, src, where = table.unpack(NdArray.broadcastArrays({dst, src, where}))
+        for offsets in NdArray._strideIter(dst.shape, {dst.stride, src.stride, where.stride},
+            {dst.offset or 0, src.offset or 0, where.offset or 0}) do
+            if where.data[offsets[3]] then
+                dst.data[offsets[1]] = src.data[offsets[2]]
             end
         end
     end
@@ -454,69 +433,59 @@ end
 
 function NdArray.reshape(arr, ...)
     local shape = {...}
-    local p1 = NdArray.prod(arr.shape)
-    local p2 = NdArray.prod(shape)
-    if p1 ~= p2 then
-        local flex = false
-        for i, d in ipairs(shape) do
-            assert(not flex, string.format("Target shape can only have one unspecified (-1) dimension"))
-            if d == -1 then
-                flex = true
-                shape[i] = math.floor(p1 / -p2)
-                assert(p2 * shape[i] == p1, string.format("Shapes are not compatible: (%s) and (%s)", StringUtil.Join(arr.shape), StringUtil.Join(shape)))
-            end
+    if #shape == 1 and type(shape[1]) == "table" then shape = shape[1] end
+    local unknown, knownSize = nil, 1
+    for axis, dimension in ipairs(shape) do
+        if dimension == -1 then
+            assert(not unknown, "reshape permits only one inferred dimension")
+            unknown = axis
+        else
+            assert(dimension >= 0 and dimension == math.floor(dimension), "invalid reshape dimension")
+            knownSize = knownSize * dimension
         end
-        assert(flex, string.format("Reshape is not possible: array 1 has %s elements while array 2 has %s", p1, p2))
     end
-    local valid, stride = NdArray._reshapeIsView(arr.shape, shape, arr.stride)
-    local ret
-    if valid then
-        ret = Util.shallowCopyWithMeta(arr)
-    else
-        ret = NdArray.copy(arr)
+    assert(not unknown or knownSize > 0 and arr.size % knownSize == 0, "reshape size is incompatible")
+    if unknown then shape[unknown] = arr.size / knownSize else assert(knownSize == arr.size, "reshape size is incompatible") end
+    local contiguous, expected = true, 1
+    for axis = #arr.shape, 1, -1 do
+        if arr.shape[axis] ~= 1 and arr.stride[axis] ~= expected then contiguous = false end
+        expected = expected * arr.shape[axis]
     end
-    ret.stride = stride
-    ret.shape = shape
-    return ret
+    local source = contiguous and arr or NdArray.copy(arr)
+    local stride, step = {}, 1
+    for axis = #shape, 1, -1 do stride[axis], step = step, step * shape[axis] end
+    return ndViewLocal(source, shape, stride)
 end
 
 function NdArray.transpose(arr, axis1, axis2)
-    local res = Util.shallowCopyWithMeta(arr)
     local ndim = #arr.shape
+    local shape, stride = {}, {}
     if axis1 == nil then
-        for d, s in ipairs(arr.shape) do
-            local m = ndim - d + 1
-            res.shape[d] = arr.shape[m]
-            res.stride[d] = arr.stride[m]
+        for axis = 1, ndim do
+            shape[axis], stride[axis] = arr.shape[ndim - axis + 1], arr.stride[ndim - axis + 1]
         end
     else
-        if axis1 < 0 then
-            axis1 = ndim + axis1 + 1
-        end
-        if axis2 < 0 then
-            axis2 = ndim + axis2 + 1
-        end
-        res.shape[axis1] = arr.shape[axis2]
-        res.shape[axis2] = arr.shape[axis1]
-        res.stride[axis1] = arr.stride[axis2]
-        res.stride[axis2] = arr.stride[axis1]
+        axis1, axis2 = ndAxisLocal(axis1, ndim), ndAxisLocal(axis2, ndim)
+        shape, stride = ndCopyShapeLocal(arr.shape), ndCopyShapeLocal(arr.stride)
+        shape[axis1 + 1], shape[axis2 + 1] = shape[axis2 + 1], shape[axis1 + 1]
+        stride[axis1 + 1], stride[axis2 + 1] = stride[axis2 + 1], stride[axis1 + 1]
     end
-    return res
+    return ndViewLocal(arr, shape, stride)
 end
 
 function NdArray.permuteDims(arr, dims)
-    local res = Util.shallowCopyWithMeta(arr)
     local ndim = #arr.shape
-    if dims == nil then
-        for i=1,ndim do
-            dims[i] = ndim - i + 1
-        end
+    dims = dims or {}
+    if #dims == 0 then for axis = 0, ndim - 1 do dims[axis + 1] = ndim - axis - 1 end end
+    assert(#dims == ndim, "permutation rank mismatch")
+    local shape, stride, seen = {}, {}, {}
+    for position, axis in ipairs(dims) do
+        axis = ndAxisLocal(axis, ndim)
+        assert(not seen[axis], "permutation axes must be unique")
+        seen[axis] = true
+        shape[position], stride[position] = arr.shape[axis + 1], arr.stride[axis + 1]
     end
-    for i=1,ndim do
-        res.shape[i] = arr.shape[dims[i]]
-        res.stride[i] = arr.stride[dims[i]]
-    end
-    return res
+    return ndViewLocal(arr, shape, stride)
 end
 
 function NdArray.ravel(arr)
@@ -531,15 +500,14 @@ function NdArray.flatten(arr)
 end
 
 function NdArray._elementwise(func, ...)
-    local broadcasted = {NdArray.broadcastArrays(...)}
+    local broadcasted = NdArray.broadcastArrays({...})
     local n = #broadcasted
     local ret = NdArray.empty(broadcasted[1].shape)
     local args = {}
-    for idx, v in NdArray.nditer(broadcasted[1]) do
-        for i=1,n do
-            args[i] = NdArray._getSingle(broadcasted[i], idx)
-        end
-        NdArray._setSingle(ret, idx, func(table.unpack(args)))
+    local position = 1
+    for _, values in NdArray.nditer(broadcasted, nil, "C") do
+        for i = 1, n do args[i] = values[i] end
+        ret.data[position], position = func(table.unpack(args, 1, n)), position + 1
     end
     return ret
 end
@@ -557,58 +525,89 @@ function NdArray.mul(arr1, arr2)
 end
 
 function NdArray.matMul(arr1, arr2)
-    if #arr1.shape == 1 and #arr2.shape == 1 then
-        return NdArray.sum(NdArray.mul(arr1, arr2))
+    assert(arr1 and arr2 and arr1.shape and arr2.shape, "matMul expects NdArrays")
+    local leftRank, rightRank = #arr1.shape, #arr2.shape
+    assert(leftRank > 0 and rightRank > 0, "matMul operands must have at least one dimension")
+    local leftVector, rightVector = leftRank == 1, rightRank == 1
+    local left = leftVector and ndViewLocal(arr1, {1, arr1.shape[1]}, {0, arr1.stride[1]}) or arr1
+    local right = rightVector and ndViewLocal(arr2, {arr2.shape[1], 1}, {arr2.stride[1], 0}) or arr2
+    assert(left.shape[#left.shape] == right.shape[#right.shape - 1], "matMul core dimensions do not match")
+    local leftAxes, rightAxes = {}, {}
+    leftAxes[1], leftAxes[2] = #left.shape - 2, #left.shape - 1
+    rightAxes[1], rightAxes[2] = #right.shape - 2, #right.shape - 1
+    local iterator = NdArray.coreIter({left, right}, {leftAxes, rightAxes})
+    local firstIndices, firstViews = iterator()
+    -- coreIter's loop indices are the broadcasted batch shape; obtain its
+    -- exact shape from the operands so zero-size batches are preserved.
+    local leftBatch, rightBatch = {}, {}
+    for axis = 1, #left.shape - 2 do leftBatch[axis] = left.shape[axis] end
+    for axis = 1, #right.shape - 2 do rightBatch[axis] = right.shape[axis] end
+    local loopShape = NdArray.broadcastShapes({leftBatch, rightBatch})
+    local n, k, m = left.shape[#left.shape - 1], left.shape[#left.shape], right.shape[#right.shape]
+    local outputShape = ndCopyShapeLocal(loopShape)
+    if leftVector and rightVector then
+        local sum = 0
+        local views = firstViews
+        for t = 0, k - 1 do
+            sum = sum + views[1].data[views[1].offset + t * views[1].stride[2] + 1]
+                * views[2].data[views[2].offset + t * views[2].stride[1] + 1]
+        end
+        return sum
     end
-    if #arr2.shape == 1 then
-        assert(
-            arr2.shape[1] == arr1.shape[#arr1.shape],
-            string.format("Last dimension not compatible for matrix-vector multiplication: (%s) and (%s)",
-                arr1.shape[#arr1.shape],
-                arr2.shape[1]
-            )
-        )
-        arr2 = NdArray.reshape(arr2, arr2.size, 1)
+    if leftVector then outputShape[#outputShape + 1] = m
+    elseif rightVector then outputShape[#outputShape + 1] = n
+    else outputShape[#outputShape + 1], outputShape[#outputShape + 2] = n, m end
+    local result = NdArray.empty(outputShape)
+    local indices, views = firstIndices, firstViews
+    while indices do
+        local outputBase = 0
+        for axis = 1, #loopShape do outputBase = outputBase + indices[axis] * result.stride[axis] end
+        if leftVector then
+            for col = 0, m - 1 do
+                local sum = 0
+                for t = 0, k - 1 do
+                    sum = sum + views[1].data[views[1].offset + t * views[1].stride[2] + 1]
+                        * views[2].data[views[2].offset + t * views[2].stride[1] + col * views[2].stride[2] + 1]
+                end
+                result.data[outputBase + col * result.stride[#result.shape] + 1] = sum
+            end
+        elseif rightVector then
+            for row = 0, n - 1 do
+                local sum = 0
+                for t = 0, k - 1 do
+                    sum = sum + views[1].data[views[1].offset + row * views[1].stride[1] + t * views[1].stride[2] + 1]
+                        * views[2].data[views[2].offset + t * views[2].stride[1] + 1]
+                end
+                result.data[outputBase + row * result.stride[#result.shape] + 1] = sum
+            end
+        else
+            for row = 0, n - 1 do
+                for col = 0, m - 1 do
+                    local sum = 0
+                    for t = 0, k - 1 do
+                        sum = sum + views[1].data[views[1].offset + row * views[1].stride[1] + t * views[1].stride[2] + 1]
+                            * views[2].data[views[2].offset + t * views[2].stride[1] + col * views[2].stride[2] + 1]
+                    end
+                    result.data[outputBase + row * result.stride[#result.shape - 1] + col * result.stride[#result.shape] + 1] = sum
+                end
+            end
+        end
+        indices, views = iterator()
     end
-    local n = arr1.shape[#arr1.shape - 1]
-    local k = arr1.shape[#arr1.shape]
-    local m = arr2.shape[#arr2.shape]
-    assert(
-        arr2.shape[#arr2.shape - 1] == k,
-        string.format("Last 2 dimensions not compatible for matrix multiplication: (%s, %s) and (%s, %s)",
-            n, k,
-            arr2.shape[#arr2.shape - 1], m
-        )
-    )
-    local batchShape1 = {}
-    local batchShape2 = {}
-    for i=1,#arr1.shape - 2 do
-        batchShape1[i] = arr1.shape[i]
-    end
-    for i=1,#arr2.shape - 2 do
-        batchShape2[i] = arr2.shape[i]
-    end
-    local batchShapeBroadcasted = NdArray.broadcastShapes(batchShape1, batchShape2)
-    local shape1Broadcasted = Utils.shallowCopy(batchShape1)
-    local shape2Broadcasted = Utils.shallowCopy(batchShape2)
-    local ndim = #batchShapeBroadcasted + 2
-    shape1Broadcasted[ndim - 1] = n
-    shape1Broadcasted[ndim] = k
-    shape2Broadcasted[ndim - 1] = k
-    shape2Broadcasted[ndim] = m
-    local broad1 = NdArray.broadcastTo(arr1, shape1Broadcasted)
-    local broad2 = NdArray.broadcastTo(arr2, shape2Broadcasted)
-    
+    return result
 end
+
+NdArray.matmul = NdArray.matMul
+NdArray.MatMul = NdArray.matMul
 
 function NdArray.div(arr1, arr2)
     return NdArray._elementwise(function(a, b) return a / b end, arr1, arr2)
 end
 
 function NdArray.map(func, arr)
-    local res = NdArray.emptyLike(arr)
-    for _, arrOfs, resOfs in NdArray._strideIter2(arr, res) do
-        res.data[resOfs] = func(arr.data[arrOfs])
+    local res, position = NdArray.emptyLike(arr), 1
+    for _, values in NdArray.nditer(arr, nil, "C") do
+        res.data[position], position = func(values[1]), position + 1
     end
     return res
 end
@@ -695,39 +694,44 @@ function NdArray.vectorize(func, excluded, signature)
 end
 
 function NdArray.reduce(func, arr, axis, keepdim)
-    local res
     if axis == nil then
-        for _, v in NdArray.nditer(arr) do
-            res = func(res, v)
+        local result, seen = nil, false
+        for _, values in NdArray.nditer(arr, nil, "C") do
+            result = result == nil and values[1] or func(result, values[1])
+            seen = true
         end
-        return res
-    else
-        if axis < 0 then
-            axis = #arr.shape + axis
-        end
-        local n = arr.shape[axis + 1]
-        local outShape = {}
-        for d, s in ipairs(arr.shape) do
-            outShape[d] = s
-        end
-        outShape[axis + 1] = 1
-        res = NdArray.empty(outShape)
-        res.shape[axis + 1] = n
-        res.stride[axis + 1] = 0
-        for _, arrOfs, resOfs in NdArray._strideIter2(arr, res) do
-            res.data[resOfs] = func(res.data[resOfs], arr.data[arrOfs])
-        end
-        res.shape[axis + 1] = 1
-        res.stride[axis + 1] = 1
-        if not keepdim then
-            for d=axis, #res.shape do
-                -- intentionally allow overrun to set last element to nil
-                res.shape[d] = res.shape[d + 1]
-                res.stride[d] = res.stride[d + 1]
-            end
+        assert(seen, "cannot reduce an empty array")
+        return result
+    end
+    axis = ndAxisLocal(axis, #arr.shape)
+    local outputShape = {}
+    for sourceAxis = 0, #arr.shape - 1 do
+        if keepdim or sourceAxis ~= axis then
+            outputShape[#outputShape + 1] = sourceAxis == axis and 1 or arr.shape[sourceAxis + 1]
         end
     end
-    return res
+    local result = NdArray.empty(outputShape)
+    local iterator = NdArray.coreIter({arr}, {{axis}})
+    local indices, views = iterator()
+    while indices do
+        local view, value = views[1], nil
+        for i = 0, view.shape[1] - 1 do
+            local current = view.data[view.offset + i * view.stride[1] + 1]
+            value = value == nil and current or func(value, current)
+        end
+        assert(value ~= nil, "cannot reduce an empty axis")
+        local outputOffset, loopPosition = 0, 1
+        for sourceAxis = 0, #arr.shape - 1 do
+            if sourceAxis ~= axis then
+                local targetAxis = keepdim and sourceAxis or sourceAxis - (sourceAxis > axis and 1 or 0)
+                outputOffset = outputOffset + indices[loopPosition] * result.stride[targetAxis + 1]
+                loopPosition = loopPosition + 1
+            end
+        end
+        result.data[outputOffset + 1] = value
+        indices, views = iterator()
+    end
+    return result
 end
 
 function NdArray.sum(arr, axis, keepdim)
@@ -748,11 +752,9 @@ end
 
 function NdArray.mean(arr, axis, keepdim)
     local res = NdArray.sum(arr, axis, keepdim)
-    if axis then
-        res = res / arr.shape[axis]
-    else
-        res = res / arr.size
-    end
+    local count = axis == nil and arr.size or arr.shape[ndAxisLocal(axis, #arr.shape) + 1]
+    if type(res) == "number" then return res / count end
+    for i = 1, res.size do res.data[i] = res.data[i] / count end
     return res
 end
 
@@ -826,47 +828,37 @@ function NdArray.argsort(arr, axis)
 end
 
 function NdArray.broadcastStride(arrShape, targetShape, arrStride)
-    local ndim = #arrShape
     local stride = {}
-    local padDims = #targetShape - ndim
-    for j=1, padDims do
-        stride[j] = 1
-    end
-    for j=1, ndim do
-        -- check shape
-        assert(
-            targetShape[j + padDims] == arrShape[j] or arrShape[j] == 1,
-            string.format("shapes could not be broadcast together: (%s) and (%s)",
-                StringUtil.Join(targetShape),
-                StringUtil.Join(arrShape))
-        )
-        stride[j + padDims] = arrShape[j] > 1 and arrStride[j] or 0
+    local padding = #targetShape - #arrShape
+    assert(padding >= 0, "target shape cannot have lower rank than operand")
+    for axis = 1, #targetShape do
+        local sourceAxis = axis - padding
+        if sourceAxis <= 0 then
+            stride[axis] = 0
+        else
+            local size = arrShape[sourceAxis]
+            assert(size == 1 or size == targetShape[axis], "shapes could not be broadcast together")
+            stride[axis] = size == 1 and 0 or arrStride[sourceAxis]
+        end
     end
     return stride
 end
 
 function NdArray.broadcastTo(arr, shape)
-    local view = Util.shallowCopyWithMeta(arr)
+    shape = ndCopyShapeLocal(shape)
     local stride = NdArray.broadcastStride(arr.shape, shape, arr.stride)
-    view.shape = shape
-    view.stride = stride
-    return view
+    return ndViewLocal(arr, shape, stride)
 end
 
 function NdArray.broadcastArrays(arrs)
-    local views = {}
-    local new_shape = {}
-    local maxNdim = 0
-    for i, arr in ipairs(arrs) do
-        views[i] = Util.shallowCopyWithMeta(arr)
-        local ndim = #arr.shape
-        maxNdim = math.max(maxNdim, ndim)
-    end
+    if arrs and arrs.shape then arrs = {arrs} end
+    assert(type(arrs) == "table" and #arrs > 0, "broadcastArrays requires operands")
     local shapes = {}
     for i, arr in ipairs(arrs) do
         shapes[i] = arr.shape
     end
-    new_shape = NdArray.broadcastShapes(shapes)
+    local new_shape = NdArray.broadcastShapes(shapes)
+    local views = {}
     for i, arr in ipairs(arrs) do
         views[i] = NdArray.broadcastTo(arr, new_shape)
     end
@@ -874,100 +866,78 @@ function NdArray.broadcastArrays(arrs)
 end
 
 function NdArray.broadcastShapes(shapes)
-    local ndims = {}
+    assert(type(shapes) == "table" and #shapes > 0, "broadcastShapes requires shapes")
     local newShape = {}
     local maxNdim = 0
-    for i, shape in ipairs(shapes) do
-        local ndim = #shape
-        ndims[i] = ndim
-        maxNdim = math.max(maxNdim, ndim)
-    end
-    for i, shape in ipairs(shapes) do
-        local ndim = ndims[i]
-        local padDims = maxNdim - ndim
-        for j=1, ndim do
-            if newShape[j] == 1 then
-                newShape[j] = shape[j + padDims]
-            end
-            -- check shape
-            assert(
-                newShape[j + padDims] == shape[j] or shape[j] == 1,
-                string.format("shapes could not be broadcast together: (%s) and (%s)",
-                    StringUtil.Join(newShape),
-                    StringUtil.Join(shape))
-            )
+    for _, shape in ipairs(shapes) do maxNdim = math.max(maxNdim, #shape) end
+    for axis = 1, maxNdim do
+        local size = 1
+        for _, shape in ipairs(shapes) do
+            local sourceAxis = axis - (maxNdim - #shape)
+            local candidate = sourceAxis > 0 and shape[sourceAxis] or 1
+            assert(candidate == 1 or size == 1 or candidate == size,
+                "shapes could not be broadcast together")
+            if candidate ~= 1 then size = candidate end
         end
+        newShape[axis] = size
     end
     return newShape
 end
 
 function NdArray.convertAndBroadcast(...)
     local arrs = {}
-    for i, arr in ipairs(arg) do
-        if type(arr) ~= "table" or getmetatable(arr) ~= NdArray.meta then
-            arrs[i] = NdArray.Array(arr)
-        end
+    for i, arr in ipairs({...}) do
+        if type(arr) ~= "table" or not arr.shape or not arr.data then arr = NdArray.array(arr) end
+        arrs[i] = arr
     end
-    return NdArray.broadcastArrays(arrs.unpack())
+    return NdArray.broadcastArrays(arrs)
 end
 
 function NdArray.nonzero(arr)
+    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
     local ndim = #arr.shape
-    local nonzeroData = {}
-    local k = 0
-    for idxs, x in NdArray.nditer(arr) do
-        if x and x ~= 0 then
-            for d=1,ndim do
-                nonzeroData[k * ndim + d] = idxs[d]
-            end
-            k = k + 1
+    local coordinates = {}
+    for axis = 1, ndim do coordinates[axis] = {} end
+    for idxs, values in NdArray.nditer(arr, nil, "C") do
+        if values[1] ~= 0 then
+            for axis = 1, ndim do coordinates[axis][#coordinates[axis] + 1] = idxs[axis] end
         end
     end
-    local nonzero = {}
-    for d=1,ndim do
-        nonzero[d] = NdArray.empty({k})
-        nonzero[d].data = nonzeroData
-        nonzero[d].offset = k * (d - 1) + 1
-    end
-    return nonzero
+    for axis = 1, ndim do coordinates[axis] = NdArray.array(coordinates[axis]) end
+    return table.unpack(coordinates, 1, ndim)
 end
 
 function NdArray.countNonzero(arr)
-    local k = 1
-    for _, x in NdArray.nditer(arr) do
-        if x and x ~= 0 then
-            k = k + 1
-        end
+    local count = 0
+    for _, values in NdArray.nditer(arr, nil, "C") do
+        if values[1] ~= 0 then count = count + 1 end
     end
-    return k
+    return count
 end
 
 function NdArray.argwhere(arr)
-    local ndim = #arr.shape
-    local argwhere = {}
-    local k = 0
-    for idx, x in NdArray.nditer(arr) do
-        if x and x ~= 0 then
-            for d=1,ndim do
-                argwhere[k * ndim + d] = idx[d]
-            end
-            k = k + 1
+    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
+    local rows = {}
+    for idx, values in NdArray.nditer(arr, nil, "C") do
+        if values[1] ~= 0 then
+            local row = {}
+            for axis = 1, #arr.shape do row[axis] = idx[axis] end
+            rows[#rows + 1] = row
         end
     end
-    argwhere = NdArray.array(argwhere)
-    return NdArray.swapaxes(NdArray.reshape(argwhere, k, ndim), 0, 1)
+    return NdArray.array(rows)
 end
 
 function NdArray.where(cond, ifTrue, ifFalse)
     if ifTrue == nil then
         return NdArray.nonzero(cond)
     end
-    cond, ifTrue, ifFalse = NdArray.broadcastArrays(cond, ifTrue, ifFalse)
-    local ret = NdArray.Empty(cond.shape)
-    for _, offsets in NdArray._strideIter(
+    cond, ifTrue, ifFalse = table.unpack(NdArray.broadcastArrays({cond, ifTrue, ifFalse}))
+    local ret = NdArray.empty(cond.shape)
+    for offsets in NdArray._strideIter(
         cond.shape,
         {ret.stride, cond.stride, ifTrue.stride, ifFalse.stride},
-        {ret.offset, cond.offset, ifTrue.offset, ifFalse.offset}
+        {ret.offset or 0, cond.offset or 0, ifTrue.offset or 0, ifFalse.offset or 0}
     ) do
         local retOfs, condOfs, trueOfs, falseOfs = offsets[1], offsets[2], offsets[3], offsets[4]
         ret.data[retOfs] = cond.data[condOfs] and ifTrue.data[trueOfs] or ifFalse.data[falseOfs]
@@ -1757,299 +1727,6 @@ function NdArray.gufunc(func, signature, axes)
     end
 end
 
--- The original WIP API above predates the core-axis iterator and contains
--- several partially implemented operations.  Keep the public names, but
--- implement the small numerical core in terms of the new view/iterator
--- primitives so that all hot loops use offsets and strides directly.
-
-local function ndAssertShape(shape)
-    assert(type(shape) == "table", "shape must be a table")
-    for axis, size in ipairs(shape) do
-        assert(type(size) == "number" and size >= 0 and size == math.floor(size),
-            "shape dimensions must be non-negative integers")
-        shape[axis] = size
-    end
-end
-
-local function ndFlatten(value, data)
-    if type(value) ~= "table" then
-        data[#data + 1] = value
-        return
-    end
-    for i = 1, #value do ndFlatten(value[i], data) end
-end
-
-local function ndInferShape(value)
-    if type(value) ~= "table" then return {} end
-    local childShape = ndInferShape(value[1])
-    for i = 2, #value do
-        local other = ndInferShape(value[i])
-        assert(#other == #childShape, "array values must be rectangular")
-        for axis = 1, #childShape do
-            assert(other[axis] == childShape[axis], "array values must be rectangular")
-        end
-    end
-    local shape = {#value}
-    for axis = 1, #childShape do shape[#shape + 1] = childShape[axis] end
-    return shape
-end
-
-function NdArray.array(value)
-    if type(value) == "table" and value.shape and value.data then
-        return NdArray.copy(value)
-    end
-    local shape = ndInferShape(value)
-    local data = {}
-    ndFlatten(value, data)
-    local result = ndContiguousArray(shape)
-    result.data = data
-    assert(#data == result.size, "array values must be rectangular")
-    return result
-end
-
-NdArray.Array = NdArray.array
-
-function NdArray.empty(shape)
-    ndAssertShape(shape)
-    return ndContiguousArray(ndCopyShape(shape))
-end
-
-function NdArray.full(shape, fill)
-    local result = NdArray.empty(shape)
-    for i = 1, result.size do result.data[i] = fill end
-    return result
-end
-
-function NdArray.zeros(shape) return NdArray.full(shape, 0) end
-function NdArray.ones(shape) return NdArray.full(shape, 1) end
-function NdArray.zerosLike(arr) return NdArray.zeros(arr.shape) end
-function NdArray.onesLike(arr) return NdArray.ones(arr.shape) end
-function NdArray.fullLike(arr, fill) return NdArray.full(arr.shape, fill) end
-function NdArray.emptyLike(arr) return NdArray.empty(arr.shape) end
-
-function NdArray.arange(a, b, step)
-    assert(type(a) == "number", "arange requires at least one number")
-    local start, stop = 0, a
-    if b ~= nil then start, stop = a, b end
-    step = step or (start <= stop and 1 or -1)
-    assert(step ~= 0, "arange step must not be zero")
-    local data = {}
-    local value = start
-    if step > 0 then
-        while value < stop do data[#data + 1] = value; value = value + step end
-    else
-        while value > stop do data[#data + 1] = value; value = value + step end
-    end
-    return NdArray.array(data)
-end
-
-function NdArray.copy(arr)
-    ndCheckArray(arr)
-    local result = NdArray.empty(arr.shape)
-    local position = 1
-    for _, values in NdArray.nditer(arr, nil, "C") do
-        result.data[position] = values[1]
-        position = position + 1
-    end
-    return result
-end
-
-function NdArray.transpose(arr, axis1, axis2)
-    ndCheckArray(arr)
-    local rank = #arr.shape
-    local shape, stride = {}, {}
-    if axis1 == nil then
-        for axis = 1, rank do
-            shape[axis] = arr.shape[rank - axis + 1]
-            stride[axis] = arr.stride[rank - axis + 1]
-        end
-    else
-        axis1, axis2 = ndAxis(axis1, rank), ndAxis(axis2, rank)
-        for axis = 1, rank do shape[axis], stride[axis] = arr.shape[axis], arr.stride[axis] end
-        shape[axis1 + 1], shape[axis2 + 1] = shape[axis2 + 1], shape[axis1 + 1]
-        stride[axis1 + 1], stride[axis2 + 1] = stride[axis2 + 1], stride[axis1 + 1]
-    end
-    return ndView(arr, shape, stride, arr.offset or 0)
-end
-
-function NdArray.permuteDims(arr, dims)
-    ndCheckArray(arr)
-    assert(#dims == #arr.shape, "permutation rank mismatch")
-    local shape, stride, seen = {}, {}, {}
-    for position, axis in ipairs(dims) do
-        axis = ndAxis(axis, #arr.shape)
-        assert(not seen[axis], "permutation axes must be unique")
-        seen[axis] = true
-        shape[position], stride[position] = arr.shape[axis + 1], arr.stride[axis + 1]
-    end
-    return ndView(arr, shape, stride, arr.offset or 0)
-end
-
-local function ndElementwise(func, ...)
-    local operands = {...}
-    assert(#operands > 0, "elementwise operation requires operands")
-    local shapes = {}
-    for i, operand in ipairs(operands) do ndCheckArray(operand); shapes[i] = operand.shape end
-    local shape = ndBroadcastShape(shapes)
-    local result, args = ndContiguousArray(shape), {}
-    local position = 1
-    for _, values in NdArray.nditer(operands, nil, "C") do
-        for i = 1, #operands do args[i] = values[i] end
-        result.data[position] = func(table.unpack(args, 1, #operands))
-        position = position + 1
-    end
-    return result
-end
-
-NdArray._elementwise = ndElementwise
-function NdArray.add(a, b) return ndElementwise(function(x, y) return x + y end, a, b) end
-function NdArray.sub(a, b) return ndElementwise(function(x, y) return x - y end, a, b) end
-function NdArray.mul(a, b) return ndElementwise(function(x, y) return x * y end, a, b) end
-function NdArray.div(a, b) return ndElementwise(function(x, y) return x / y end, a, b) end
-function NdArray.map(func, arr)
-    ndCheckArray(arr)
-    local result = ndContiguousArray(arr.shape)
-    local position = 1
-    for _, values in NdArray.nditer(arr, nil, "C") do
-        result.data[position] = func(values[1])
-        position = position + 1
-    end
-    return result
-end
-function NdArray.sqrt(arr) return NdArray.map(math.sqrt, arr) end
-function NdArray.negative(arr) return NdArray.map(function(x) return -x end, arr) end
-
--- Matrix multiplication follows numpy.matmul for vector and matrix operands.
--- The last two axes are matrix axes; all preceding axes are broadcast.
-function NdArray.matMul(left, right)
-    ndCheckArray(left); ndCheckArray(right)
-    local leftRank, rightRank = #left.shape, #right.shape
-    assert(leftRank > 0 and rightRank > 0, "matMul operands must have at least one dimension")
-    local leftVector, rightVector = leftRank == 1, rightRank == 1
-    local a, b = left, right
-    if leftVector then
-        a = ndView(left, {1, left.shape[1]}, {0, left.stride[1]}, left.offset or 0)
-    end
-    if rightVector then
-        b = ndView(right, {right.shape[1], 1}, {right.stride[1], 0}, right.offset or 0)
-    end
-    assert(a.shape[#a.shape] == b.shape[#b.shape - 1], "matMul core dimensions do not match")
-    local aAxes, bAxes = {#a.shape - 2, #a.shape - 1}, {#b.shape - 2, #b.shape - 1}
-    local loopShape = ndNormalizeCore({a, b}, {aAxes, bAxes})
-    local n, k, m = a.shape[#a.shape - 1], a.shape[#a.shape], b.shape[#b.shape]
-    local outputShape = ndCopyShape(loopShape)
-    if leftVector and rightVector then
-        local iterator = NdArray.coreIter({a, b}, {aAxes, bAxes})
-        local _, views = iterator()
-        local sum = 0
-        for t = 0, k - 1 do
-            sum = sum + views[1].data[views[1].offset + t * views[1].stride[2] + 1]
-                * views[2].data[views[2].offset + t * views[2].stride[1] + 1]
-        end
-        return sum
-    end
-    if leftVector then outputShape[#outputShape + 1] = m
-    elseif rightVector then outputShape[#outputShape + 1] = n
-    else outputShape[#outputShape + 1], outputShape[#outputShape + 2] = n, m end
-    local result = ndContiguousArray(outputShape)
-    local iterator = NdArray.coreIter({a, b}, {aAxes, bAxes})
-    local indices, views = iterator()
-    while indices do
-        local outputBase = result.offset or 0
-        for axis = 1, #loopShape do outputBase = outputBase + indices[axis] * result.stride[axis] end
-        if leftVector then
-            for col = 0, m - 1 do
-                local sum = 0
-                for t = 0, k - 1 do
-                    sum = sum + views[1].data[views[1].offset + t * views[1].stride[2] + 1]
-                        * views[2].data[views[2].offset + t * views[2].stride[1] + col * views[2].stride[2] + 1]
-                end
-                result.data[outputBase + col * result.stride[#result.shape] + 1] = sum
-            end
-        elseif rightVector then
-            for row = 0, n - 1 do
-                local sum = 0
-                for t = 0, k - 1 do
-                    sum = sum + views[1].data[views[1].offset + row * views[1].stride[1] + t * views[1].stride[2] + 1]
-                        * views[2].data[views[2].offset + t * views[2].stride[1] + 1]
-                end
-                result.data[outputBase + row * result.stride[#result.shape] + 1] = sum
-            end
-        else
-            for row = 0, n - 1 do
-                for col = 0, m - 1 do
-                    local sum = 0
-                    for t = 0, k - 1 do
-                        sum = sum + views[1].data[views[1].offset + row * views[1].stride[1] + t * views[1].stride[2] + 1]
-                            * views[2].data[views[2].offset + t * views[2].stride[1] + col * views[2].stride[2] + 1]
-                    end
-                    result.data[outputBase + row * result.stride[#result.shape - 1] + col * result.stride[#result.shape] + 1] = sum
-                end
-            end
-        end
-        indices, views = iterator()
-    end
-    return result
-end
-
-NdArray.matmul = NdArray.matMul
-NdArray.MatMul = NdArray.matMul
-
-local function ndReduce(func, arr, axis, keepdim)
-    ndCheckArray(arr)
-    if axis == nil then
-        local result, seen = nil, false
-        for _, values in NdArray.nditer(arr, nil, "C") do
-            result, seen = result == nil and values[1] or func(result, values[1]), true
-        end
-        assert(seen, "cannot reduce an empty array")
-        return result
-    end
-    axis = ndAxis(axis, #arr.shape)
-    local outputShape = {}
-    for sourceAxis = 0, #arr.shape - 1 do
-        if keepdim or sourceAxis ~= axis then
-            outputShape[#outputShape + 1] = sourceAxis == axis and 1 or arr.shape[sourceAxis + 1]
-        end
-    end
-    local output = ndContiguousArray(outputShape)
-    local iterator = NdArray.coreIter({arr}, {{axis}})
-    local indices, views = iterator()
-    while indices do
-        local view = views[1]
-        local value
-        for i = 0, view.shape[1] - 1 do
-            local current = view.data[view.offset + i * view.stride[1] + 1]
-            value = value == nil and current or func(value, current)
-        end
-        assert(value ~= nil, "cannot reduce an empty axis")
-        local outputOffset, loopPosition = output.offset or 0, 1
-        for sourceAxis = 0, #arr.shape - 1 do
-            if sourceAxis ~= axis then
-                local targetAxis = keepdim and sourceAxis or sourceAxis - (sourceAxis > axis and 1 or 0)
-                outputOffset = outputOffset + indices[loopPosition] * output.stride[targetAxis + 1]
-                loopPosition = loopPosition + 1
-            end
-        end
-        output.data[outputOffset + 1] = value
-        indices, views = iterator()
-    end
-    return output
-end
-
-NdArray.reduce = ndReduce
-function NdArray.sum(arr, axis, keepdim) return ndReduce(function(x, y) return x + y end, arr, axis, keepdim) end
-function NdArray.prod(arr, axis, keepdim) return ndReduce(function(x, y) return x * y end, arr, axis, keepdim) end
-function NdArray.max(arr, axis, keepdim) return ndReduce(math.max, arr, axis, keepdim) end
-function NdArray.min(arr, axis, keepdim) return ndReduce(math.min, arr, axis, keepdim) end
-function NdArray.mean(arr, axis, keepdim)
-    local result = NdArray.sum(arr, axis, keepdim)
-    local count = axis == nil and arr.size or arr.shape[ndAxis(axis, #arr.shape) + 1]
-    if type(result) == "number" then return result / count end
-    for i = 1, result.size do result.data[i] = result.data[i] / count end
-    return result
-end
-
 function NdArray.eye(size)
     local result = NdArray.zeros({size, size})
     for i = 0, size - 1 do result.data[i * size + i + 1] = 1 end
@@ -2058,86 +1735,16 @@ end
 
 NdArray.identity = NdArray.eye
 
-function NdArray._callbackIter(func, dst, ...)
-    ndCheckArray(dst)
-    local operands = {dst, ...}
-    local coreAxes = {}
-    for i = 1, #operands do coreAxes[i] = {} end
-    local iterator = NdArray.coreIter(operands, coreAxes)
-    local indices, views = iterator()
-    while indices do
-        local args = {}
-        for i = 2, #views do args[i - 1] = views[i].data[views[i].offset + 1] end
-        views[1].data[views[1].offset + 1] = func(table.unpack(args, 1, #args))
-        indices, views = iterator()
-    end
-    return dst
-end
-
 -- These remain named functions intentionally.  Lua comparison metamethods
 -- (__eq/__lt/__le, where supported) must produce one boolean for the
 -- comparison expression; they cannot return an elementwise NdArray.
-local function ndComparison(func, a, b) return ndElementwise(func, a, b) end
+local function ndComparison(func, a, b) return NdArray._elementwise(func, a, b) end
 NdArray.equal = function(a, b) return ndComparison(function(x, y) return x == y end, a, b) end
 NdArray.notEqual = function(a, b) return ndComparison(function(x, y) return x ~= y end, a, b) end
 NdArray.less = function(a, b) return ndComparison(function(x, y) return x < y end, a, b) end
 NdArray.lessEqual = function(a, b) return ndComparison(function(x, y) return x <= y end, a, b) end
 NdArray.greater = function(a, b) return ndComparison(function(x, y) return x > y end, a, b) end
 NdArray.greaterEqual = function(a, b) return ndComparison(function(x, y) return x >= y end, a, b) end
-
-function NdArray.broadcastShapes(shapes) return ndBroadcastShape(shapes) end
-function NdArray.broadcastTo(arr, shape)
-    ndCheckArray(arr)
-    local target = ndCopyShape(shape)
-    assert(ndBroadcastShape({arr.shape, target})[1] ~= nil or #target == 0,
-        "invalid broadcast shape")
-    local stride = ndAlignedStride(arr, target)
-    return ndView(arr, target, stride, arr.offset or 0)
-end
-function NdArray.broadcastArrays(arrays)
-    if arrays and arrays.shape then arrays = {arrays} end
-    local shapes = {}
-    for i, arr in ipairs(arrays) do ndCheckArray(arr); shapes[i] = arr.shape end
-    local target = ndBroadcastShape(shapes)
-    local result = {}
-    for i, arr in ipairs(arrays) do result[i] = NdArray.broadcastTo(arr, target) end
-    return table.unpack(result, 1, #result)
-end
-
-function NdArray.reshape(arr, ...)
-    ndCheckArray(arr)
-    local requested = {...}
-    if #requested == 1 and type(requested[1]) == "table" then requested = requested[1] end
-    local shape, unknown, knownSize = {}, nil, 1
-    for axis, dimension in ipairs(requested) do
-        if dimension == -1 then
-            assert(not unknown, "reshape permits only one inferred dimension")
-            unknown = axis; shape[axis] = -1
-        else
-            assert(dimension >= 0 and dimension == math.floor(dimension), "invalid reshape dimension")
-            shape[axis], knownSize = dimension, knownSize * dimension
-        end
-    end
-    if unknown then
-        assert(knownSize > 0 and arr.size % knownSize == 0, "reshape size is incompatible")
-        shape[unknown] = arr.size / knownSize
-    else
-        assert(knownSize == arr.size, "reshape size is incompatible")
-    end
-    local contiguous = true
-    local expected = 1
-    for axis = #arr.shape, 1, -1 do
-        if arr.shape[axis] ~= 1 and arr.stride[axis] ~= expected then contiguous = false end
-        expected = expected * arr.shape[axis]
-    end
-    local source = contiguous and arr or NdArray.copy(arr)
-    local resultStride, step = {}, 1
-    for axis = #shape, 1, -1 do resultStride[axis], step = step, step * shape[axis] end
-    return ndView(source, shape, resultStride, source.offset or 0)
-end
-
-function NdArray.ravel(arr) return NdArray.reshape(arr, {arr.size}) end
-function NdArray.flatten(arr) return NdArray.copy(NdArray.reshape(arr, {arr.size})) end
 
 local function ndWriteTraversal(source, output, axisOffset, axisLength, axis)
     local iterator = ndTraversal(source.shape, {source.stride}, {source.offset or 0}, "C")
@@ -2273,35 +1880,3 @@ end
 
 NdArray.argmax = function(arr, axis, keepdim) return ndArgReduce(function(x, y) return x > y end, arr, axis, keepdim) end
 NdArray.argmin = function(arr, axis, keepdim) return ndArgReduce(function(x, y) return x < y end, arr, axis, keepdim) end
-function NdArray.countNonzero(arr)
-    local count = 0
-    for _, values in NdArray.nditer(arr, nil, "C") do if values[1] ~= 0 then count = count + 1 end end
-    return count
-end
-
-function NdArray.nonzero(arr)
-    ndCheckArray(arr)
-    local coordinates = {}
-    for axis = 1, #arr.shape do coordinates[axis] = {} end
-    for indices, values in NdArray.nditer(arr, nil, "C") do
-        if values[1] ~= 0 then for axis = 1, #arr.shape do coordinates[axis][#coordinates[axis] + 1] = indices[axis] end end
-    end
-    for axis = 1, #coordinates do coordinates[axis] = NdArray.array(coordinates[axis]) end
-    return table.unpack(coordinates, 1, #coordinates)
-end
-
-function NdArray.argwhere(arr)
-    ndCheckArray(arr)
-    local rows = {}
-    for indices, values in NdArray.nditer(arr, nil, "C") do
-        if values[1] ~= 0 then local row = {}; for axis = 1, #arr.shape do row[axis] = indices[axis] end; rows[#rows + 1] = row end
-    end
-    return NdArray.array(rows)
-end
-
-function NdArray.where(condition, ifTrue, ifFalse)
-    assert(ifTrue and ifFalse, "where requires condition, true, and false operands")
-    return ndElementwise(function(conditionValue, trueValue, falseValue)
-        return conditionValue and trueValue or falseValue
-    end, condition, ifTrue, ifFalse)
-end
