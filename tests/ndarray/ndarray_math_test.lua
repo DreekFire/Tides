@@ -42,6 +42,37 @@ close(reduced.data[2], 15)
 close(NdArray.mean(vector), 2)
 local comparison = NdArray.greater(vector, NdArray.array({0, 3, 2}))
 assert(comparison.data[1] == true and comparison.data[2] == false and comparison.data[3] == true)
+local arithmetic = NdArray.array({1, 2, 3}) * 2 + 1
+assert(table.concat(arithmetic.data, ",") == "3,5,7", "arithmetic metamethods")
+local reverseArithmetic = 10 - NdArray.array({1, 2, 3})
+assert(table.concat(reverseArithmetic.data, ",") == "9,8,7", "reverse arithmetic metamethod")
+local negated = -NdArray.array({1, -2})
+assert(table.concat(negated.data, ",") == "-1,2", "unary arithmetic metamethod")
+local viewArithmetic = NdArray.transpose(NdArray.array({{1, 2}, {3, 4}})) + 1
+assert(table.concat(viewArithmetic.data, ",") == "2,4,3,5", "view arithmetic metamethod")
+
+local function assertComparisonOperatorError(operation)
+    local ok, message = pcall(operation)
+    assert(not ok and message:match("NdArray comparison operators are disabled")
+        and (message:match("NdArray%.equal") or message:match("NdArray%.less")),
+        "comparison operators should direct callers to named functions: " .. tostring(message))
+end
+local leftComparison = NdArray.array({1})
+local rightComparison = NdArray.array({2})
+assertComparisonOperatorError(function() return leftComparison == rightComparison end)
+assertComparisonOperatorError(function() return leftComparison ~= rightComparison end)
+assertComparisonOperatorError(function() return leftComparison < rightComparison end)
+assertComparisonOperatorError(function() return leftComparison <= rightComparison end)
+assertComparisonOperatorError(function() return leftComparison > rightComparison end)
+assertComparisonOperatorError(function() return leftComparison >= rightComparison end)
+assert(NdArray.any(NdArray.array({0, 1})) and not NdArray.all(NdArray.array({0, 1})),
+    "any/all truth helpers")
+assert(NdArray.truthValue(NdArray.array(1)) == true and NdArray.truthValue(NdArray.array(0)) == false,
+    "single-element arrays should have a scalar truth value")
+local truthOk, truthMessage = pcall(function() return NdArray.truthValue(NdArray.array({1, 2})) end)
+assert(not truthOk and truthMessage:match("truth value of an NdArray with more than one element is ambiguous")
+    and truthMessage:match("NdArray%.any") and truthMessage:match("NdArray%.all"),
+    "explicit array truth-value checks should use the NumPy-style message")
 
 local destination = NdArray.zeros({2, 3})
 NdArray._callbackIter(function(x, y) return x + y end, destination,

@@ -103,8 +103,17 @@ The focused math/indexing workflow is:
   `int`, `float`, or `object`); metadata does not implicitly cast values.
   Rank-zero arrays remain tables in Lua and expose `NdArray.item`/`scalar` for
   explicit extraction, while rank-zero integer arrays are accepted as scalar
-  indices. Assignments whose source shares the destination backing table emit
-  a warning; overlapping-copy semantics remain intentionally unspecified.
+  indices. Array arithmetic metatables cover `+`, `-`, `*`, `/`, and unary `-`,
+  including scalar operands; matrix multiplication remains the named
+  `NdArray.matMul` operation because Lua has no `@` operator. Comparison
+  operators intentionally error and direct callers to `NdArray.equal`,
+  `notEqual`, `less`, `lessEqual`, `greater`, or `greaterEqual`. Lua has no
+  truth-value metamethod, so `if arr` cannot be intercepted; use `NdArray.any`,
+  `NdArray.all`, or the explicit `NdArray.truthValue` guard. The guard follows
+  NumPy's primary scalar rule (one element returns a boolean; empty and
+  multi-element arrays raise an ambiguous-truth error). Assignments whose
+  source shares the destination backing table emit a warning; overlapping-copy
+  semantics remain intentionally unspecified.
 - `Low/Linalg.lua` — NdArray-based partial-pivoted LU, Householder QR,
   Cholesky, vector/matrix solves, full-column-rank least squares, determinant,
   inverse, damped least-squares pseudoinverse, normalization, cross/outer/skew

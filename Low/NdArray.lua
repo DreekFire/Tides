@@ -22,6 +22,11 @@ local function ndTruthy(value)
     return value ~= nil and value ~= false and value ~= 0
 end
 
+local function ndAsArray(value)
+    if type(value) == "table" and value.shape and value.data then return value end
+    return NdArray.array(value)
+end
+
 local function ndNormalizeDType(dtype)
     if dtype == nil then return "any" end
     assert(dtype == "any" or dtype == "bool" or dtype == "int"
@@ -71,7 +76,7 @@ local function ndBroadcastError(shapes)
 end
 
 local function ndViewLocal(arr, shape, stride)
-    return {
+    local result = {
         shape = ndCopyShapeLocal(shape),
         stride = ndCopyShapeLocal(stride),
         data = arr.data,
@@ -79,6 +84,8 @@ local function ndViewLocal(arr, shape, stride)
         size = ndSizeLocal(shape),
         dtype = arr.dtype or "any",
     }
+    setmetatable(result, NdArray.meta)
+    return result
 end
 
 local function ndAxisLocal(axis, ndim)
@@ -571,7 +578,9 @@ function NdArray.flatten(arr)
 end
 
 function NdArray._elementwise(func, ...)
-    local broadcasted = NdArray.broadcastArrays({...})
+    local operands = {...}
+    for i = 1, #operands do operands[i] = ndAsArray(operands[i]) end
+    local broadcasted = NdArray.broadcastArrays(operands)
     local n = #broadcasted
     local ret = NdArray.empty(broadcasted[1].shape)
     local args = {}
@@ -989,6 +998,27 @@ function NdArray.countNonzero(arr)
     end
     return count
 end
+
+function NdArray.any(arr)
+    return NdArray.countNonzero(arr) > 0
+end
+
+function NdArray.all(arr)
+    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
+    return NdArray.countNonzero(arr) == arr.size
+end
+
+function NdArray.truthValue(arr)
+    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
+    if arr.size == 1 then return ndTruthy(arr.data[(arr.offset or 0) + 1]) end
+    if arr.size == 0 then
+        error("The truth value of an empty NdArray is ambiguous; use NdArray.any(...) or NdArray.all(...)", 2)
+    end
+    error("The truth value of an NdArray with more than one element is ambiguous; "
+        .. "use NdArray.any(...) or NdArray.all(...)", 2)
+end
+
+NdArray.bool = NdArray.truthValue
 
 function NdArray.argwhere(arr)
     assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
@@ -1637,10 +1667,12 @@ local function ndNormalizeCore(arrs, coreAxes, iterShape)
 end
 
 local function ndView(arr, shape, stride, offset)
-    return {
+    local result = {
         shape = shape, stride = stride, data = arr.data, offset = offset,
         size = ndSize(shape), dtype = arr.dtype or "any",
     }
+    setmetatable(result, NdArray.meta)
+    return result
 end
 
 -- Direct-axis core iterator.  Unlike nditer, this preserves the selected
@@ -1709,6 +1741,7 @@ local function ndContiguousArray(shape, dtype)
     end
     result.shape, result.stride, result.data, result.offset, result.size, result.dtype =
         ndCopyShape(shape), stride, {}, 0, step, ndNormalizeDType(dtype)
+    setmetatable(result, NdArray.meta)
     return result
 end
 
@@ -1971,3 +2004,22 @@ end
 
 NdArray.argmax = function(arr, axis, keepdim) return ndArgReduce(function(x, y) return x > y end, arr, axis, keepdim) end
 NdArray.argmin = function(arr, axis, keepdim) return ndArgReduce(function(x, y) return x < y end, arr, axis, keepdim) end
+
+local function ndComparisonOperatorError()
+    error("NdArray comparison operators are disabled; use NdArray.equal, NdArray.notEqual, "
+        .. "NdArray.less, NdArray.lessEqual, NdArray.greater, or NdArray.greaterEqual", 2)
+end
+
+-- Lua has no __bool metamethod, but its arithmetic and comparison operators
+-- can be redirected. Elementwise comparisons remain named functions because
+-- Lua comparison expressions must produce one boolean rather than an array.
+NdArray.meta = {
+    __add = NdArray.add,
+    __sub = NdArray.sub,
+    __mul = NdArray.mul,
+    __div = NdArray.div,
+    __unm = NdArray.negative,
+    __eq = ndComparisonOperatorError,
+    __lt = ndComparisonOperatorError,
+    __le = ndComparisonOperatorError,
+}
