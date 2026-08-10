@@ -59,6 +59,32 @@ assertArrayClose(NdArray.matMul(cholInput, cholSolutions), cholRhs, "Cholesky so
 close(Linalg.det(NdArray.array({{1, 2}, {3, 4}})), -2, "determinant")
 assertArrayClose(NdArray.matMul(NdArray.array({{1, 2}, {3, 4}}), Linalg.inverse(NdArray.array({{1, 2}, {3, 4}}))),
     NdArray.eye(2), "inverse")
+local inverse3Input = NdArray.array({{1, 2, 3}, {0, 1, 4}, {5, 6, 0}})
+assertArrayClose(NdArray.matMul(inverse3Input, Linalg.inverse(inverse3Input)), NdArray.eye(3),
+    "3 by 3 adjugate inverse")
+
+local symmetric3 = NdArray.array({{2, 1, 0}, {1, 2, 1}, {0, 1, 2}})
+local symmetricValues, symmetricVectors, symmetricInfo = Linalg.eigSymm3(symmetric3)
+assert(symmetricInfo.converged and symmetricInfo.iterations == 0, "3 by 3 eigensolver metadata")
+close(symmetricValues[1], 2 + math.sqrt(2), "3 by 3 largest eigenvalue")
+close(symmetricValues[2], 2, "3 by 3 middle eigenvalue")
+close(symmetricValues[3], 2 - math.sqrt(2), "3 by 3 smallest eigenvalue")
+local symmetricDiagonal = NdArray.zeros({3, 3})
+for index = 1, 3 do symmetricDiagonal.data[(index - 1) * 4 + 1] = symmetricValues[index] end
+assertArrayClose(NdArray.matMul(NdArray.transpose(symmetricVectors), symmetricVectors), NdArray.eye(3),
+    "3 by 3 eigenvector orthogonality")
+assertArrayClose(NdArray.matMul(NdArray.matMul(symmetricVectors, symmetricDiagonal),
+    NdArray.transpose(symmetricVectors)), symmetric3, "3 by 3 eigendecomposition reconstruction")
+
+local repeatedSymmetric = NdArray.array({{5, 0, 0}, {0, 5, 0}, {0, 0, 2}})
+local repeatedValues, repeatedVectors = Linalg.eigSymm(repeatedSymmetric)
+close(repeatedValues[1], 5, "repeated 3 by 3 largest eigenvalue")
+close(repeatedValues[2], 5, "repeated 3 by 3 middle eigenvalue")
+close(repeatedValues[3], 2, "repeated 3 by 3 smallest eigenvalue")
+local repeatedDiagonal = NdArray.zeros({3, 3})
+for index = 1, 3 do repeatedDiagonal.data[(index - 1) * 4 + 1] = repeatedValues[index] end
+assertArrayClose(NdArray.matMul(NdArray.matMul(repeatedVectors, repeatedDiagonal),
+    NdArray.transpose(repeatedVectors)), repeatedSymmetric, "repeated 3 by 3 eigendecomposition")
 local normalized, length = Linalg.normalize(NdArray.array({3, 4}))
 close(length, 5, "vector norm")
 assertArrayClose(normalized, NdArray.array({0.6, 0.8}), "vector normalization")

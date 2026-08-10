@@ -609,6 +609,24 @@ end
 function Linalg.inverse(matrix)
     local rows, cols = matrixShape(matrix)
     assert(rows == cols, "inverse requires a square matrix")
+    if rows == 3 then
+        -- Preserve Matrix3's inexpensive adjugate path, but return a generic
+        -- NdArray and use the same zero-based strided access as the rest of
+        -- this module.
+        local a, b, c = at(matrix, 0, 0), at(matrix, 0, 1), at(matrix, 0, 2)
+        local d, e, f = at(matrix, 1, 0), at(matrix, 1, 1), at(matrix, 1, 2)
+        local g, h, i = at(matrix, 2, 0), at(matrix, 2, 1), at(matrix, 2, 2)
+        local c00, c01, c02 = e * i - f * h, f * g - d * i, d * h - e * g
+        local c10, c11, c12 = c * h - b * i, a * i - c * g, b * g - a * h
+        local c20, c21, c22 = b * f - c * e, c * d - a * f, a * e - b * d
+        local determinant = a * c00 + b * c01 + c * c02
+        assert(math.abs(determinant) > 1e-14, "inverse encountered a singular matrix")
+        return NdArray.array({
+            {c00 / determinant, c10 / determinant, c20 / determinant},
+            {c01 / determinant, c11 / determinant, c21 / determinant},
+            {c02 / determinant, c12 / determinant, c22 / determinant},
+        })
+    end
     local p, l, u = Linalg.lu(matrix)
     return Linalg.solveLU(p, l, u, NdArray.eye(rows))
 end
@@ -698,7 +716,113 @@ function Linalg.eigQr(matrix, iterLim, tolerance)
 end
 
 function Linalg.eigSymm(matrix, iterLim, tolerance)
+    local rows, cols = matrixShape(matrix)
+    if rows == 3 and cols == 3 then return Linalg.eigSymm3(matrix, iterLim, tolerance) end
     return Linalg.eigQr(matrix, iterLim, tolerance)
+end
+
+local function vectorNorm(x, y, z)
+    return math.sqrt(x * x + y * y + z * z)
+end
+
+local function normalize3(x, y, z)
+    local length = vectorNorm(x, y, z)
+    assert(length > 1e-30, "eigenvector is numerically zero")
+    return x / length, y / length, z / length
+end
+
+local function dot3(ax, ay, az, bx, by, bz)
+    return ax * bx + ay * by + az * bz
+end
+
+local function cross3(ax, ay, az, bx, by, bz)
+    return ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+end
+
+local function eigenvector3(a, b, c, d, e, f, g, h, i, eigenvalue)
+    local r1x, r1y, r1z = a - eigenvalue, b, c
+    local r2x, r2y, r2z = d, e - eigenvalue, f
+    local r3x, r3y, r3z = g, h, i - eigenvalue
+    local x1, y1, z1 = cross3(r1x, r1y, r1z, r2x, r2y, r2z)
+    local n1 = vectorNorm(x1, y1, z1)
+    local x2, y2, z2 = cross3(r1x, r1y, r1z, r3x, r3y, r3z)
+    local n2 = vectorNorm(x2, y2, z2)
+    local x3, y3, z3 = cross3(r2x, r2y, r2z, r3x, r3y, r3z)
+    local n3 = vectorNorm(x3, y3, z3)
+    if n2 > n1 then x1, y1, z1, n1 = x2, y2, z2, n2 end
+    if n3 > n1 then x1, y1, z1, n1 = x3, y3, z3, n3 end
+    if n1 <= 1e-30 then
+        -- A repeated eigenvalue can leave A - lambda I at rank one, so no
+        -- pair of rows has a useful cross product.  Any vector perpendicular
+        -- to its nonzero row is then a valid member of the eigenspace.
+        local x, y, z = r1x, r1y, r1z
+        local rowLength = vectorNorm(x, y, z)
+        local candidate = vectorNorm(r2x, r2y, r2z)
+        if candidate > rowLength then x, y, z, rowLength = r2x, r2y, r2z, candidate end
+        candidate = vectorNorm(r3x, r3y, r3z)
+        if candidate > rowLength then x, y, z, rowLength = r3x, r3y, r3z, candidate end
+        if rowLength <= 1e-30 then return nil end
+        local ax, ay, az
+        if math.abs(x) <= math.abs(y) and math.abs(x) <= math.abs(z) then
+            ax, ay, az = 1, 0, 0
+        elseif math.abs(y) <= math.abs(z) then
+            ax, ay, az = 0, 1, 0
+        else
+            ax, ay, az = 0, 0, 1
+        end
+        x, y, z = cross3(x, y, z, ax, ay, az)
+        return normalize3(x, y, z)
+    end
+    return normalize3(x1, y1, z1)
+end
+
+-- Closed-form eigendecomposition for a real symmetric 3 by 3 matrix.  The
+-- eigenvalues are descending and eigenvectors are returned as columns.
+function Linalg.eigSymm3(matrix, _, tolerance)
+    local rows, cols = matrixShape(matrix)
+    assert(rows == 3 and cols == 3, "eigSymm3 requires a 3 by 3 matrix")
+    tolerance = tolerance or 1e-12
+    local a, b, c = at(matrix, 0, 0), at(matrix, 0, 1), at(matrix, 0, 2)
+    local d, e, f = at(matrix, 1, 0), at(matrix, 1, 1), at(matrix, 1, 2)
+    local g, h, i = at(matrix, 2, 0), at(matrix, 2, 1), at(matrix, 2, 2)
+    local scale = math.max(1, math.abs(a), math.abs(b), math.abs(c), math.abs(d),
+        math.abs(e), math.abs(f), math.abs(g), math.abs(h), math.abs(i))
+    assert(math.abs(b - d) <= tolerance * scale and math.abs(c - g) <= tolerance * scale
+        and math.abs(f - h) <= tolerance * scale, "eigSymm3 requires a symmetric matrix")
+
+    local mean = (a + e + i) / 3
+    local p1 = b * b + c * c + f * f
+    local p2 = (a - mean) * (a - mean) + (e - mean) * (e - mean)
+        + (i - mean) * (i - mean) + 2 * p1
+    local p = math.sqrt(p2 / 6)
+    if p <= 1e-30 then
+        return {mean, mean, mean}, NdArray.eye(3), {converged = true, iterations = 0}
+    end
+
+    local ba, be, bi = (a - mean) / p, (e - mean) / p, (i - mean) / p
+    local determinant = ba * (be * bi - (f / p) * (f / p))
+        - (b / p) * ((b / p) * bi - (f / p) * (c / p))
+        + (c / p) * ((b / p) * (f / p) - be * (c / p))
+    local r = math.max(-1, math.min(1, determinant / 2))
+    local phi = math.acos(r) / 3
+    local first = mean + 2 * p * math.cos(phi)
+    local third = mean + 2 * p * math.cos(phi + 2 * math.pi / 3)
+    local second = 3 * mean - first - third
+
+    local v1x, v1y, v1z = eigenvector3(a, b, c, d, e, f, g, h, i, first)
+    local v3x, v3y, v3z = eigenvector3(a, b, c, d, e, f, g, h, i, third)
+    assert(v1x and v3x, "could not construct eigSymm3 eigenvectors")
+    local projection = dot3(v3x, v3y, v3z, v1x, v1y, v1z)
+    v3x, v3y, v3z = normalize3(v3x - projection * v1x, v3y - projection * v1y,
+        v3z - projection * v1z)
+    local v2x, v2y, v2z = cross3(v3x, v3y, v3z, v1x, v1y, v1z)
+    v2x, v2y, v2z = normalize3(v2x, v2y, v2z)
+    local vectors = NdArray.array({
+        {v1x, v2x, v3x},
+        {v1y, v2y, v3y},
+        {v1z, v2z, v3z},
+    })
+    return {first, second, third}, vectors, {converged = true, iterations = 0}
 end
 
 function Linalg.eigTop(matrix, iterLim)
@@ -734,7 +858,6 @@ function Linalg.eigTopK()
 end
 
 Linalg.eigSymm2 = Linalg.eigSymm
-Linalg.eigSymm3 = Linalg.eigSymm
 
 -- A LinkedList is a chain of elements where each element contains a reference to the next one in the list.
 -- This is a doubly linked list so each element also contains a reference to the previous element.
@@ -1800,10 +1923,13 @@ function Matrix3.adjugate(mat)
 end
 
 function Matrix3.inverse(mat)
-  local det = Matrix3.determinant(mat)
-  if MathUtil.isZero(det) then return end
-  local adj = Matrix3.adjugate(mat)
-  return (1 / det) * adj 
+  assert(NdArray and Linalg, "Matrix3.inverse requires the NdArray Linalg backend")
+  local array = NdArray.array({
+    {mat[1], mat[2], mat[3]},
+    {mat[4], mat[5], mat[6]},
+    {mat[7], mat[8], mat[9]},
+  })
+  return Linalg.inverse(array)
 end
 
 -- swaps rows r1 and r2 in place

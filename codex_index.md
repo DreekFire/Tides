@@ -114,9 +114,13 @@ The focused math/indexing workflow is:
   semantics remain intentionally unspecified.
 - `Low/Linalg.lua` — NdArray-based partial-pivoted LU, Householder QR,
   Cholesky, vector/matrix solves, full-column-rank least squares, determinant,
-  inverse, damped least-squares pseudoinverse, normalization, cross/outer/skew
-  products, rigid-transform composition/inversion, point transforms, power
-  iteration, and symmetric QR eigendecomposition.
+  inverse (including the migrated 3 by 3 adjugate fast path), damped
+  least-squares pseudoinverse, normalization, cross/outer/skew products,
+  rigid-transform composition/inversion, point transforms, power iteration,
+  and symmetric eigendecomposition with a closed-form 3 by 3 fast path.
+- `Low/Matrix3.lua` — legacy Matrix3 compatibility surface; its `inverse`
+  adapter now converts the flat matrix to an NdArray and delegates to
+  `Linalg.inverse`.
 - `Low/Stats.lua` — named distribution statistics with an NdArray covariance
   matrix; `tests/run_stats_ndarray_tests.py` verifies the generic shape and
   update path.

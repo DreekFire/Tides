@@ -189,10 +189,13 @@ function Matrix3.adjugate(mat)
 end
 
 function Matrix3.inverse(mat)
-  local det = Matrix3.determinant(mat)
-  if MathUtil.isZero(det) then return end
-  local adj = Matrix3.adjugate(mat)
-  return (1 / det) * adj 
+  assert(NdArray and Linalg, "Matrix3.inverse requires the NdArray Linalg backend")
+  local array = NdArray.array({
+    {mat[1], mat[2], mat[3]},
+    {mat[4], mat[5], mat[6]},
+    {mat[7], mat[8], mat[9]},
+  })
+  return Linalg.inverse(array)
 end
 
 -- swaps rows r1 and r2 in place
