@@ -27,18 +27,47 @@ def main() -> int:
     args = parser.parse_args()
 
     subprocess.run([sys.executable, str(BUILD)], cwd=REPO_ROOT, check=True)
-    subprocess.run([sys.executable, str(MODULE_BUILD)], cwd=REPO_ROOT, check=True)
     try:
-        from lupa import LuaRuntime
+        if args.ale:
+            from lupa.lua51 import LuaRuntime
+        else:
+            from lupa import LuaRuntime
     except ImportError:
         print("lupa is missing; run: python -m pip install -r tests/requirements.txt", file=sys.stderr)
         return 2
 
-    for combined in (COMBINED, MODULE_COMBINED):
+    def run_chunk(combined: Path) -> None:
         lua = LuaRuntime(unpack_returned_tuples=True)
         if args.ale:
             lua.execute("_ALE = 'local-test'")
         lua.execute(combined.read_text(encoding="utf-8"))
+
+    run_chunk(COMBINED)
+
+    scenarios = [
+        ("warnOnConflict", False, False),
+        ("silent", True, False),
+        ("off", True, False),
+        ("warnOnConflict", True, False),
+        ("warnOnConflict", False, True),
+    ]
+    try:
+        for mode, stop_on_conflict, module_error in scenarios:
+            command = [
+                sys.executable,
+                str(MODULE_BUILD),
+                "--mode",
+                mode,
+            ]
+            if stop_on_conflict:
+                command.append("--stop-on-conflict")
+            if module_error:
+                command.append("--module-error")
+            subprocess.run(command, cwd=REPO_ROOT, check=True)
+            run_chunk(MODULE_COMBINED)
+    finally:
+        # Keep the checked-in artifact in its ordinary paste-ready mode.
+        subprocess.run([sys.executable, str(MODULE_BUILD)], cwd=REPO_ROOT, check=True)
     return 0
 
 

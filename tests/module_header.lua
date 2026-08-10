@@ -18,6 +18,13 @@ MockInterface.__index = MockInterface
 function MockInterface.new()
     return setmetatable({
         custom_axes = {},
+        missile_parts = {
+            {
+                SendRegister = function(_, index, value)
+                    -- The manager replaces this method to track missile writes.
+                end,
+            },
+        },
         hull_weapons = {
             [0] = { CustomName = "shared_hull_weapon", WeaponType = "SimpleWeapon" },
         },
@@ -56,6 +63,22 @@ function MockInterface:GetCustomAxis(name)
     return self.custom_axes[name] or 0
 end
 
+function MockInterface:TellAiThatWeAreTakingControl()
+    self:record_call("TellAiThatWeAreTakingControl")
+end
+
+function MockInterface:AddPropulsionRequest(request_type, value)
+    self:record_call("AddPropulsionRequest")
+end
+
+function MockInterface:RequestComplexControllerStimulus(stimulus)
+    self:record_call("RequestComplexControllerStimulus")
+end
+
+function MockInterface:MoveFortress(x, y, z)
+    self:record_call("MoveFortress")
+end
+
 function MockInterface:GetAllSubConstructs()
     self:record_call("GetAllSubConstructs")
     return { 101, 202 }
@@ -86,6 +109,11 @@ function MockInterface:GetWeaponInfoOnSubConstruct(identifier, index)
     return self.subconstruct_weapons[identifier][index]
 end
 
+function MockInterface:GetMissileInfo(transceiver_index, missile_index)
+    self:record_call("GetMissileInfo")
+    return { Parts = self.missile_parts }
+end
+
 function MockInterface:AimWeaponInDirection(index, x, y, z, slot)
     self:record_call("AimWeaponInDirection")
 end
@@ -100,6 +128,22 @@ end
 
 function MockInterface:FireWeaponOnSubConstruct(identifier, index, slot)
     self:record_call("FireWeaponOnSubConstruct")
+end
+
+function MockInterface:SetSpin(identifier, speed)
+    self:record_call("SetSpin")
+end
+
+function MockInterface:SetPiston(identifier, speed)
+    self:record_call("SetPiston")
+end
+
+function MockInterface:SetPropulsionRequest(request_type, value)
+    self:record_call("SetPropulsionRequest")
+end
+
+function MockInterface:SetLuaMain(transceiver_index, missile_index, value)
+    self:record_call("SetLuaMain")
 end
 
 function MockInterface:Component_GetCount(component_type)
@@ -120,4 +164,8 @@ end
 function MockInterface:Component_SetBoolLogic(component_type, index, value)
     self:record_call("Component_SetBoolLogic")
     self.components[component_type][index].enabled = value
+end
+
+function MockInterface:Component_SetBoolLogicAll(component_type, value)
+    self:record_call("Component_SetBoolLogicAll")
 end

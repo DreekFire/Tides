@@ -1,4 +1,22 @@
 -- paste modules here
+-- Conflict reporting mode is intentionally declared before the pasted module
+-- bodies so test children can inspect the active registry during a tick.
+local conflictMode = "warnOnConflict"
+local out = {
+    propulsion={},
+    components={},
+    missiles={},
+    weapons={},
+    subobjects={},
+}
+local readers = {
+    propulsion={},
+    components={},
+    missiles={},
+    weapons={},
+    subobjects={},
+}
+
 local function MyModule(IModule)
     -- The build script must emit this local before the pasted child script.
     -- It keeps the child's ordinary global `function Update(I)` syntax local
@@ -44,7 +62,7 @@ end
 local luaIdx = 1
 -- Whether to stop running if any module encounters an error
 local stopOnError = true
--- Whether to stop running if two modules try to control the same thing
+-- Whether a reported conflict should stop running modules.
 local stopOnConflict = false
 local modules = {
     {name="MyModule", func=MyModule, retry=0, forceClearLogs=false},
@@ -56,15 +74,6 @@ local coroutines = {}
 local tries = {}
 -- local logs = {}
 local inited = false
-
--- module conflict debugging
-local out = {
-    propulsion={},
-    components={},
-    missiles={},
-    weapons={},
-    subobjects={},
-}
 
 local currentRunning = ""
 local stopped = false
@@ -79,10 +88,20 @@ local StringUtil = {}
 testGlobal = "main"
 local testLocal = "main"
 
+local function track(registry, ...)
+    if conflictMode == "off" then return end
+    local node = registry
+    for i = 1, select("#", ...) do
+        node = node[select(i, ...)]
+    end
+    node[currentRunning] = true
+end
+
 
 local function Init(I)
     for name, _ in pairs(out) do
         out[name] = Util.defaultdict(function() return {} end, true)
+        readers[name] = Util.defaultdict(function() return {} end, true)
     end
 
     local global
@@ -144,7 +163,8 @@ function Update(I)
     end
     I:Log("main test global: "..testGlobal)
     I:Log("main test local: "..testLocal)
-    if checkConflicts(I, out) and stopOnConflict then
+    local conflict = conflictMode ~= "off" and checkConflicts(I, out)
+    if conflict and conflictMode == "warnOnConflict" and stopOnConflict then
         stopped = true
     end
     clearConflicts()
@@ -162,40 +182,71 @@ function setOverrides(J)
         end,
         -- all propulsion requests
         AddPropulsionRequest = function(I, ret, type, value)
-            out.propulsion[type][currentRunning] = true
+            track(out, "propulsion", type)
         end,
         RequestComplexControllerStimulus = function(I, ret, stim)
-            out.propulsion[stim + stimIdx][currentRunning] = true
+            track(out, "propulsion", stim + stimIdx)
         end,
         MoveFortress = function(I, ret, ...)
-            out.propulsion[moveFortress][currentRunning] = true
+            track(out, "propulsion", moveFortress)
+        end,
+        GetCustomAxis = function(I, ret, name)
+            track(readers, "propulsion", name)
+        end,
+        GetAllSubConstructs = function(I, ret)
+            track(readers, "subobjects", "all")
+        end,
+        GetSubConstructInfo = function(I, ret, subconstruct_uid)
+            track(readers, "subobjects", subconstruct_uid)
+        end,
+        GetWeaponCount = function(I, ret)
+            track(readers, "weapons", "main", "all")
+        end,
+        GetWeaponInfo = function(I, ret, weapon_idx)
+            track(readers, "weapons", "main", weapon_idx)
+        end,
+        GetWeaponCountOnSubConstruct = function(I, ret, subconstruct_uid)
+            track(readers, "weapons", subconstruct_uid, "all")
+        end,
+        GetWeaponInfoOnSubConstruct = function(I, ret, subconstruct_uid, weapon_idx)
+            track(readers, "weapons", subconstruct_uid, weapon_idx)
+        end,
+        Component_GetCount = function(I, ret, type)
+            track(readers, "components", type, "all")
+        end,
+        Component_GetBlockInfo = function(I, ret, type, block_idx)
+            track(readers, "components", type, block_idx)
+        end,
+        Component_GetBoolLogic = function(I, ret, type, block_idx)
+            track(readers, "components", type, block_idx)
         end,
         -- missile control
         GetMissileInfo = function(I, ret, transceiver_idx, missile_idx)
+            track(readers, "missiles", transceiver_idx, missile_idx)
             for i, part in ipairs(ret.Parts) do
                 local sendRegister = part.SendRegister
                 part.SendRegister = function(index, value)
-                    out.missiles[transceiver_idx][missile_idx][currentRunning] = true
+                    track(out, "missiles", transceiver_idx, missile_idx)
                     sendRegister(index, value)
                 end
             end
         end,
         -- weapon control
         AimWeaponInDirection = function(I, ret, weapon_idx, ...)
-            out.weapons.main[weapon_idx][currentRunning] = true
+            track(out, "weapons", "main", weapon_idx)
         end,
         AimWeaponInDirectionOnSubConstruct = function(I, ret, subconstruct_uid, weapon_idx, ...)
-            out.weapons[subconstruct_uid][weapon_idx][currentRunning] = true
+            track(out, "weapons", subconstruct_uid, weapon_idx)
         end,
         FireWeapon = function(I, ret, weapon_idx, ...)
-            out.weapons.main[weapon_idx][currentRunning] = true
+            track(out, "weapons", "main", weapon_idx)
         end,
         FireWeaponOnSubConstruct = function(I, ret, subconstruct_uid, weapon_idx, ...)
-            out.weapons[subconstruct_uid][weapon_idx][currentRunning] = true
+            track(out, "weapons", subconstruct_uid, weapon_idx)
         end,
         -- subobject control
         SetSpin = function(I, ret, subconstruct_uid, ...)
-            out.subobjects[subconstruct_uid][currentRunning] = true
+            track(out, "subobjects", subconstruct_uid)
         end,
     }
     overrides.SetPiston = overrides.SetSpin
@@ -205,17 +256,17 @@ function setOverrides(J)
     local matchOverrides = {
         {
             prefix='SetLua', suffix='', func=function(I, ret, transceiver_idx, missile_idx, ...)
-                out.missiles[transceiver_idx][missile_idx][currentRunning] = true
+                track(out, "missiles", transceiver_idx, missile_idx)
             end,
         },
         {
             prefix='Component_Set', suffix='All', func=function(I, ret, type, ...)
-                out.components[type].all[currentRunning] = true
+                track(out, "components", type, "all")
             end,
         },
         {
             prefix='Component_Set', suffix='', func=function(I, ret, type, block_idx, ...)
-                out.components[type][block_idx][currentRunning] = true
+                track(out, "components", type, block_idx)
             end,
         },
     }
@@ -265,9 +316,11 @@ function checkConflicts(I, tab, prefix)
         end
     end
     if #conflicting > 1 then
-        I:Log(string.format("Multiple modules attempting to write to %s: %s",
-            prefix,
-            StringUtil.Join(conflicting, ', ')))
+        if conflictMode == "warnOnConflict" then
+            I:Log(string.format("Multiple modules attempting to write to %s: %s",
+                prefix,
+                StringUtil.Join(conflicting, ', ')))
+        end
         return true
     end
     return conflict
@@ -276,6 +329,7 @@ end
 function clearConflicts()
     for name, _ in pairs(out) do
         out[name] = Util.defaultdict(function() return {} end, true)
+        readers[name] = Util.defaultdict(function() return {} end, true)
     end
 end
 

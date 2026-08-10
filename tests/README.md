@@ -20,6 +20,15 @@ FtD after reviewing it. Use
 `tests/run_tests.sh --ale` only with a local Lua runtime that provides the
 `setfenv`/`getfenv` extensions expected when `_ALE` is defined.
 
+The module integration test runs `warnOnConflict`, `silent`, `off`, warning-
+plus-stop, and child-exception cases automatically. `warnOnConflict` is the
+default in `ModuleExample.lua`; `silent` still records readers and writers but
+does not warn or stop, while `off` skips tracking and conflict inspection.
+
+The manager keeps one endpoint tree for writers (`out`) and an equivalent tree
+for readers (`readers`). Both are per-tick registries and are cleared after
+conflict inspection. Child assertions inspect them before that clear.
+
 When the real build script wraps ordinary FtD child scripts, it must insert a
 fresh `local Update` declaration inside each module wrapper before pasting the
 child. This preserves each script's normal top-level `function Update(I)` while

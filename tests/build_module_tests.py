@@ -15,7 +15,12 @@ MARKER = "    -- paste script here"
 MODULES = ("MyModule", "ThyModule")
 
 
-def build(output: Path) -> None:
+def build(
+    output: Path,
+    conflict_mode: str = "warnOnConflict",
+    stop_on_conflict: bool = False,
+    module_error: bool = False,
+) -> None:
     children = sorted(
         path for path in ROOT.glob("module_*.lua")
         if path.name not in {HEADER.name, FOOTER.name, output.name}
@@ -30,6 +35,14 @@ def build(output: Path) -> None:
         raise SystemExit("ModuleExample.lua does not have the expected paste slots")
 
     generated = template
+    generated = generated.replace(
+        'local conflictMode = "warnOnConflict"',
+        f'local conflictMode = "{conflict_mode}"',
+    )
+    generated = generated.replace(
+        "local stopOnConflict = false",
+        f"local stopOnConflict = {'true' if stop_on_conflict else 'false'}",
+    )
     for module_name, child in zip(MODULES, children):
         marker_start = generated.find(MARKER)
         wrapper_start = generated.rfind("local function ", 0, marker_start)
@@ -52,6 +65,7 @@ def build(output: Path) -> None:
 
     parts = [
         HEADER.read_text(encoding="utf-8").rstrip(),
+        "\n\n_TEST_MODULE_ERROR = true" if module_error else "",
         "\n\n-- BEGIN MODULE EXAMPLE",
         generated.rstrip(),
         "\n\n-- BEGIN MODULE TEST ASSERTIONS",
@@ -65,5 +79,17 @@ def build(output: Path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=ROOT / "module_combined.lua")
+    parser.add_argument(
+        "--mode",
+        choices=("warnOnConflict", "silent", "off"),
+        default="warnOnConflict",
+    )
+    parser.add_argument("--stop-on-conflict", action="store_true")
+    parser.add_argument("--module-error", action="store_true")
     args = parser.parse_args()
-    build(args.output.resolve())
+    build(
+        args.output.resolve(),
+        conflict_mode=args.mode,
+        stop_on_conflict=args.stop_on_conflict,
+        module_error=args.module_error,
+    )

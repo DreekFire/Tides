@@ -18,6 +18,13 @@ MockInterface.__index = MockInterface
 function MockInterface.new()
     return setmetatable({
         custom_axes = {},
+        missile_parts = {
+            {
+                SendRegister = function(_, index, value)
+                    -- The manager replaces this method to track missile writes.
+                end,
+            },
+        },
         hull_weapons = {
             [0] = { CustomName = "shared_hull_weapon", WeaponType = "SimpleWeapon" },
         },
@@ -56,6 +63,22 @@ function MockInterface:GetCustomAxis(name)
     return self.custom_axes[name] or 0
 end
 
+function MockInterface:TellAiThatWeAreTakingControl()
+    self:record_call("TellAiThatWeAreTakingControl")
+end
+
+function MockInterface:AddPropulsionRequest(request_type, value)
+    self:record_call("AddPropulsionRequest")
+end
+
+function MockInterface:RequestComplexControllerStimulus(stimulus)
+    self:record_call("RequestComplexControllerStimulus")
+end
+
+function MockInterface:MoveFortress(x, y, z)
+    self:record_call("MoveFortress")
+end
+
 function MockInterface:GetAllSubConstructs()
     self:record_call("GetAllSubConstructs")
     return { 101, 202 }
@@ -86,6 +109,11 @@ function MockInterface:GetWeaponInfoOnSubConstruct(identifier, index)
     return self.subconstruct_weapons[identifier][index]
 end
 
+function MockInterface:GetMissileInfo(transceiver_index, missile_index)
+    self:record_call("GetMissileInfo")
+    return { Parts = self.missile_parts }
+end
+
 function MockInterface:AimWeaponInDirection(index, x, y, z, slot)
     self:record_call("AimWeaponInDirection")
 end
@@ -100,6 +128,22 @@ end
 
 function MockInterface:FireWeaponOnSubConstruct(identifier, index, slot)
     self:record_call("FireWeaponOnSubConstruct")
+end
+
+function MockInterface:SetSpin(identifier, speed)
+    self:record_call("SetSpin")
+end
+
+function MockInterface:SetPiston(identifier, speed)
+    self:record_call("SetPiston")
+end
+
+function MockInterface:SetPropulsionRequest(request_type, value)
+    self:record_call("SetPropulsionRequest")
+end
+
+function MockInterface:SetLuaMain(transceiver_index, missile_index, value)
+    self:record_call("SetLuaMain")
 end
 
 function MockInterface:Component_GetCount(component_type)
@@ -122,9 +166,32 @@ function MockInterface:Component_SetBoolLogic(component_type, index, value)
     self.components[component_type][index].enabled = value
 end
 
+function MockInterface:Component_SetBoolLogicAll(component_type, value)
+    self:record_call("Component_SetBoolLogicAll")
+end
+
+
 
 -- BEGIN MODULE EXAMPLE
 -- paste modules here
+-- Conflict reporting mode is intentionally declared before the pasted module
+-- bodies so test children can inspect the active registry during a tick.
+local conflictMode = "warnOnConflict"
+local out = {
+    propulsion={},
+    components={},
+    missiles={},
+    weapons={},
+    subobjects={},
+}
+local readers = {
+    propulsion={},
+    components={},
+    missiles={},
+    weapons={},
+    subobjects={},
+}
+
 local function MyModule(IModule)
     -- The build script must emit this local before the pasted child script.
     -- It keeps the child's ordinary global `function Update(I)` syntax local
@@ -143,9 +210,18 @@ local subobject_uid = 202
 local component_type = 10
 local component_index = 0
 
+if _ALE then
+    module_global_probe = script_name
+end
+
 function Update(I)
+    if _TEST_MODULE_ERROR then
+        error("intentional module failure")
+    end
     ticks = ticks + 1
     assert_equal(script_name, "MyModule")
+    assert_true(type(I:GetCustomAxis("childAxis")) == "number")
+    assert_equal(#I:GetAllSubConstructs(), 2)
     assert_equal(I:GetWeaponCount(), 1)
     assert_equal(I:GetWeaponInfo(weapon_index).CustomName, "shared_hull_weapon")
     assert_equal(I:GetSubConstructInfo(turret_uid).CustomName, "shared_turret")
@@ -159,11 +235,50 @@ function Update(I)
     assert_equal(I:Component_GetCount(component_type), 1)
     assert_equal(I:Component_GetBlockInfo(component_type, component_index).CustomName, "shared_shield")
     assert_true(type(I:Component_GetBoolLogic(component_type, component_index)) == "boolean")
+    local missile = I:GetMissileInfo(0, 0)
 
+    I:TellAiThatWeAreTakingControl()
+    I:AddPropulsionRequest(1, 0.5)
+    I:RequestComplexControllerStimulus(0, 1)
+    I:MoveFortress(1, 2, 3)
+    I:SetPropulsionRequest(2, 0.25)
+    I:RequestCustomAxis("childAxis", 0.5)
+    I:SetSpin(subobject_uid, 1)
+    I:SetPiston(subobject_uid, 2)
+    I:SetLuaMain(0, 0, true)
+    missile.Parts[1].SendRegister(1, true)
     I:AimWeaponInDirection(weapon_index, 1, 0, 0, 0)
     I:AimWeaponInDirectionOnSubConstruct(turret_uid, weapon_index, 0, 1, 0, 0)
     I:FireWeaponOnSubConstruct(subobject_uid, weapon_index, 0)
     I:Component_SetBoolLogic(component_type, component_index, true)
+    I:Component_SetBoolLogicAll(component_type, true)
+
+    if conflictMode == "off" then
+        assert_true(next(out.propulsion) == nil)
+        assert_true(next(readers.weapons) == nil)
+    else
+        assert_true(out.propulsion[1][script_name])
+        assert_true(out.propulsion[14][script_name])
+        assert_true(out.propulsion[29][script_name])
+        assert_true(out.propulsion[2][script_name])
+        assert_true(out.propulsion.childAxis[script_name])
+        assert_true(readers.propulsion.childAxis[script_name])
+        assert_true(out.missiles[0][0][script_name])
+        assert_true(readers.missiles[0][0][script_name])
+        assert_true(out.weapons.main[weapon_index][script_name])
+        assert_true(out.weapons[turret_uid][weapon_index][script_name])
+        assert_true(out.weapons[subobject_uid][weapon_index][script_name])
+        assert_true(readers.weapons.main.all[script_name])
+        assert_true(readers.weapons.main[weapon_index][script_name])
+        assert_true(readers.weapons[turret_uid].all[script_name])
+        assert_true(readers.weapons[turret_uid][weapon_index][script_name])
+        assert_true(readers.subobjects.all[script_name])
+        assert_true(readers.subobjects[turret_uid][script_name])
+        assert_true(readers.components[component_type].all[script_name])
+        assert_true(readers.components[component_type][component_index][script_name])
+        assert_true(out.components[component_type].all[script_name])
+        assert_true(out.components[component_type][component_index][script_name])
+    end
     assert_true(ticks <= 2, "module-local tick state was not isolated")
 end
     -- END PASTED CHILD: module_my.lua
@@ -188,9 +303,18 @@ local subobject_uid = 202
 local component_type = 10
 local component_index = 0
 
+if _ALE then
+    module_global_probe = script_name
+end
+
 function Update(I)
+    if _TEST_MODULE_ERROR then
+        error("intentional module failure")
+    end
     ticks = ticks + 1
     assert_equal(script_name, "ThyModule")
+    assert_true(type(I:GetCustomAxis("childAxis")) == "number")
+    assert_equal(#I:GetAllSubConstructs(), 2)
     assert_equal(I:GetWeaponCount(), 1)
     assert_equal(I:GetWeaponInfo(weapon_index).CustomName, "shared_hull_weapon")
     assert_equal(I:GetSubConstructInfo(turret_uid).CustomName, "shared_turret")
@@ -204,11 +328,50 @@ function Update(I)
     assert_equal(I:Component_GetCount(component_type), 1)
     assert_equal(I:Component_GetBlockInfo(component_type, component_index).CustomName, "shared_shield")
     assert_true(type(I:Component_GetBoolLogic(component_type, component_index)) == "boolean")
+    local missile = I:GetMissileInfo(0, 0)
 
+    I:TellAiThatWeAreTakingControl()
+    I:AddPropulsionRequest(1, 0.5)
+    I:RequestComplexControllerStimulus(0, 1)
+    I:MoveFortress(1, 2, 3)
+    I:SetPropulsionRequest(2, 0.25)
+    I:RequestCustomAxis("childAxis", 0.5)
+    I:SetSpin(subobject_uid, 1)
+    I:SetPiston(subobject_uid, 2)
+    I:SetLuaMain(0, 0, true)
+    missile.Parts[1].SendRegister(1, true)
     I:FireWeapon(weapon_index, 0)
     I:FireWeaponOnSubConstruct(turret_uid, weapon_index, 0)
     I:AimWeaponInDirectionOnSubConstruct(subobject_uid, weapon_index, 0, 0, 1, 0)
     I:Component_SetBoolLogic(component_type, component_index, false)
+    I:Component_SetBoolLogicAll(component_type, false)
+
+    if conflictMode == "off" then
+        assert_true(next(out.propulsion) == nil)
+        assert_true(next(readers.weapons) == nil)
+    else
+        assert_true(out.propulsion[1][script_name])
+        assert_true(out.propulsion[14][script_name])
+        assert_true(out.propulsion[29][script_name])
+        assert_true(out.propulsion[2][script_name])
+        assert_true(out.propulsion.childAxis[script_name])
+        assert_true(readers.propulsion.childAxis[script_name])
+        assert_true(out.missiles[0][0][script_name])
+        assert_true(readers.missiles[0][0][script_name])
+        assert_true(out.weapons.main[weapon_index][script_name])
+        assert_true(out.weapons[turret_uid][weapon_index][script_name])
+        assert_true(out.weapons[subobject_uid][weapon_index][script_name])
+        assert_true(readers.weapons.main.all[script_name])
+        assert_true(readers.weapons.main[weapon_index][script_name])
+        assert_true(readers.weapons[turret_uid].all[script_name])
+        assert_true(readers.weapons[turret_uid][weapon_index][script_name])
+        assert_true(readers.subobjects.all[script_name])
+        assert_true(readers.subobjects[turret_uid][script_name])
+        assert_true(readers.components[component_type].all[script_name])
+        assert_true(readers.components[component_type][component_index][script_name])
+        assert_true(out.components[component_type].all[script_name])
+        assert_true(out.components[component_type][component_index][script_name])
+    end
     assert_true(ticks <= 2, "module-local tick state was not isolated")
 end
     -- END PASTED CHILD: module_thy.lua
@@ -224,7 +387,7 @@ end
 local luaIdx = 1
 -- Whether to stop running if any module encounters an error
 local stopOnError = true
--- Whether to stop running if two modules try to control the same thing
+-- Whether a reported conflict should stop running modules.
 local stopOnConflict = false
 local modules = {
     {name="MyModule", func=MyModule, retry=0, forceClearLogs=false},
@@ -236,15 +399,6 @@ local coroutines = {}
 local tries = {}
 -- local logs = {}
 local inited = false
-
--- module conflict debugging
-local out = {
-    propulsion={},
-    components={},
-    missiles={},
-    weapons={},
-    subobjects={},
-}
 
 local currentRunning = ""
 local stopped = false
@@ -259,10 +413,20 @@ local StringUtil = {}
 testGlobal = "main"
 local testLocal = "main"
 
+local function track(registry, ...)
+    if conflictMode == "off" then return end
+    local node = registry
+    for i = 1, select("#", ...) do
+        node = node[select(i, ...)]
+    end
+    node[currentRunning] = true
+end
+
 
 local function Init(I)
     for name, _ in pairs(out) do
         out[name] = Util.defaultdict(function() return {} end, true)
+        readers[name] = Util.defaultdict(function() return {} end, true)
     end
 
     local global
@@ -324,7 +488,8 @@ function Update(I)
     end
     I:Log("main test global: "..testGlobal)
     I:Log("main test local: "..testLocal)
-    if checkConflicts(I, out) and stopOnConflict then
+    local conflict = conflictMode ~= "off" and checkConflicts(I, out)
+    if conflict and conflictMode == "warnOnConflict" and stopOnConflict then
         stopped = true
     end
     clearConflicts()
@@ -342,40 +507,71 @@ function setOverrides(J)
         end,
         -- all propulsion requests
         AddPropulsionRequest = function(I, ret, type, value)
-            out.propulsion[type][currentRunning] = true
+            track(out, "propulsion", type)
         end,
         RequestComplexControllerStimulus = function(I, ret, stim)
-            out.propulsion[stim + stimIdx][currentRunning] = true
+            track(out, "propulsion", stim + stimIdx)
         end,
         MoveFortress = function(I, ret, ...)
-            out.propulsion[moveFortress][currentRunning] = true
+            track(out, "propulsion", moveFortress)
+        end,
+        GetCustomAxis = function(I, ret, name)
+            track(readers, "propulsion", name)
+        end,
+        GetAllSubConstructs = function(I, ret)
+            track(readers, "subobjects", "all")
+        end,
+        GetSubConstructInfo = function(I, ret, subconstruct_uid)
+            track(readers, "subobjects", subconstruct_uid)
+        end,
+        GetWeaponCount = function(I, ret)
+            track(readers, "weapons", "main", "all")
+        end,
+        GetWeaponInfo = function(I, ret, weapon_idx)
+            track(readers, "weapons", "main", weapon_idx)
+        end,
+        GetWeaponCountOnSubConstruct = function(I, ret, subconstruct_uid)
+            track(readers, "weapons", subconstruct_uid, "all")
+        end,
+        GetWeaponInfoOnSubConstruct = function(I, ret, subconstruct_uid, weapon_idx)
+            track(readers, "weapons", subconstruct_uid, weapon_idx)
+        end,
+        Component_GetCount = function(I, ret, type)
+            track(readers, "components", type, "all")
+        end,
+        Component_GetBlockInfo = function(I, ret, type, block_idx)
+            track(readers, "components", type, block_idx)
+        end,
+        Component_GetBoolLogic = function(I, ret, type, block_idx)
+            track(readers, "components", type, block_idx)
         end,
         -- missile control
         GetMissileInfo = function(I, ret, transceiver_idx, missile_idx)
+            track(readers, "missiles", transceiver_idx, missile_idx)
             for i, part in ipairs(ret.Parts) do
                 local sendRegister = part.SendRegister
                 part.SendRegister = function(index, value)
-                    out.missiles[transceiver_idx][missile_idx][currentRunning] = true
+                    track(out, "missiles", transceiver_idx, missile_idx)
                     sendRegister(index, value)
                 end
             end
         end,
         -- weapon control
         AimWeaponInDirection = function(I, ret, weapon_idx, ...)
-            out.weapons.main[weapon_idx][currentRunning] = true
+            track(out, "weapons", "main", weapon_idx)
         end,
         AimWeaponInDirectionOnSubConstruct = function(I, ret, subconstruct_uid, weapon_idx, ...)
-            out.weapons[subconstruct_uid][weapon_idx][currentRunning] = true
+            track(out, "weapons", subconstruct_uid, weapon_idx)
         end,
         FireWeapon = function(I, ret, weapon_idx, ...)
-            out.weapons.main[weapon_idx][currentRunning] = true
+            track(out, "weapons", "main", weapon_idx)
         end,
         FireWeaponOnSubConstruct = function(I, ret, subconstruct_uid, weapon_idx, ...)
-            out.weapons[subconstruct_uid][weapon_idx][currentRunning] = true
+            track(out, "weapons", subconstruct_uid, weapon_idx)
         end,
         -- subobject control
         SetSpin = function(I, ret, subconstruct_uid, ...)
-            out.subobjects[subconstruct_uid][currentRunning] = true
+            track(out, "subobjects", subconstruct_uid)
         end,
     }
     overrides.SetPiston = overrides.SetSpin
@@ -385,17 +581,17 @@ function setOverrides(J)
     local matchOverrides = {
         {
             prefix='SetLua', suffix='', func=function(I, ret, transceiver_idx, missile_idx, ...)
-                out.missiles[transceiver_idx][missile_idx][currentRunning] = true
+                track(out, "missiles", transceiver_idx, missile_idx)
             end,
         },
         {
             prefix='Component_Set', suffix='All', func=function(I, ret, type, ...)
-                out.components[type].all[currentRunning] = true
+                track(out, "components", type, "all")
             end,
         },
         {
             prefix='Component_Set', suffix='', func=function(I, ret, type, block_idx, ...)
-                out.components[type][block_idx][currentRunning] = true
+                track(out, "components", type, block_idx)
             end,
         },
     }
@@ -445,9 +641,11 @@ function checkConflicts(I, tab, prefix)
         end
     end
     if #conflicting > 1 then
-        I:Log(string.format("Multiple modules attempting to write to %s: %s",
-            prefix,
-            StringUtil.Join(conflicting, ', ')))
+        if conflictMode == "warnOnConflict" then
+            I:Log(string.format("Multiple modules attempting to write to %s: %s",
+                prefix,
+                StringUtil.Join(conflicting, ', ')))
+        end
         return true
     end
     return conflict
@@ -456,6 +654,7 @@ end
 function clearConflicts()
     for name, _ in pairs(out) do
         out[name] = Util.defaultdict(function() return {} end, true)
+        readers[name] = Util.defaultdict(function() return {} end, true)
     end
 end
 
@@ -493,9 +692,6 @@ end
 -- BEGIN MODULE TEST ASSERTIONS
 local test_interface = MockInterface.new()
 
-Update(test_interface)
-Update(test_interface)
-
 local function count_calls(method)
     local count = 0
     for _, actual in ipairs(test_interface.calls) do
@@ -506,25 +702,97 @@ local function count_calls(method)
     return count
 end
 
-assert_equal(count_calls("FireWeapon"), 2, "FireWeapon was not called once per tick")
-assert_equal(count_calls("FireWeaponOnSubConstruct"), 4,
-    "FireWeaponOnSubConstruct was not called for both shared subconstruct weapons")
-assert_equal(count_calls("AimWeaponInDirection"), 2, "AimWeaponInDirection was not called once per tick")
-assert_equal(count_calls("AimWeaponInDirectionOnSubConstruct"), 4,
-    "AimWeaponInDirectionOnSubConstruct was not called for both shared subconstruct weapons")
-
-local function assert_log_contains(fragment)
+local function has_log(fragment)
     for _, message in ipairs(test_interface.logs) do
         if string.find(message, fragment, 1, true) then
-            return
+            return true
         end
     end
-    error("missing manager conflict log containing: " .. fragment, 2)
+    return false
 end
 
-assert_log_contains("/weapons/main/0")
-assert_log_contains("/weapons/101/0")
-assert_log_contains("/weapons/202/0")
-assert_log_contains("/components/10/0")
+local function assert_log_contains(fragment)
+    assert_true(has_log(fragment), "missing manager conflict log containing: " .. fragment)
+end
 
-print("PASS: ModuleExample isolated child-script integration")
+local function assert_no_conflict_logs()
+    for _, message in ipairs(test_interface.logs) do
+        assert_true(not string.find(message, "Multiple modules attempting to write", 1, true),
+            "conflict warning was emitted in silent/off mode")
+    end
+end
+
+local function registry_empty(registry)
+    for _, value in pairs(registry) do
+        if type(value) ~= "table" or not registry_empty(value) then
+            return false
+        end
+    end
+    return true
+end
+
+if _TEST_MODULE_ERROR then
+    Update(test_interface)
+    assert_true(stopped, "stopOnError did not stop after a child exception")
+    local calls_after_error = #test_interface.calls
+    Update(test_interface)
+    assert_equal(#test_interface.calls, calls_after_error,
+        "stopped manager continued after a child exception")
+    assert_true(has_log("MyModule encountered an error"))
+    print("PASS: ModuleExample child exception handling")
+else
+    Update(test_interface)
+    Update(test_interface)
+
+    local expected_ticks = 2
+    if conflictMode == "warnOnConflict" and stopOnConflict then
+        expected_ticks = 1
+    end
+
+    assert_equal(count_calls("FireWeapon"), expected_ticks,
+        "FireWeapon was not called once per active tick")
+    assert_equal(count_calls("FireWeaponOnSubConstruct"), expected_ticks * 2,
+        "FireWeaponOnSubConstruct was not called for both shared subconstruct weapons")
+    assert_equal(count_calls("AimWeaponInDirection"), expected_ticks,
+        "AimWeaponInDirection was not called once per active tick")
+    assert_equal(count_calls("AimWeaponInDirectionOnSubConstruct"), expected_ticks * 2,
+        "AimWeaponInDirectionOnSubConstruct was not called for both shared subconstruct weapons")
+    assert_true(has_log("is disabling AI control"),
+        "TellAiThatWeAreTakingControl override did not run")
+
+    if conflictMode == "warnOnConflict" then
+        assert_log_contains("/propulsion/1")
+        assert_log_contains("/propulsion/14")
+        assert_log_contains("/propulsion/29")
+        assert_log_contains("/propulsion/2")
+        assert_log_contains("/propulsion/childAxis")
+        assert_log_contains("/missiles/0/0")
+        assert_log_contains("/weapons/main/0")
+        assert_log_contains("/weapons/101/0")
+        assert_log_contains("/weapons/202/0")
+        assert_log_contains("/components/10/all")
+        assert_log_contains("/components/10/0")
+        assert_log_contains("/subobjects/202")
+    else
+        assert_no_conflict_logs()
+    end
+
+    if conflictMode == "silent" or conflictMode == "off" then
+        assert_true(not stopped, conflictMode .. " mode unexpectedly stopped the manager")
+    end
+    assert_true(registry_empty(out), "writer registry was not cleared after the tick")
+    assert_true(registry_empty(readers), "reader registry was not cleared after the tick")
+
+    if _ALE ~= nil then
+        assert_true(type(setfenv) == "function", "ALE mode must provide setfenv")
+        assert_true(type(getfenv) == "function", "ALE mode must provide getfenv")
+        for _, mod in ipairs(modules) do
+            assert_equal(getfenv(mod.func).module_global_probe, mod.name,
+                "ALE global state leaked between module contexts")
+        end
+        assert_true(_G.module_global_probe == nil,
+            "ALE global probe escaped its module context")
+    end
+
+    print("PASS: ModuleExample reader/writer registries and conflict modes")
+end
