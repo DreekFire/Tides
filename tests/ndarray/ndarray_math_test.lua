@@ -59,4 +59,21 @@ local noCoordinates = NdArray.argwhere(NdArray.zeros({2, 2}))
 assert(noCoordinates.shape[1] == 0 and noCoordinates.shape[2] == 2 and #noCoordinates.data == 0,
     "argwhere should preserve the coordinate width for empty results")
 
+local indexed = NdArray.array({{10, 20, 30}, {40, 50, 60}})
+local rowIndices = NdArray.array({0, 1})
+local columnIndices = NdArray.array({2, 0})
+local selected = NdArray.get(indexed, {rowIndices, columnIndices})
+assert(selected.shape[1] == 2 and table.concat(selected.data, ",") == "30,40",
+    "fancy get should use scalar nditer values as source coordinates")
+NdArray.set(indexed, {rowIndices, columnIndices}, NdArray.array({300, 400}))
+assert(table.concat(indexed.data, ",") == "10,20,300,400,50,60",
+    "fancy set should use scalar nditer values as destination coordinates")
+local partial = NdArray.array({{1, 2, 3}, {4, 5, 6}})
+local selectedRows = NdArray.get(partial, {rowIndices, NdArray.sliceAll})
+assert(table.concat(selectedRows.data, ",") == "1,2,3,4,5,6",
+    "partial fancy get should share the scalar iterator")
+NdArray.set(partial, {rowIndices, NdArray.sliceAll}, NdArray.array({{10, 20, 30}, {40, 50, 60}}))
+assert(table.concat(partial.data, ",") == "10,20,30,40,50,60",
+    "partial fancy set should share the scalar iterator")
+
 print("ndarray math tests passed")

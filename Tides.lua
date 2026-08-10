@@ -1944,52 +1944,6 @@ function NdArray._strideIter3(arr1, arr2, arr3)
     end
 end
 
-function NdArray._strideIter(shape, strides, baseOffsets)
-    local narr = #strides
-    local ndim = #shape
-    local idxs = {}
-    for i=1,ndim - 1 do
-        idxs[i] = 1
-    end
-    local offsets = {}
-    for i=1,narr do
-        offsets[i] = baseOffsets[i] - strides[i][ndim]
-    end
-    local inner_limit = shape[ndim]
-    local inner_idx = 0
-    return function()
-        if inner_idx < inner_limit then
-            inner_idx = inner_idx + 1
-            for i=1,narr do
-                offsets[i] = offsets[i] + strides[i][ndim]
-            end
-            return offsets
-        end
-        inner_idx = 0
-        for i=1,narr do
-            offsets[i] = offsets[i] - strides[i][ndim] * (inner_limit - 1)
-        end
-        for d=ndim - 1, 1, -1 do
-            if idxs[d] < shape[d] then
-                idxs[d] = idxs[d] + 1
-                for i=1,narr do
-                    offsets[i] = offsets[i] + strides[i][d]
-                end
-                break
-            else
-                if d == 1 then return nil end
-                idxs[d] = 0
-                idxs[d - 1] = idxs[d - 1] + 1
-                for i=1,narr do
-                    offsets[i] = offsets[i] - strides[i][d] * (shape[d])
-                    offsets[i] = offsets[i] + strides[i][d - 1]
-                end
-            end
-        end
-        return offsets
-    end
-end
-
 function NdArray.copy(arr)
     assert(type(arr) == "table" and arr.shape and arr.stride and arr.data, "expected an NdArray")
     local ret = NdArray.empty(arr.shape)
@@ -2002,7 +1956,7 @@ end
 
 function NdArray.copyTo(dst, src, where)
     if where == false then return end
-    if where == true then
+    if where == nil or where == true then
         dst, src = table.unpack(NdArray.broadcastArrays({dst, src}))
         for offsets in NdArray._strideIter(dst.shape, {dst.stride, src.stride}, {dst.offset or 0, src.offset or 0}) do
             dst.data[offsets[1]] = src.data[offsets[2]]
@@ -2599,6 +2553,7 @@ end
 
 NdArray._sliceMt = {
     __index=function(table, key)
+        if type(key) ~= "number" then return nil end
         return table.start + key * table.step
     end,
     __len=function(table)
@@ -2635,8 +2590,8 @@ function NdArray.get(arr, idxs)
         newShape, fancyIdxs = NdArray._prepareFancyIndex(arr, idxs)
         local ret = NdArray.empty(newShape)
         if #fancyIdxs == #arr.shape then
-            for setIdxs, getIdxs in NdArray.nditerPacked(fancyIdxs) do
-                NdArray._setSingle(ret, setIdxs, NdArray._getSingle(arr, getIdxs))
+            for setIdxs, values in NdArray.nditer(fancyIdxs, nil, "C") do
+                NdArray._setSingle(ret, setIdxs, NdArray._getSingle(arr, values))
             end
         else
             for indexed, plain in NdArray._fancyIter(arr, ret, idxs, fancyDims, fancyIdxs) do
@@ -2663,8 +2618,8 @@ function NdArray.set(arr, idxs, vals)
         local newShape
         newShape, fancyIdxs = NdArray._prepareFancyIndex(arr, idxs)
         if #fancyIdxs == #arr.shape then
-            for getIdxs, setIdxs in NdArray.nditerPacked(fancyIdxs) do
-                NdArray._setSingle(arr, setIdxs, NdArray._getSingle(vals, getIdxs))
+            for getIdxs, values in NdArray.nditer(fancyIdxs, nil, "C") do
+                NdArray._setSingle(arr, values, NdArray._getSingle(vals, getIdxs))
             end
         else
             for indexed, plain in NdArray._fancyIter(arr, vals, idxs, fancyDims, fancyIdxs) do
@@ -2797,7 +2752,10 @@ function NdArray._prepareFancyIndex(arr, idxs)
 end
 
 function NdArray._getSimple(arr, idxs)
-    local ret = Util.shallowCopyWithMeta(arr)
+    local ret = {}
+    for key, value in pairs(arr) do ret[key] = value end
+    local metatable = getmetatable(arr)
+    if metatable then setmetatable(ret, metatable) end
     local new_shape = {}
     local new_stride = {}
     local offset = arr.offset
@@ -2847,7 +2805,7 @@ function NdArray._getSimple(arr, idxs)
                 if stop == 0 then
                     stop = arr.shape[oldIdx]
                 end
-                local n = math.floor((stop - start) / step) + 1
+                local n = math.max(0, math.ceil((stop - start) / step))
                 new_shape[newIdx] = n
                 size = size * n
                 new_stride[newIdx] = arr.stride[oldIdx] * step
@@ -2903,35 +2861,36 @@ function NdArray._checkFancy(ndim, idxs)
 end
 
 function NdArray._fancyIter(indexed, plain, idxs, fancyDims, fancyIdxs)
-    local setIdxs = Utils.shallowCopy(idxs)
-    for i, d in fancyDims do
-        setIdxs[d] = 1
+    local setIdxs = {}
+    for i, idx in ipairs(idxs) do setIdxs[i] = idx end
+    for _, d in ipairs(fancyDims) do
+        setIdxs[d] = 0
     end
     local baseIndexedArray = NdArray.get(indexed, setIdxs)
     local baseIndexedOffset = baseIndexedArray.offset
 
     local plainIdxs = {}
     local firstFancyDim = fancyDims[1]
-    for i=1, firstFancyDim do
-        plainIdxs[i] = NdArray.sliceAll
-    end
     fancyIdxs = NdArray.broadcastArrays(fancyIdxs)
     local fancyNdim = #fancyIdxs[1].shape
-    for i=firstFancyDim + 1,firstFancyDim + fancyNdim - 1 do
-        plainIdxs[i] = 1
-    end
+    for i = 1, firstFancyDim - 1 do plainIdxs[i] = NdArray.sliceAll end
+    for i = firstFancyDim, firstFancyDim + fancyNdim - 1 do plainIdxs[i] = 0 end
+    for i = firstFancyDim + fancyNdim, #plain.shape do plainIdxs[i] = NdArray.sliceAll end
     local basePlainArray = NdArray.get(plain, plainIdxs)
     local basePlainOffset = basePlainArray.offset
 
-    local nditer = NdArray._nditer(fancyIdxs)
+    local nditer = NdArray.nditer(fancyIdxs, nil, "C")
 
     return function()
-        local fancyGetIdxs, fancySetIdxs = nditer()
+        local loopIdxs, fancyValues = nditer()
+        if not loopIdxs then return nil end
         local indexedOffset = baseIndexedOffset
         local plainOffset = basePlainOffset
-        for i, d in fancyDims do
-            indexedOffset = indexedOffset + fancySetIdxs[i] * indexed.stride[d]
-            plainOffset = plainOffset + fancyGetIdxs[i] * plain.stride[d]
+        for i, d in ipairs(fancyDims) do
+            indexedOffset = indexedOffset + fancyValues[i] * indexed.stride[d]
+        end
+        for axis, index in ipairs(loopIdxs) do
+            plainOffset = plainOffset + index * plain.stride[firstFancyDim + axis - 1]
         end
         baseIndexedArray.offset = indexedOffset
         basePlainArray.offset = plainOffset
@@ -3023,6 +2982,19 @@ local function ndTraversal(shape, strides, baseOffsets, order)
             end
             if position == 1 then done = true; return nil end
         end
+    end
+end
+
+-- Offset-only consumers use the same traversal as nditer.  Keep this
+-- compatibility wrapper so there is one generic coordinate/stride walker.
+function NdArray._strideIter(shape, strides, baseOffsets, order)
+    local iterator = ndTraversal(shape, strides, baseOffsets, order)
+    local dataOffsets = {}
+    return function()
+        local _, offsets = iterator()
+        if not offsets then return nil end
+        for operand, offset in ipairs(offsets) do dataOffsets[operand] = offset + 1 end
+        return dataOffsets
     end
 end
 

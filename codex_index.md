@@ -37,6 +37,9 @@ Use `tests/run_tests.sh --ale` when the local runtime provides the ALE
   `NdArray.coreIter`, and single-output `NdArray.gufunc`. Operands use the
   generic `{shape, stride, data, offset}` representation; user-facing axis
   indices are zero-based and `-1` in `nditer` `opAxes` means newaxis.
+  The generic offset-only `NdArray._strideIter` is now a compatibility
+  adapter over the same traversal used by `nditer`; the specialized
+  `_strideIter1/2/3` helpers remain separate hot-path variants.
 - `tests/ndarray/ndarray_core_iterator_test.lua` — broadcasting, complete
   `opAxes`, reusable core views, exact gufunc core dimensions, and output-axis
   placement.
@@ -68,7 +71,8 @@ layer is read-only and returns reused index/value tables.
   elementwise implementation directly. `reshape` delegates view eligibility
   to `_reshapeIsView`, including compatible non-contiguous stride blocks;
   incompatible broadcasts report the operand shapes in their formatted error
-  messages.
+  messages. Fancy indexing now routes both full and partial index traversal
+  through scalar `nditer`.
 - `Low/Linalg.lua` — NdArray-based partial-pivoted LU, Householder QR,
   Cholesky, vector solves, power iteration, and symmetric QR eigendecomposition.
 - `tests/ndarray/ndarray_math_test.lua` and
