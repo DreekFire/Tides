@@ -1,5 +1,9 @@
 -- paste modules here
 local function MyModule(IModule)
+    -- The build script must emit this local before the pasted child script.
+    -- It keeps the child's ordinary global `function Update(I)` syntax local
+    -- to this module wrapper when _ALE/fenv is unavailable.
+    local Update
     testGlobal = "MyModule"
     local testLocal = "MyModule"
     -- paste script here
@@ -17,6 +21,8 @@ end
 
 
 local function ThyModule(IModule)
+    -- The build script must emit a fresh local for every pasted child script.
+    local Update
     -- paste script here
     testGlobal = "ThyModule"
     local testLocal = "ThyModule"
