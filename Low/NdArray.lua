@@ -1323,3 +1323,441 @@ end
 -- add, sub, mul, div, matmul, comparisons, split, concatenate, stack
 -- sum, prod, mean, max, min, argmax, argmin, count_nonzero, nonzero, where, argwhere
 -- arange, linspace, meshgrid, mgrid, ogrid, diag, eye, expand_dims, squeeze, repeat, tile,
+
+-- Minimal iterator layers for the generic array representation.  These are
+-- intentionally kept independent of the unfinished construction/indexing API
+-- above: an operand only needs shape, stride, data, and an optional offset.
+local function ndCopyShape(shape)
+    assert(type(shape) == "table", "shape must be a table")
+    local result = {}
+    for axis, size in ipairs(shape) do
+        assert(type(size) == "number" and size >= 0 and size == math.floor(size),
+            "shape dimensions must be non-negative integers")
+        result[axis] = size
+    end
+    return result
+end
+
+local function ndSize(shape)
+    local size = 1
+    for _, dimension in ipairs(shape) do size = size * dimension end
+    return size
+end
+
+local function ndAxis(axis, ndim)
+    assert(type(axis) == "number" and axis == math.floor(axis), "axis must be an integer")
+    if axis < 0 then axis = ndim + axis end
+    assert(axis >= 0 and axis < ndim, "axis is out of bounds")
+    return axis
+end
+
+local function ndOrder(order, ndim)
+    if order == nil or order == "C" or order == "K" then
+        local result = {}
+        for axis = 1, ndim do result[axis] = axis end
+        return result
+    end
+    if order == "F" then
+        local result = {}
+        for axis = 1, ndim do result[axis] = ndim - axis + 1 end
+        return result
+    end
+    assert(type(order) == "table" and #order == ndim,
+        "order must be nil, 'C', 'F', or an axis permutation")
+    local zeroBased = false
+    for _, axis in ipairs(order) do zeroBased = zeroBased or axis == 0 end
+    local result, seen = {}, {}
+    for position, axis in ipairs(order) do
+        axis = zeroBased and axis + 1 or axis
+        assert(type(axis) == "number" and axis == math.floor(axis)
+            and axis >= 1 and axis <= ndim, "order contains an invalid axis")
+        assert(not seen[axis], "order must be a permutation")
+        seen[axis] = true
+        result[position] = axis
+    end
+    return result
+end
+
+local function ndTraversal(shape, strides, baseOffsets, order)
+    local ndim = #shape
+    local indices, offsets = {}, {}
+    for axis = 1, ndim do indices[axis] = 0 end
+    for operand, offset in ipairs(baseOffsets) do offsets[operand] = offset or 0 end
+    local axisOrder = ndOrder(order, ndim)
+    local first, done = true, ndSize(shape) == 0
+    return function()
+        if done then return nil end
+        if first then
+            first = false
+            return indices, offsets
+        end
+        if ndim == 0 then done = true; return nil end
+        for position = ndim, 1, -1 do
+            local axis = axisOrder[position]
+            if indices[axis] + 1 < shape[axis] then
+                indices[axis] = indices[axis] + 1
+                for operand, stride in ipairs(strides) do
+                    offsets[operand] = offsets[operand] + stride[axis]
+                end
+                return indices, offsets
+            end
+            indices[axis] = 0
+            for operand, stride in ipairs(strides) do
+                offsets[operand] = offsets[operand] - stride[axis] * (shape[axis] - 1)
+            end
+            if position == 1 then done = true; return nil end
+        end
+    end
+end
+
+local function ndBroadcastShape(shapes)
+    local rank = 0
+    for _, shape in ipairs(shapes) do rank = math.max(rank, #shape) end
+    local result = {}
+    for axis = 1, rank do result[axis] = 1 end
+    for _, shape in ipairs(shapes) do
+        local padding = rank - #shape
+        for sourceAxis, size in ipairs(shape) do
+            local axis = padding + sourceAxis
+            assert(size == 1 or result[axis] == 1 or result[axis] == size,
+                "operands could not be broadcast together")
+            if size ~= 1 then result[axis] = size end
+        end
+    end
+    return result
+end
+
+local function ndAlignedStride(arr, targetShape)
+    local padding = #targetShape - #arr.shape
+    assert(padding >= 0, "iteration shape cannot have lower rank than an operand")
+    local result = {}
+    for axis = 1, #targetShape do
+        local sourceAxis = axis - padding
+        if sourceAxis <= 0 then
+            result[axis] = 0
+        else
+            local size = arr.shape[sourceAxis]
+            assert(size == 1 or size == targetShape[axis],
+                "operand cannot be broadcast to the iteration shape")
+            result[axis] = size == 1 and 0 or arr.stride[sourceAxis]
+        end
+    end
+    return result
+end
+
+local function ndCheckArray(arr)
+    assert(type(arr) == "table" and type(arr.shape) == "table"
+        and type(arr.stride) == "table" and type(arr.data) == "table",
+        "expected an NdArray-like operand")
+end
+
+local function ndOpAxes(arrs, opAxes, iterShape)
+    local ndim = iterShape and #iterShape or 0
+    if opAxes then
+        for operand = 1, #arrs do
+            local mapping = opAxes[operand]
+            if mapping then ndim = math.max(ndim, #mapping) end
+        end
+    else
+        for _, arr in ipairs(arrs) do ndim = math.max(ndim, #arr.shape) end
+    end
+    if iterShape then assert(#iterShape == ndim, "itershape rank does not match op_axes") end
+
+    local shape
+    if iterShape then
+        shape = ndCopyShape(iterShape)
+    elseif opAxes then
+        shape = {}
+    else
+        local shapes = {}
+        for operand, arr in ipairs(arrs) do shapes[operand] = arr.shape end
+        shape = ndBroadcastShape(shapes)
+    end
+    for axis = 1, ndim do shape[axis] = shape[axis] or 1 end
+    local strides = {}
+    for operand, arr in ipairs(arrs) do
+        local mapping = opAxes and opAxes[operand]
+        if mapping then
+            assert(#mapping == ndim, "each op_axes mapping must match iterator rank")
+            local used = {}
+            strides[operand] = {}
+            for iteratorAxis = 1, ndim do
+                local sourceAxis = mapping[iteratorAxis]
+                if sourceAxis ~= -1 then
+                    sourceAxis = ndAxis(sourceAxis, #arr.shape)
+                    assert(not used[sourceAxis], "an operand axis may appear only once in op_axes")
+                    used[sourceAxis] = true
+                    local size = arr.shape[sourceAxis + 1]
+                    if not iterShape then
+                        if size ~= 1 then
+                            assert(shape[iteratorAxis] == 1 or shape[iteratorAxis] == size,
+                                "op_axes dimensions could not be broadcast")
+                            shape[iteratorAxis] = size
+                        end
+                    else
+                        assert(size == 1 or size == shape[iteratorAxis],
+                            "operand cannot be broadcast to itershape")
+                    end
+                    strides[operand][iteratorAxis] = size == 1 and 0 or arr.stride[sourceAxis + 1]
+                else
+                    strides[operand][iteratorAxis] = 0
+                end
+            end
+        else
+            strides[operand] = ndAlignedStride(arr, shape)
+        end
+    end
+    return shape, strides
+end
+
+-- Scalar iterator.  `opAxes[operand][iteratorAxis]` is a complete mapping
+-- (zero-based operand axes, or -1 for newaxis), matching numpy.nditer.
+function NdArray.nditer(arrs, opFlags, order, opAxes, iterShape)
+    if arrs and arrs.shape then arrs = {arrs} end
+    assert(type(arrs) == "table" and #arrs > 0, "nditer requires operands")
+    for _, arr in ipairs(arrs) do ndCheckArray(arr) end
+    local shape, strides = ndOpAxes(arrs, opAxes, iterShape)
+    local offsets = {}
+    for operand, arr in ipairs(arrs) do offsets[operand] = arr.offset or 0 end
+    local iterator = ndTraversal(shape, strides, offsets, order)
+    local values = {}
+    return function()
+        local indices, currentOffsets = iterator()
+        if not indices then return nil end
+        for operand, arr in ipairs(arrs) do
+            values[operand] = arr.data[currentOffsets[operand] + 1]
+        end
+        return indices, values
+    end
+end
+
+local function ndNormalizeCore(arrs, coreAxes, iterShape)
+    local loopShapes, loopAxes = {}, {}
+    local coreShapes, coreStrides = {}, {}
+    for operand, arr in ipairs(arrs) do
+        ndCheckArray(arr)
+        local axes = coreAxes[operand] or {}
+        local selected, normalized = {}, {}
+        for position, axis in ipairs(axes) do
+            axis = ndAxis(axis, #arr.shape)
+            assert(not selected[axis], "an operand core axis may appear only once")
+            selected[axis] = true
+            normalized[position] = axis
+            coreShapes[operand] = coreShapes[operand] or {}
+            coreStrides[operand] = coreStrides[operand] or {}
+            coreShapes[operand][position] = arr.shape[axis + 1]
+            coreStrides[operand][position] = arr.stride[axis + 1]
+        end
+        loopAxes[operand] = {}
+        loopShapes[operand] = {}
+        for axis = 0, #arr.shape - 1 do
+            if not selected[axis] then
+                loopAxes[operand][#loopAxes[operand] + 1] = axis
+                loopShapes[operand][#loopShapes[operand] + 1] = arr.shape[axis + 1]
+            end
+        end
+        coreShapes[operand] = coreShapes[operand] or {}
+        coreStrides[operand] = coreStrides[operand] or {}
+    end
+    local loopShape = iterShape and ndCopyShape(iterShape) or ndBroadcastShape(loopShapes)
+    local loopStrides, offsets = {}, {}
+    for operand, arr in ipairs(arrs) do
+        local axes, shape = loopAxes[operand], loopShapes[operand]
+        local padding = #loopShape - #shape
+        assert(padding >= 0, "loop shape cannot have lower rank than an operand")
+        loopStrides[operand] = {}
+        for globalAxis = 1, #loopShape do
+            local localAxis = globalAxis - padding
+            if localAxis <= 0 then
+                loopStrides[operand][globalAxis] = 0
+            else
+                local size = shape[localAxis]
+                assert(size == 1 or size == loopShape[globalAxis],
+                    "loop dimensions could not be broadcast")
+                loopStrides[operand][globalAxis] = size == 1 and 0
+                    or arr.stride[axes[localAxis] + 1]
+            end
+        end
+        offsets[operand] = arr.offset or 0
+    end
+    return loopShape, loopStrides, offsets, coreShapes, coreStrides
+end
+
+local function ndView(arr, shape, stride, offset)
+    return {shape = shape, stride = stride, data = arr.data, offset = offset, size = ndSize(shape)}
+end
+
+-- Direct-axis core iterator.  Unlike nditer, this preserves the selected
+-- axes as reusable N-D views and broadcasts only the remaining loop axes.
+function NdArray.coreIter(arrs, coreAxes, order, iterShape)
+    if arrs and arrs.shape then arrs = {arrs} end
+    assert(type(arrs) == "table" and #arrs > 0, "coreIter requires operands")
+    coreAxes = coreAxes or {}
+    local loopShape, loopStrides, offsets, coreShapes, coreStrides =
+        ndNormalizeCore(arrs, coreAxes, iterShape)
+    local iterator = ndTraversal(loopShape, loopStrides, offsets, order)
+    local views = {}
+    for operand, arr in ipairs(arrs) do
+        views[operand] = ndView(arr, coreShapes[operand], coreStrides[operand], offsets[operand])
+    end
+    return function()
+        local indices, currentOffsets = iterator()
+        if not indices then return nil end
+        for operand, arr in ipairs(arrs) do
+            views[operand].offset = currentOffsets[operand]
+        end
+        return indices, views
+    end
+end
+
+local function ndParseSignature(signature)
+    assert(type(signature) == "string", "gufunc signature must be a string")
+    local inputText, outputText = signature:match("^%s*(.-)%s*%-%>%s*(.-)%s*$")
+    assert(inputText and outputText, "gufunc signature must contain '->'")
+    local function parsePart(text)
+        local result, consumed = {}, 0
+        for group in text:gmatch("%b()") do
+            local start = text:find(group, consumed + 1, true)
+            assert(start == consumed + 1 or text:sub(consumed + 1, start - 1):match("^%s*,%s*$"),
+                "invalid gufunc signature")
+            consumed = start + #group
+            local dimensions = {}
+            local body = group:sub(2, -2)
+            for label in body:gmatch("[^,%s]+") do
+                assert(label:match("^[%a_][%w_]*$"), "invalid core dimension name")
+                dimensions[#dimensions + 1] = label
+            end
+            result[#result + 1] = dimensions
+        end
+        assert(text:sub(consumed + 1):match("^%s*$"), "invalid gufunc signature")
+        return result
+    end
+    local inputs, outputs = parsePart(inputText), parsePart(outputText)
+    assert(#outputs == 1, "this minimal gufunc wrapper supports one output")
+    return inputs, outputs[1]
+end
+
+local function ndDefaultCoreAxes(arr, rank)
+    assert(rank <= #arr.shape, "operand rank is smaller than its core rank")
+    local result = {}
+    for position = 0, rank - 1 do result[position + 1] = #arr.shape - rank + position end
+    return result
+end
+
+local function ndContiguousArray(shape)
+    local result, stride = {}, {}
+    local step = 1
+    for axis = #shape, 1, -1 do
+        stride[axis] = step
+        step = step * shape[axis]
+    end
+    result.shape, result.stride, result.data, result.offset, result.size = ndCopyShape(shape), stride, {}, 0, step
+    return result
+end
+
+local function ndOutputLayout(loopShape, coreShape, coreAxes)
+    local rank = #loopShape + #coreShape
+    local axes = coreAxes and {} or nil
+    if not axes then
+        axes = {}
+        for position = 0, #coreShape - 1 do axes[position + 1] = #loopShape + position end
+    else
+        for position, axis in ipairs(coreAxes) do axes[position] = ndAxis(axis, rank) end
+        assert(#axes == #coreShape, "output axes must match output core rank")
+        local used = {}
+        for _, axis in ipairs(axes) do assert(not used[axis], "output axes must be unique"); used[axis] = true end
+    end
+    local shape, coreAt = {}, {}
+    for position, axis in ipairs(axes) do coreAt[axis] = position end
+    local loopPosition = 1
+    for axis = 0, rank - 1 do
+        local corePosition = coreAt[axis]
+        if corePosition then shape[axis + 1] = coreShape[corePosition]
+        else shape[axis + 1] = loopShape[loopPosition]; loopPosition = loopPosition + 1 end
+    end
+    return shape, axes
+end
+
+local function ndCopyCore(result, output, outputBase, outputAxes, coreShape)
+    local rank = #coreShape
+    if rank == 0 then
+        assert(type(result) == "number", "scalar gufunc output must be a number")
+        output.data[outputBase + 1] = result
+        return
+    end
+    ndCheckArray(result)
+    assert(#result.shape == rank, "gufunc result rank does not match its signature")
+    for axis = 1, rank do assert(result.shape[axis] == coreShape[axis], "gufunc result shape does not match its signature") end
+    local iterator = ndTraversal(coreShape, {result.stride}, {result.offset or 0}, "C")
+    while true do
+        local indices, offsets = iterator()
+        if not indices then break end
+        local outputOffset = outputBase
+        for axis = 1, rank do outputOffset = outputOffset + indices[axis] * output.stride[outputAxes[axis] + 1] end
+        output.data[outputOffset + 1] = result.data[offsets[1] + 1]
+    end
+end
+
+-- Signature layer.  `axes` is optional and, when supplied, contains one
+-- zero-based core-axis list per input followed by the output core-axis list.
+function NdArray.gufunc(func, signature, axes)
+    assert(type(func) == "function", "gufunc requires a function")
+    local inputDims, outputDims = ndParseSignature(signature)
+    return function(...)
+        local args = {...}
+        assert(#args == #inputDims, "gufunc argument count does not match signature")
+        local inputAxes, outputAxes = {}, nil
+        for operand, dimensions in ipairs(inputDims) do
+            inputAxes[operand] = axes and axes[operand] or ndDefaultCoreAxes(args[operand], #dimensions)
+            assert(#inputAxes[operand] == #dimensions, "input axes do not match signature")
+        end
+        if axes and axes[#inputDims + 1] then outputAxes = axes[#inputDims + 1] end
+
+        local labelSizes = {}
+        for operand, dimensions in ipairs(inputDims) do
+            for position, label in ipairs(dimensions) do
+                local axis = ndAxis(inputAxes[operand][position], #args[operand].shape)
+                local size = args[operand].shape[axis + 1]
+                assert(not labelSizes[label] or labelSizes[label] == size,
+                    "gufunc core dimensions must match exactly")
+                labelSizes[label] = size
+            end
+        end
+        local outputCoreShape = {}
+        for position, label in ipairs(outputDims) do
+            assert(labelSizes[label], "output core dimension is not inferable from inputs")
+            outputCoreShape[position] = labelSizes[label]
+        end
+
+        local loopShape, loopStrides, offsets, coreShapes, coreStrides =
+            ndNormalizeCore(args, inputAxes)
+        for operand, dimensions in ipairs(inputDims) do
+            assert(#coreShapes[operand] == #dimensions)
+        end
+        local outputShape, normalizedOutputAxes = ndOutputLayout(loopShape, outputCoreShape, outputAxes)
+        local output = ndContiguousArray(outputShape)
+        local iterator = ndTraversal(loopShape, loopStrides, offsets, "C")
+        local views = {}
+        for operand, arr in ipairs(args) do
+            views[operand] = ndView(arr, coreShapes[operand], coreStrides[operand], offsets[operand])
+        end
+        while true do
+            local indices, currentOffsets = iterator()
+            if not indices then break end
+            for operand = 1, #args do views[operand].offset = currentOffsets[operand] end
+            local result = func(table.unpack(views, 1, #views))
+            local outputBase = output.offset or 0
+            local outputCoreSet = {}
+            for _, axis in ipairs(normalizedOutputAxes) do outputCoreSet[axis] = true end
+            local loopPosition = 1
+            for axis = 0, #outputShape - 1 do
+                if not outputCoreSet[axis] then
+                    outputBase = outputBase + indices[loopPosition] * output.stride[axis + 1]
+                    loopPosition = loopPosition + 1
+                end
+            end
+            ndCopyCore(result, output, outputBase, normalizedOutputAxes, outputCoreShape)
+        end
+        return output
+    end
+end

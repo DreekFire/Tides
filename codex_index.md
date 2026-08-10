@@ -30,3 +30,28 @@ tests/run_tests.sh
 
 Use `tests/run_tests.sh --ale` when the local runtime provides the ALE
 `setfenv`/`getfenv` extensions and `_ALE` should be defined.
+
+## NdArray iterator layers
+
+- `Low/NdArray.lua` — minimal scalar `NdArray.nditer`, direct-axis
+  `NdArray.coreIter`, and single-output `NdArray.gufunc`. Operands use the
+  generic `{shape, stride, data, offset}` representation; user-facing axis
+  indices are zero-based and `-1` in `nditer` `opAxes` means newaxis.
+- `tests/ndarray/ndarray_core_iterator_test.lua` — broadcasting, complete
+  `opAxes`, reusable core views, exact gufunc core dimensions, and output-axis
+  placement.
+- `tests/run_ndarray_core_iterator_tests.py` — reproducible Lua/lupa test
+  runner; run it with `.venv/bin/python tests/run_ndarray_core_iterator_tests.py`.
+
+The layers are intentionally one-way: scalar iteration does not expose core
+views; `coreIter` takes positional core-axis lists and broadcasts only loop
+axes; `gufunc` parses a signature, validates named core sizes, and delegates
+loop traversal to the same normalized representation. The current scalar
+layer is read-only and returns reused index/value tables.
+
+### NdArray verification workflow
+
+```sh
+.venv/bin/python tests/run_ndarray_core_iterator_tests.py
+.venv/bin/python Util/concat.py
+```
