@@ -187,6 +187,12 @@ function setOverrides(J)
         AimWeaponInDirectionOnSubConstruct = function(I, ret, subconstruct_uid, weapon_idx, ...)
             out.weapons[subconstruct_uid][weapon_idx][currentRunning] = true
         end,
+        FireWeapon = function(I, ret, weapon_idx, ...)
+            out.weapons.main[weapon_idx][currentRunning] = true
+        end,
+        FireWeaponOnSubConstruct = function(I, ret, subconstruct_uid, weapon_idx, ...)
+            out.weapons[subconstruct_uid][weapon_idx][currentRunning] = true
+        end,
         -- subobject control
         SetSpin = function(I, ret, subconstruct_uid, ...)
             out.subobjects[subconstruct_uid][currentRunning] = true
@@ -252,7 +258,8 @@ function checkConflicts(I, tab, prefix)
     local conflicting = {}
     for k, v in pairs(tab) do
         if type(v) == "table" then
-            conflict = conflict or checkConflicts(I, v, prefix..'/'..k)
+            local childConflict = checkConflicts(I, v, prefix..'/'..k)
+            conflict = childConflict or conflict
         else
             conflicting[#conflicting + 1] = v
         end
@@ -297,7 +304,7 @@ function StringUtil.Join(tab, delimiter, start, stop)
   end
   local str = ''
   for i=start, stop do
-    str = str..(tab[i]..delimiter)
+    str = str..(tostring(tab[i])..delimiter)
   end
   return str
 end

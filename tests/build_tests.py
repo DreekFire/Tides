@@ -14,7 +14,11 @@ FOOTER = ROOT / "combined_footer.lua"
 
 def build(output: Path) -> None:
     children = sorted(ROOT.glob("*.lua"))
-    children = [path for path in children if path.name not in {HEADER.name, FOOTER.name, output.name}]
+    children = [
+        path for path in children
+        if path.name not in {HEADER.name, FOOTER.name, output.name}
+        and not path.name.startswith("module_")
+    ]
     if not children:
         raise SystemExit("no child Lua tests found")
 

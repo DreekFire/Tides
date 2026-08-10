@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 BUILD = ROOT / "build_tests.py"
 COMBINED = ROOT / "combined.lua"
+MODULE_BUILD = ROOT / "build_module_tests.py"
+MODULE_COMBINED = ROOT / "module_combined.lua"
 
 
 def main() -> int:
@@ -25,16 +27,18 @@ def main() -> int:
     args = parser.parse_args()
 
     subprocess.run([sys.executable, str(BUILD)], cwd=REPO_ROOT, check=True)
+    subprocess.run([sys.executable, str(MODULE_BUILD)], cwd=REPO_ROOT, check=True)
     try:
         from lupa import LuaRuntime
     except ImportError:
         print("lupa is missing; run: python -m pip install -r tests/requirements.txt", file=sys.stderr)
         return 2
 
-    lua = LuaRuntime(unpack_returned_tuples=True)
-    if args.ale:
-        lua.execute("_ALE = 'local-test'")
-    lua.execute(COMBINED.read_text(encoding="utf-8"))
+    for combined in (COMBINED, MODULE_COMBINED):
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        if args.ale:
+            lua.execute("_ALE = 'local-test'")
+        lua.execute(combined.read_text(encoding="utf-8"))
     return 0
 
 
