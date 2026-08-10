@@ -55,3 +55,23 @@ layer is read-only and returns reused index/value tables.
 .venv/bin/python tests/run_ndarray_core_iterator_tests.py
 .venv/bin/python Util/concat.py
 ```
+
+### NdArray math and linear algebra
+
+- `Low/NdArray.lua` — contiguous constructors, copy/view operations,
+  broadcasting elementwise arithmetic, reductions, and NumPy-like
+  `matMul` with vector promotion and leading-batch broadcasting.
+- `Low/Linalg.lua` — NdArray-based partial-pivoted LU, Householder QR,
+  Cholesky, vector solves, power iteration, and symmetric QR eigendecomposition.
+- `tests/ndarray/ndarray_math_test.lua` and
+  `tests/linalg/linalg_ndarray_test.lua` — numerical reconstruction,
+  broadcasting, solve, and eigendecomposition checks.
+
+### Reusable math verification workflow
+
+```sh
+.venv/bin/python tests/run_ndarray_math_tests.py
+.venv/bin/python tests/run_linalg_ndarray_tests.py
+.venv/bin/python tests/run_ndarray_core_iterator_tests.py
+.venv/bin/python Util/concat.py
+```

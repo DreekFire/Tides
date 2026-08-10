@@ -230,172 +230,283 @@ function Heapq.size(heapq)
   return heapq.size
 end
 
-function Linalg.fft()
+Linalg = Linalg or {}
+
+-- Generic NdArray linear algebra.  Axes and indices exposed by this module
+-- are zero-based, while Lua tables holding permutation entries remain
+-- ordinary one-based tables.
+
+function Linalg.setArrayBackend(backend)
+    Linalg.Array = backend
+end
+
+local function matrixShape(matrix)
+    assert(matrix and matrix.shape and matrix.data, "expected an NdArray")
+    assert(#matrix.shape == 2, "expected a two-dimensional array")
+    return matrix.shape[1], matrix.shape[2]
+end
+
+local function at(matrix, row, col)
+    return matrix.data[(matrix.offset or 0) + row * matrix.stride[1]
+        + col * matrix.stride[2] + 1]
+end
+
+local function put(matrix, row, col, value)
+    matrix.data[(matrix.offset or 0) + row * matrix.stride[1]
+        + col * matrix.stride[2] + 1] = value
+end
+
+local function identity(size)
+    return NdArray.eye(size)
+end
+
+local function swapRows(matrix, first, second, columns)
+    if first == second then return end
+    for col = 0, columns - 1 do
+        local left, right = at(matrix, first, col), at(matrix, second, col)
+        put(matrix, first, col, right)
+        put(matrix, second, col, left)
+    end
+end
 
 function Linalg.dot(a, b)
-  local sum = 0
-  for i, x in ipairs(a) do
-    sum = sum + x * b[i]
-  end
-  return sum
+    assert(#a.shape == 1 and #b.shape == 1, "dot currently requires vectors")
+    assert(a.shape[1] == b.shape[1], "dot dimensions do not match")
+    local result = NdArray.matMul(a, b)
+    return result
 end
 
 function Linalg.norm(a)
-  return math.sqrt(Linalg.dot(a, a))
+    assert(a and a.shape, "norm expects an NdArray")
+    local sum = 0
+    for _, values in NdArray.nditer(a, nil, "C") do sum = sum + values[1] * values[1] end
+    return math.sqrt(sum)
 end
 
--- Matrix solving
--- direct solve using the LU decomposition
-function Linalg.solveLU(P, L, U, b)
-
-end
-
--- direct solve using the QR decomposition
-function Linalg.solveQR(Q, R, b)
-
-end
-
--- preconditioned conjugate gradient using a basic (Jacobi) preconditioner
-function Linalg.solvePCG(A, b, P, x0)
-
-end
-
-
--- Matrix Decompositions
--- LU decomposition with partial pivoting. Returns P, L, U
-function Linalg.lu(mat, pivoting)
-  if pivoting == nil then
-    pivoting = true
-  end
-  local r = 3
-  local c = 3
-  local permutation = {}
-  local U = Matrix3.Matrix3(mat)
-  local L = Matrix3.Identity()
-  for col=1,c do
-    -- find pivot
-    local k = col
-    local pivot = Matrix3.get(U, col, col)
-    if pivoting then
-      for row=col,r do
-        local candidate = Matrix3.get(U, row, col)
-        if math.abs(candidate) > math.abs(pivot) then
-          pivot = candidate
-          k = row
+-- Partial-pivoted Doolittle factorization.  P is returned as a permutation
+-- matrix, so the identity is P*A = L*U.
+function Linalg.lu(matrix, pivoting)
+    local rows, cols = matrixShape(matrix)
+    assert(rows == cols, "lu currently requires a square matrix")
+    pivoting = pivoting ~= false
+    local n, u, l, permutation = rows, NdArray.copy(matrix), identity(rows), {}
+    for row = 0, n - 1 do permutation[row + 1] = row end
+    for col = 0, n - 1 do
+        local pivotRow, pivot = col, math.abs(at(u, col, col))
+        if pivoting then
+            for row = col + 1, n - 1 do
+                local candidate = math.abs(at(u, row, col))
+                if candidate > pivot then pivot, pivotRow = candidate, row end
+            end
         end
-      end
-      Matrix3.rowSwap(U, k, col)
+        assert(pivot > 1e-14, "lu encountered a singular matrix")
+        if pivotRow ~= col then
+            swapRows(u, col, pivotRow, n)
+            permutation[col + 1], permutation[pivotRow + 1] = permutation[pivotRow + 1], permutation[col + 1]
+            for previous = 0, col - 1 do
+                local left, right = at(l, col, previous), at(l, pivotRow, previous)
+                put(l, col, previous, right)
+                put(l, pivotRow, previous, left)
+            end
+        end
+        local diagonal = at(u, col, col)
+        for row = col + 1, n - 1 do
+            local multiplier = at(u, row, col) / diagonal
+            put(l, row, col, multiplier)
+            put(u, row, col, 0)
+            for current = col + 1, n - 1 do
+                put(u, row, current, at(u, row, current) - multiplier * at(u, col, current))
+            end
+        end
     end
-    permutation[col] = k
+    local p = NdArray.zeros({n, n})
+    for row = 0, n - 1 do put(p, row, permutation[row + 1], 1) end
+    return p, l, u
+end
 
-    if not MathUtil.isZero(pivot) then
-      -- eliminate lower entries
-      for row=col+1,r do
-        local multiplier = Matrix3.get(U, row, col) / pivot
-        Matrix3.rowAdd(U, col, row, -multiplier)
-        Matrix3.set(L, row, col, multiplier)
-      end
+local function permutationRows(p, n)
+    if type(p) == "table" and p.shape then
+        local rows, cols = matrixShape(p)
+        assert(rows == n and cols == n, "permutation matrix dimensions do not match")
+        local result = {}
+        for row = 0, n - 1 do
+            local selected
+            for col = 0, n - 1 do if at(p, row, col) ~= 0 then selected = col; break end end
+            assert(selected ~= nil, "invalid permutation matrix")
+            result[row + 1] = selected
+        end
+        return result
     end
-  end
-
-  return permutation, L, U
+    assert(type(p) == "table" and #p == n, "invalid permutation")
+    return p
 end
 
-function Linalg.qr(mat)
-  local r = 3
-  local c = 3
-  local R = NdArray.Array(mat)
-  for col=1, c do
-    local x = NdArray.getCol(R, col)
-    local alpha = Linalg.norm(x) * (x[col] >= 0 and 1 or -1)
-    local u = Vector3.Vector3(x)
-    u[col] = u[col] - alpha
-    local v = u / Linalg.norm(u)
-    for row=col, r do
-      local dot = Linalg.dot(x, v)
-      Matrix3.
+function Linalg.solveLU(p, l, u, b)
+    local n = matrixShape(l)
+    local ur, uc = matrixShape(u)
+    assert(ur == n and uc == n, "LU dimensions do not match")
+    assert(#b.shape == 1 and b.shape[1] == n, "solveLU currently requires a vector right hand side")
+    local permutation = permutationRows(p, n)
+    local y, x = {}, {}
+    for row = 0, n - 1 do
+        local value = b.data[(b.offset or 0) + permutation[row + 1] * b.stride[1] + 1]
+        for col = 0, row - 1 do value = value - at(l, row, col) * y[col + 1] end
+        y[row + 1] = value
+    end
+    for row = n - 1, 0, -1 do
+        local value = y[row + 1]
+        for col = row + 1, n - 1 do value = value - at(u, row, col) * x[col + 1] end
+        x[row + 1] = value / at(u, row, row)
+    end
+    return NdArray.array(x)
 end
 
-function Linalg.svd(mat)
-
+-- Householder QR.  Q is square (m by m), R is m by n, and A = Q*R.
+function Linalg.qr(matrix)
+    local rows, cols = matrixShape(matrix)
+    local q, r = identity(rows), NdArray.copy(matrix)
+    local limit = math.min(rows, cols)
+    for k = 0, limit - 1 do
+        local length, norm = rows - k, 0
+        for i = 0, length - 1 do
+            local value = at(r, k + i, k)
+            norm = norm + value * value
+        end
+        norm = math.sqrt(norm)
+        if norm > 1e-14 then
+            local v, alpha, squared = {}, (at(r, k, k) >= 0 and -norm or norm), 0
+            for i = 0, length - 1 do
+                v[i + 1] = at(r, k + i, k)
+                if i == 0 then v[i + 1] = v[i + 1] - alpha end
+                squared = squared + v[i + 1] * v[i + 1]
+            end
+            local beta = 2 / squared
+            for col = k, cols - 1 do
+                local projection = 0
+                for i = 0, length - 1 do projection = projection + v[i + 1] * at(r, k + i, col) end
+                projection = beta * projection
+                for i = 0, length - 1 do put(r, k + i, col, at(r, k + i, col) - projection * v[i + 1]) end
+            end
+            for row = 0, rows - 1 do
+                local projection = 0
+                for i = 0, length - 1 do projection = projection + at(q, row, k + i) * v[i + 1] end
+                projection = beta * projection
+                for i = 0, length - 1 do put(q, row, k + i, at(q, row, k + i) - projection * v[i + 1]) end
+            end
+        end
+    end
+    return q, r
 end
 
--- finds the eigendecomposition of a symmetric matrix
-function Linalg.eigSymm(mat)
-
+function Linalg.solveQR(q, r, b)
+    local rows, cols = matrixShape(r)
+    local qr, qc = matrixShape(q)
+    assert(qr == qc and qr == rows and cols == rows, "solveQR currently requires a square factorization")
+    assert(#b.shape == 1 and b.shape[1] == rows, "solveQR currently requires a vector right hand side")
+    local y, x = {}, {}
+    for row = 0, rows - 1 do
+        local value = 0
+        for col = 0, rows - 1 do value = value + at(q, col, row) * b.data[(b.offset or 0) + col * b.stride[1] + 1] end
+        y[row + 1] = value
+    end
+    for row = rows - 1, 0, -1 do
+        local value = y[row + 1]
+        for col = row + 1, rows - 1 do value = value - at(r, row, col) * x[col + 1] end
+        x[row + 1] = value / at(r, row, row)
+    end
+    return NdArray.array(x)
 end
 
--- finds the eigendecomposition of a symmetrix 2x2 matrix
-function Linalg.eigSymm2(mat)
-  local a = Matrix3.get(mat, 1, 1)
-  local b = Matrix3.get(mat, 2, 2)
-  local c = Matrix3.get(mat, 2, 1)
-  local delta = math.sqrt(4 * c * c + (a - b) * (a - b))
-  local lambda1 = 0.5 * (a + b - delta)
-  local lambda2 = 0.5 * (a + b + delta)
-  local v1 = {(lambda2 - b) / c, 1}
-  local v2 = {(lambda1 - b) / c, 1}
-  return {lambda1, lambda2}, {v1, v2}
+function Linalg.cholesky(matrix)
+    local rows, cols = matrixShape(matrix)
+    assert(rows == cols, "cholesky requires a square matrix")
+    local l = NdArray.zeros({rows, rows})
+    for row = 0, rows - 1 do
+        for col = 0, row do
+            local value = at(matrix, row, col)
+            for k = 0, col - 1 do value = value - at(l, row, k) * at(l, col, k) end
+            if row == col then
+                assert(value > 0, "cholesky requires a positive-definite matrix")
+                put(l, row, col, math.sqrt(value))
+            else
+                put(l, row, col, value / at(l, col, col))
+            end
+        end
+    end
+    return l
 end
 
--- finds the eigendecomposition of a symmetrix 3x3 matrix
-function Linalg.eigSymm3(mat)
-  local a = Matrix3.get(mat, 1, 1)
-  local b = Matrix3.get(mat, 2, 2)
-  local c = Matrix3.get(mat, 3, 3)
-  local d = Matrix3.get(mat, 2, 1)
-  local e = Matrix3.get(mat, 3, 2)
-  local f = Matrix3.get(mat, 3, 1)
-    local x1 = a * a + b * b + c * c - a * b - a * c - b * c + 3 * (d * d + f * f + e * e)
-  local abc = 2 * a - b - c
-  local bac = 2 * b - a - c
-  local cab = 2 * c - a - b
-  local x2 = -abc * bac * cab + 9 * (cab * d * d + bac * f * f + abc * e * e) - 54 * d * e * f
-  local phi = math.pi * 0.5
-  if x2 > 0 then
-    phi = math.atan(math.sqrt(4 * x1 * x1 * x1 - x2 * x2) / x2)
-  elseif x2 < 0 then
-    phi = math.atan(math.sqrt(4 * x1 * x1 * x1 - x2 * x2) / x2) + math.pi
-  end
-  local base = a + b + c
-  local lambdas = {
-    (base - 2 * math.sqrt(x1) * math.cos(phi / 3)) / 3,
-    (base + 2 * math.sqrt(x1) * math.cos((phi - math.pi) / 3)) / 3,
-    (base + 2 * math.sqrt(x1) * math.cos((phi + math.pi) / 3)) / 3,
-  }
-  local eigvecs = {}
-  for i=1,3 do
-    local m = (d * (c - lambdas[i]) - e * f) / (f * (b - lambdas[i]) - d * e)
-    eigvecs[i] = {(lambdas[i] - c - e * m) / f, m, 1}
-  end
-  return lambdas, eigvecs
+local function offDiagonalNorm(matrix)
+    local n = matrixShape(matrix)
+    local result = 0
+    for row = 0, n - 1 do for col = 0, n - 1 do if row ~= col then
+        local value = at(matrix, row, col); result = result + value * value
+    end end end
+    return math.sqrt(result)
 end
 
--- Partial algorithms for large matrices
--- finds top eigenpair using the power method
--- only accepts a single matrix
-function Linalg.eigTop(mat, iterLim)
-  iterLim = iterLim or 50
-  local ndim = #mat.shape
-  assert(ndim >= 2 and mat.shape[ndim] == mat.shape[ndim-1])
-  local n = mat.shape[ndim]
-  local v = {}
-  for i=1,n do
-    v[i] = math.random()
-  end
-  v = NdArray.Array(v)
-  for i=1, iterLim do
-    v = v / Linalg.norm(v)
-    v = NdArray.MatMul(mat, v)
-  end
-  return Linalg.norm(v), v
+-- Symmetric QR iteration.  Eigenvectors are returned as columns of vectors.
+function Linalg.eigQr(matrix, iterLim, tolerance)
+    local rows, cols = matrixShape(matrix)
+    assert(rows == cols, "eigQr requires a square matrix")
+    iterLim, tolerance = iterLim or 100, tolerance or 1e-10
+    local current, vectors, converged = NdArray.copy(matrix), identity(rows), false
+    for _ = 1, iterLim do
+        local q, r = Linalg.qr(current)
+        current = NdArray.matMul(r, q)
+        vectors = NdArray.matMul(vectors, q)
+        if offDiagonalNorm(current) < tolerance then converged = true; break end
+    end
+    local order = {}
+    for i = 0, rows - 1 do order[i + 1] = i end
+    table.sort(order, function(a, b) return at(current, a, a) > at(current, b, b) end)
+    local values, sortedVectors = {}, NdArray.zeros({rows, rows})
+    for newColumn = 0, rows - 1 do
+        local oldColumn = order[newColumn + 1]
+        values[newColumn + 1] = at(current, oldColumn, oldColumn)
+        for row = 0, rows - 1 do put(sortedVectors, row, newColumn, at(vectors, row, oldColumn)) end
+    end
+    return values, sortedVectors, {converged = converged, iterations = iterLim}
 end
 
--- finds top k eigenspace using subspace iteration
-function Linalg.eigTopK(mat, k)
-  -- todo
-  return nil
+function Linalg.eigSymm(matrix, iterLim, tolerance)
+    return Linalg.eigQr(matrix, iterLim, tolerance)
 end
+
+function Linalg.eigTop(matrix, iterLim)
+    local rows, cols = matrixShape(matrix)
+    assert(rows == cols, "eigTop requires a square matrix")
+    local vector = NdArray.ones({rows})
+    local length = Linalg.norm(vector)
+    for i = 1, vector.size do vector.data[i] = vector.data[i] / length end
+    for _ = 1, (iterLim or 50) do
+        local nextVector = NdArray.matMul(matrix, vector)
+        local nextLength = Linalg.norm(nextVector)
+        assert(nextLength > 1e-14, "power iteration reached a zero vector")
+        for i = 1, nextVector.size do nextVector.data[i] = nextVector.data[i] / nextLength end
+        vector = nextVector
+    end
+    return Linalg.dot(vector, NdArray.matMul(matrix, vector)), vector
+end
+
+function Linalg.solvePCG()
+    error("solvePCG is not implemented")
+end
+
+function Linalg.fft()
+    error("fft is not implemented")
+end
+
+function Linalg.svd()
+    error("svd is not implemented")
+end
+
+function Linalg.eigTopK()
+    error("eigTopK is not implemented")
+end
+
+Linalg.eigSymm2 = Linalg.eigSymm
+Linalg.eigSymm3 = Linalg.eigSymm
 
 -- A LinkedList is a chain of elements where each element contains a reference to the next one in the list.
 -- This is a doubly linked list so each element also contains a reference to the previous element.
@@ -2824,11 +2935,6 @@ function NdArray._fancyIter(indexed, plain, idxs, fancyDims, fancyIdxs)
     end
 end
 
---todo:
--- add, sub, mul, div, matmul, comparisons, split, concatenate, stack
--- sum, prod, mean, max, min, argmax, argmin, count_nonzero, nonzero, where, argwhere
--- arange, linspace, meshgrid, mgrid, ogrid, diag, eye, expand_dims, squeeze, repeat, tile,
-
 -- Minimal iterator layers for the generic array representation.  These are
 -- intentionally kept independent of the unfinished construction/indexing API
 -- above: an operand only needs shape, stride, data, and an optional offset.
@@ -2968,12 +3074,16 @@ local function ndOpAxes(arrs, opAxes, iterShape)
     end
     if iterShape then assert(#iterShape == ndim, "itershape rank does not match op_axes") end
 
-    local shape = iterShape and ndCopyShape(iterShape)
-        or (opAxes and {} or ndBroadcastShape((function()
-            local shapes = {}
-            for operand, arr in ipairs(arrs) do shapes[operand] = arr.shape end
-            return shapes
-        end)()))
+    local shape
+    if iterShape then
+        shape = ndCopyShape(iterShape)
+    elseif opAxes then
+        shape = {}
+    else
+        local shapes = {}
+        for operand, arr in ipairs(arrs) do shapes[operand] = arr.shape end
+        shape = ndBroadcastShape(shapes)
+    end
     for axis = 1, ndim do shape[axis] = shape[axis] or 1 end
     local strides = {}
     for operand, arr in ipairs(arrs) do
@@ -3261,6 +3371,552 @@ function NdArray.gufunc(func, signature, axes)
         end
         return output
     end
+end
+
+-- The original WIP API above predates the core-axis iterator and contains
+-- several partially implemented operations.  Keep the public names, but
+-- implement the small numerical core in terms of the new view/iterator
+-- primitives so that all hot loops use offsets and strides directly.
+
+local function ndAssertShape(shape)
+    assert(type(shape) == "table", "shape must be a table")
+    for axis, size in ipairs(shape) do
+        assert(type(size) == "number" and size >= 0 and size == math.floor(size),
+            "shape dimensions must be non-negative integers")
+        shape[axis] = size
+    end
+end
+
+local function ndFlatten(value, data)
+    if type(value) ~= "table" then
+        data[#data + 1] = value
+        return
+    end
+    for i = 1, #value do ndFlatten(value[i], data) end
+end
+
+local function ndInferShape(value)
+    if type(value) ~= "table" then return {} end
+    local childShape = ndInferShape(value[1])
+    for i = 2, #value do
+        local other = ndInferShape(value[i])
+        assert(#other == #childShape, "array values must be rectangular")
+        for axis = 1, #childShape do
+            assert(other[axis] == childShape[axis], "array values must be rectangular")
+        end
+    end
+    local shape = {#value}
+    for axis = 1, #childShape do shape[#shape + 1] = childShape[axis] end
+    return shape
+end
+
+function NdArray.array(value)
+    if type(value) == "table" and value.shape and value.data then
+        return NdArray.copy(value)
+    end
+    local shape = ndInferShape(value)
+    local data = {}
+    ndFlatten(value, data)
+    local result = ndContiguousArray(shape)
+    result.data = data
+    assert(#data == result.size, "array values must be rectangular")
+    return result
+end
+
+NdArray.Array = NdArray.array
+
+function NdArray.empty(shape)
+    ndAssertShape(shape)
+    return ndContiguousArray(ndCopyShape(shape))
+end
+
+function NdArray.full(shape, fill)
+    local result = NdArray.empty(shape)
+    for i = 1, result.size do result.data[i] = fill end
+    return result
+end
+
+function NdArray.zeros(shape) return NdArray.full(shape, 0) end
+function NdArray.ones(shape) return NdArray.full(shape, 1) end
+function NdArray.zerosLike(arr) return NdArray.zeros(arr.shape) end
+function NdArray.onesLike(arr) return NdArray.ones(arr.shape) end
+function NdArray.fullLike(arr, fill) return NdArray.full(arr.shape, fill) end
+function NdArray.emptyLike(arr) return NdArray.empty(arr.shape) end
+
+function NdArray.arange(a, b, step)
+    assert(type(a) == "number", "arange requires at least one number")
+    local start, stop = 0, a
+    if b ~= nil then start, stop = a, b end
+    step = step or (start <= stop and 1 or -1)
+    assert(step ~= 0, "arange step must not be zero")
+    local data = {}
+    local value = start
+    if step > 0 then
+        while value < stop do data[#data + 1] = value; value = value + step end
+    else
+        while value > stop do data[#data + 1] = value; value = value + step end
+    end
+    return NdArray.array(data)
+end
+
+function NdArray.copy(arr)
+    ndCheckArray(arr)
+    local result = NdArray.empty(arr.shape)
+    local position = 1
+    for _, values in NdArray.nditer(arr, nil, "C") do
+        result.data[position] = values[1]
+        position = position + 1
+    end
+    return result
+end
+
+function NdArray.transpose(arr, axis1, axis2)
+    ndCheckArray(arr)
+    local rank = #arr.shape
+    local shape, stride = {}, {}
+    if axis1 == nil then
+        for axis = 1, rank do
+            shape[axis] = arr.shape[rank - axis + 1]
+            stride[axis] = arr.stride[rank - axis + 1]
+        end
+    else
+        axis1, axis2 = ndAxis(axis1, rank), ndAxis(axis2, rank)
+        for axis = 1, rank do shape[axis], stride[axis] = arr.shape[axis], arr.stride[axis] end
+        shape[axis1 + 1], shape[axis2 + 1] = shape[axis2 + 1], shape[axis1 + 1]
+        stride[axis1 + 1], stride[axis2 + 1] = stride[axis2 + 1], stride[axis1 + 1]
+    end
+    return ndView(arr, shape, stride, arr.offset or 0)
+end
+
+function NdArray.permuteDims(arr, dims)
+    ndCheckArray(arr)
+    assert(#dims == #arr.shape, "permutation rank mismatch")
+    local shape, stride, seen = {}, {}, {}
+    for position, axis in ipairs(dims) do
+        axis = ndAxis(axis, #arr.shape)
+        assert(not seen[axis], "permutation axes must be unique")
+        seen[axis] = true
+        shape[position], stride[position] = arr.shape[axis + 1], arr.stride[axis + 1]
+    end
+    return ndView(arr, shape, stride, arr.offset or 0)
+end
+
+local function ndElementwise(func, ...)
+    local operands = {...}
+    assert(#operands > 0, "elementwise operation requires operands")
+    local shapes = {}
+    for i, operand in ipairs(operands) do ndCheckArray(operand); shapes[i] = operand.shape end
+    local shape = ndBroadcastShape(shapes)
+    local result, args = ndContiguousArray(shape), {}
+    local position = 1
+    for _, values in NdArray.nditer(operands, nil, "C") do
+        for i = 1, #operands do args[i] = values[i] end
+        result.data[position] = func(table.unpack(args, 1, #operands))
+        position = position + 1
+    end
+    return result
+end
+
+NdArray._elementwise = ndElementwise
+function NdArray.add(a, b) return ndElementwise(function(x, y) return x + y end, a, b) end
+function NdArray.sub(a, b) return ndElementwise(function(x, y) return x - y end, a, b) end
+function NdArray.mul(a, b) return ndElementwise(function(x, y) return x * y end, a, b) end
+function NdArray.div(a, b) return ndElementwise(function(x, y) return x / y end, a, b) end
+function NdArray.map(func, arr)
+    ndCheckArray(arr)
+    local result = ndContiguousArray(arr.shape)
+    local position = 1
+    for _, values in NdArray.nditer(arr, nil, "C") do
+        result.data[position] = func(values[1])
+        position = position + 1
+    end
+    return result
+end
+function NdArray.sqrt(arr) return NdArray.map(math.sqrt, arr) end
+function NdArray.negative(arr) return NdArray.map(function(x) return -x end, arr) end
+
+-- Matrix multiplication follows numpy.matmul for vector and matrix operands.
+-- The last two axes are matrix axes; all preceding axes are broadcast.
+function NdArray.matMul(left, right)
+    ndCheckArray(left); ndCheckArray(right)
+    local leftRank, rightRank = #left.shape, #right.shape
+    assert(leftRank > 0 and rightRank > 0, "matMul operands must have at least one dimension")
+    local leftVector, rightVector = leftRank == 1, rightRank == 1
+    local a, b = left, right
+    if leftVector then
+        a = ndView(left, {1, left.shape[1]}, {0, left.stride[1]}, left.offset or 0)
+    end
+    if rightVector then
+        b = ndView(right, {right.shape[1], 1}, {right.stride[1], 0}, right.offset or 0)
+    end
+    assert(a.shape[#a.shape] == b.shape[#b.shape - 1], "matMul core dimensions do not match")
+    local aAxes, bAxes = {#a.shape - 2, #a.shape - 1}, {#b.shape - 2, #b.shape - 1}
+    local loopShape = ndNormalizeCore({a, b}, {aAxes, bAxes})
+    local n, k, m = a.shape[#a.shape - 1], a.shape[#a.shape], b.shape[#b.shape]
+    local outputShape = ndCopyShape(loopShape)
+    if leftVector and rightVector then
+        local iterator = NdArray.coreIter({a, b}, {aAxes, bAxes})
+        local _, views = iterator()
+        local sum = 0
+        for t = 0, k - 1 do
+            sum = sum + views[1].data[views[1].offset + t * views[1].stride[2] + 1]
+                * views[2].data[views[2].offset + t * views[2].stride[1] + 1]
+        end
+        return sum
+    end
+    if leftVector then outputShape[#outputShape + 1] = m
+    elseif rightVector then outputShape[#outputShape + 1] = n
+    else outputShape[#outputShape + 1], outputShape[#outputShape + 2] = n, m end
+    local result = ndContiguousArray(outputShape)
+    local iterator = NdArray.coreIter({a, b}, {aAxes, bAxes})
+    local indices, views = iterator()
+    while indices do
+        local outputBase = result.offset or 0
+        for axis = 1, #loopShape do outputBase = outputBase + indices[axis] * result.stride[axis] end
+        if leftVector then
+            for col = 0, m - 1 do
+                local sum = 0
+                for t = 0, k - 1 do
+                    sum = sum + views[1].data[views[1].offset + t * views[1].stride[2] + 1]
+                        * views[2].data[views[2].offset + t * views[2].stride[1] + col * views[2].stride[2] + 1]
+                end
+                result.data[outputBase + col * result.stride[#result.shape] + 1] = sum
+            end
+        elseif rightVector then
+            for row = 0, n - 1 do
+                local sum = 0
+                for t = 0, k - 1 do
+                    sum = sum + views[1].data[views[1].offset + row * views[1].stride[1] + t * views[1].stride[2] + 1]
+                        * views[2].data[views[2].offset + t * views[2].stride[1] + 1]
+                end
+                result.data[outputBase + row * result.stride[#result.shape] + 1] = sum
+            end
+        else
+            for row = 0, n - 1 do
+                for col = 0, m - 1 do
+                    local sum = 0
+                    for t = 0, k - 1 do
+                        sum = sum + views[1].data[views[1].offset + row * views[1].stride[1] + t * views[1].stride[2] + 1]
+                            * views[2].data[views[2].offset + t * views[2].stride[1] + col * views[2].stride[2] + 1]
+                    end
+                    result.data[outputBase + row * result.stride[#result.shape - 1] + col * result.stride[#result.shape] + 1] = sum
+                end
+            end
+        end
+        indices, views = iterator()
+    end
+    return result
+end
+
+NdArray.matmul = NdArray.matMul
+NdArray.MatMul = NdArray.matMul
+
+local function ndReduce(func, arr, axis, keepdim)
+    ndCheckArray(arr)
+    if axis == nil then
+        local result, seen = nil, false
+        for _, values in NdArray.nditer(arr, nil, "C") do
+            result, seen = result == nil and values[1] or func(result, values[1]), true
+        end
+        assert(seen, "cannot reduce an empty array")
+        return result
+    end
+    axis = ndAxis(axis, #arr.shape)
+    local outputShape = {}
+    for sourceAxis = 0, #arr.shape - 1 do
+        if keepdim or sourceAxis ~= axis then
+            outputShape[#outputShape + 1] = sourceAxis == axis and 1 or arr.shape[sourceAxis + 1]
+        end
+    end
+    local output = ndContiguousArray(outputShape)
+    local iterator = NdArray.coreIter({arr}, {{axis}})
+    local indices, views = iterator()
+    while indices do
+        local view = views[1]
+        local value
+        for i = 0, view.shape[1] - 1 do
+            local current = view.data[view.offset + i * view.stride[1] + 1]
+            value = value == nil and current or func(value, current)
+        end
+        assert(value ~= nil, "cannot reduce an empty axis")
+        local outputOffset, loopPosition = output.offset or 0, 1
+        for sourceAxis = 0, #arr.shape - 1 do
+            if sourceAxis ~= axis then
+                local targetAxis = keepdim and sourceAxis or sourceAxis - (sourceAxis > axis and 1 or 0)
+                outputOffset = outputOffset + indices[loopPosition] * output.stride[targetAxis + 1]
+                loopPosition = loopPosition + 1
+            end
+        end
+        output.data[outputOffset + 1] = value
+        indices, views = iterator()
+    end
+    return output
+end
+
+NdArray.reduce = ndReduce
+function NdArray.sum(arr, axis, keepdim) return ndReduce(function(x, y) return x + y end, arr, axis, keepdim) end
+function NdArray.prod(arr, axis, keepdim) return ndReduce(function(x, y) return x * y end, arr, axis, keepdim) end
+function NdArray.max(arr, axis, keepdim) return ndReduce(math.max, arr, axis, keepdim) end
+function NdArray.min(arr, axis, keepdim) return ndReduce(math.min, arr, axis, keepdim) end
+function NdArray.mean(arr, axis, keepdim)
+    local result = NdArray.sum(arr, axis, keepdim)
+    local count = axis == nil and arr.size or arr.shape[ndAxis(axis, #arr.shape) + 1]
+    if type(result) == "number" then return result / count end
+    for i = 1, result.size do result.data[i] = result.data[i] / count end
+    return result
+end
+
+function NdArray.eye(size)
+    local result = NdArray.zeros({size, size})
+    for i = 0, size - 1 do result.data[i * size + i + 1] = 1 end
+    return result
+end
+
+NdArray.identity = NdArray.eye
+
+function NdArray._callbackIter(func, dst, ...)
+    ndCheckArray(dst)
+    local operands = {dst, ...}
+    local coreAxes = {}
+    for i = 1, #operands do coreAxes[i] = {} end
+    local iterator = NdArray.coreIter(operands, coreAxes)
+    local indices, views = iterator()
+    while indices do
+        local args = {}
+        for i = 2, #views do args[i - 1] = views[i].data[views[i].offset + 1] end
+        views[1].data[views[1].offset + 1] = func(table.unpack(args, 1, #args))
+        indices, views = iterator()
+    end
+    return dst
+end
+
+local function ndComparison(func, a, b) return ndElementwise(func, a, b) end
+NdArray.equal = function(a, b) return ndComparison(function(x, y) return x == y end, a, b) end
+NdArray.notEqual = function(a, b) return ndComparison(function(x, y) return x ~= y end, a, b) end
+NdArray.less = function(a, b) return ndComparison(function(x, y) return x < y end, a, b) end
+NdArray.lessEqual = function(a, b) return ndComparison(function(x, y) return x <= y end, a, b) end
+NdArray.greater = function(a, b) return ndComparison(function(x, y) return x > y end, a, b) end
+NdArray.greaterEqual = function(a, b) return ndComparison(function(x, y) return x >= y end, a, b) end
+
+function NdArray.broadcastShapes(shapes) return ndBroadcastShape(shapes) end
+function NdArray.broadcastTo(arr, shape)
+    ndCheckArray(arr)
+    local target = ndCopyShape(shape)
+    assert(ndBroadcastShape({arr.shape, target})[1] ~= nil or #target == 0,
+        "invalid broadcast shape")
+    local stride = ndAlignedStride(arr, target)
+    return ndView(arr, target, stride, arr.offset or 0)
+end
+function NdArray.broadcastArrays(arrays)
+    if arrays and arrays.shape then arrays = {arrays} end
+    local shapes = {}
+    for i, arr in ipairs(arrays) do ndCheckArray(arr); shapes[i] = arr.shape end
+    local target = ndBroadcastShape(shapes)
+    local result = {}
+    for i, arr in ipairs(arrays) do result[i] = NdArray.broadcastTo(arr, target) end
+    return table.unpack(result, 1, #result)
+end
+
+function NdArray.reshape(arr, ...)
+    ndCheckArray(arr)
+    local requested = {...}
+    if #requested == 1 and type(requested[1]) == "table" then requested = requested[1] end
+    local shape, unknown, knownSize = {}, nil, 1
+    for axis, dimension in ipairs(requested) do
+        if dimension == -1 then
+            assert(not unknown, "reshape permits only one inferred dimension")
+            unknown = axis; shape[axis] = -1
+        else
+            assert(dimension >= 0 and dimension == math.floor(dimension), "invalid reshape dimension")
+            shape[axis], knownSize = dimension, knownSize * dimension
+        end
+    end
+    if unknown then
+        assert(knownSize > 0 and arr.size % knownSize == 0, "reshape size is incompatible")
+        shape[unknown] = arr.size / knownSize
+    else
+        assert(knownSize == arr.size, "reshape size is incompatible")
+    end
+    local contiguous = true
+    local expected = 1
+    for axis = #arr.shape, 1, -1 do
+        if arr.shape[axis] ~= 1 and arr.stride[axis] ~= expected then contiguous = false end
+        expected = expected * arr.shape[axis]
+    end
+    local source = contiguous and arr or NdArray.copy(arr)
+    local resultStride, step = {}, 1
+    for axis = #shape, 1, -1 do resultStride[axis], step = step, step * shape[axis] end
+    return ndView(source, shape, resultStride, source.offset or 0)
+end
+
+function NdArray.ravel(arr) return NdArray.reshape(arr, {arr.size}) end
+function NdArray.flatten(arr) return NdArray.copy(NdArray.reshape(arr, {arr.size})) end
+
+local function ndWriteTraversal(source, output, axisOffset, axisLength, axis)
+    local iterator = ndTraversal(source.shape, {source.stride}, {source.offset or 0}, "C")
+    while true do
+        local indices, offsets = iterator()
+        if not indices then break end
+        local outputOffset = output.offset or 0
+        for dimension = 0, #source.shape - 1 do
+            local targetDimension = dimension == axis and axisOffset + indices[dimension + 1] or indices[dimension + 1]
+            outputOffset = outputOffset + targetDimension * output.stride[dimension + 1]
+        end
+        output.data[outputOffset + 1] = source.data[offsets[1] + 1]
+    end
+end
+
+function NdArray.concatenate(arrays, axis)
+    assert(type(arrays) == "table" and #arrays > 0, "concatenate requires arrays")
+    ndCheckArray(arrays[1])
+    axis = ndAxis(axis or 0, #arrays[1].shape)
+    local shape = ndCopyShape(arrays[1].shape)
+    shape[axis + 1] = 0
+    for _, arr in ipairs(arrays) do
+        ndCheckArray(arr); assert(#arr.shape == #shape, "concatenate ranks must match")
+        for dimension = 1, #shape do
+            if dimension ~= axis + 1 then assert(arr.shape[dimension] == arrays[1].shape[dimension], "concatenate shapes must match") end
+        end
+        shape[axis + 1] = shape[axis + 1] + arr.shape[axis + 1]
+    end
+    local result, offset = ndContiguousArray(shape), 0
+    for _, arr in ipairs(arrays) do
+        ndWriteTraversal(arr, result, offset, arr.shape[axis + 1], axis)
+        offset = offset + arr.shape[axis + 1]
+    end
+    return result
+end
+
+function NdArray.stack(arrays, axis)
+    assert(type(arrays) == "table" and #arrays > 0, "stack requires arrays")
+    local expanded = {}
+    for i, arr in ipairs(arrays) do expanded[i] = NdArray.expandDims(arr, axis or 0) end
+    return NdArray.concatenate(expanded, axis or 0)
+end
+
+function NdArray.expandDims(arr, axis)
+    ndCheckArray(arr)
+    axis = axis or 0
+    if axis < 0 then axis = #arr.shape + axis + 1 end
+    assert(axis >= 0 and axis <= #arr.shape, "axis is out of bounds")
+    local shape, stride = {}, {}
+    for dimension = 0, #arr.shape do
+        if dimension == axis then shape[dimension + 1], stride[dimension + 1] = 1, 0
+        else
+            local source = dimension > axis and dimension or dimension + 1
+            shape[dimension + 1], stride[dimension + 1] = arr.shape[source], arr.stride[source]
+        end
+    end
+    return ndView(arr, shape, stride, arr.offset or 0)
+end
+
+function NdArray.squeeze(arr, axis)
+    ndCheckArray(arr)
+    local remove = {}
+    if axis == nil then
+        for dimension, size in ipairs(arr.shape) do if size == 1 then remove[dimension] = true end end
+    else
+        axis = ndAxis(axis, #arr.shape); assert(arr.shape[axis + 1] == 1, "squeeze axis must have size one"); remove[axis + 1] = true
+    end
+    local shape, stride = {}, {}
+    for dimension = 1, #arr.shape do
+        if not remove[dimension] then shape[#shape + 1], stride[#stride + 1] = arr.shape[dimension], arr.stride[dimension] end
+    end
+    return ndView(arr, shape, stride, arr.offset or 0)
+end
+
+function NdArray.diag(arr, offset)
+    ndCheckArray(arr); offset = offset or 0
+    if #arr.shape == 1 then
+        local size = arr.shape[1] + math.abs(offset)
+        local result = NdArray.zeros({size, size})
+        for i = 0, arr.shape[1] - 1 do
+            local row, col = offset >= 0 and i or i - offset, offset >= 0 and i + offset or i
+            result.data[row * size + col + 1] = arr.data[(arr.offset or 0) + i * arr.stride[1] + 1]
+        end
+        return result
+    end
+    assert(#arr.shape == 2, "diag requires a vector or matrix")
+    local startRow, startCol = offset < 0 and -offset or 0, offset > 0 and offset or 0
+    local length = math.max(0, math.min(arr.shape[1] - startRow, arr.shape[2] - startCol))
+    local result = NdArray.empty({length})
+    for i = 0, length - 1 do
+        result.data[i + 1] = arr.data[(arr.offset or 0) + (startRow + i) * arr.stride[1]
+            + (startCol + i) * arr.stride[2] + 1]
+    end
+    return result
+end
+
+local function ndArgReduce(comparison, arr, axis, keepdim)
+    ndCheckArray(arr)
+    if axis == nil then
+        local best, index, position = nil, nil, 0
+        for _, values in NdArray.nditer(arr, nil, "C") do
+            if best == nil or comparison(values[1], best) then best, index = values[1], position end
+            position = position + 1
+        end
+        assert(index ~= nil, "cannot reduce an empty array")
+        return index
+    end
+    axis = ndAxis(axis, #arr.shape)
+    local outputShape = {}
+    for dimension = 0, #arr.shape - 1 do
+        if keepdim or dimension ~= axis then outputShape[#outputShape + 1] = dimension == axis and 1 or arr.shape[dimension + 1] end
+    end
+    local result = ndContiguousArray(outputShape)
+    local iterator = NdArray.coreIter({arr}, {{axis}})
+    local indices, views = iterator()
+    while indices do
+        local view, best, bestIndex = views[1], nil, nil
+        for i = 0, view.shape[1] - 1 do
+            local value = view.data[view.offset + i * view.stride[1] + 1]
+            if best == nil or comparison(value, best) then best, bestIndex = value, i end
+        end
+        assert(bestIndex ~= nil, "cannot reduce an empty axis")
+        local outputOffset, loopPosition = 0, 1
+        for dimension = 0, #arr.shape - 1 do if dimension ~= axis then
+            local target = keepdim and dimension or dimension - (dimension > axis and 1 or 0)
+            outputOffset = outputOffset + indices[loopPosition] * result.stride[target + 1]; loopPosition = loopPosition + 1
+        end end
+        result.data[outputOffset + 1] = bestIndex
+        indices, views = iterator()
+    end
+    return result
+end
+
+NdArray.argmax = function(arr, axis, keepdim) return ndArgReduce(function(x, y) return x > y end, arr, axis, keepdim) end
+NdArray.argmin = function(arr, axis, keepdim) return ndArgReduce(function(x, y) return x < y end, arr, axis, keepdim) end
+function NdArray.countNonzero(arr)
+    local count = 0
+    for _, values in NdArray.nditer(arr, nil, "C") do if values[1] ~= 0 then count = count + 1 end end
+    return count
+end
+
+function NdArray.nonzero(arr)
+    ndCheckArray(arr)
+    local coordinates = {}
+    for axis = 1, #arr.shape do coordinates[axis] = {} end
+    for indices, values in NdArray.nditer(arr, nil, "C") do
+        if values[1] ~= 0 then for axis = 1, #arr.shape do coordinates[axis][#coordinates[axis] + 1] = indices[axis] end end
+    end
+    for axis = 1, #coordinates do coordinates[axis] = NdArray.array(coordinates[axis]) end
+    return table.unpack(coordinates, 1, #coordinates)
+end
+
+function NdArray.argwhere(arr)
+    ndCheckArray(arr)
+    local rows = {}
+    for indices, values in NdArray.nditer(arr, nil, "C") do
+        if values[1] ~= 0 then local row = {}; for axis = 1, #arr.shape do row[axis] = indices[axis] end; rows[#rows + 1] = row end
+    end
+    return NdArray.array(rows)
+end
+
+function NdArray.where(condition, ifTrue, ifFalse)
+    assert(ifTrue and ifFalse, "where requires condition, true, and false operands")
+    return ndElementwise(function(conditionValue, trueValue, falseValue)
+        return conditionValue and trueValue or falseValue
+    end, condition, ifTrue, ifFalse)
 end
 
 --[[
