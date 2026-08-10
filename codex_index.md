@@ -63,7 +63,9 @@ layer is read-only and returns reused index/value tables.
   reductions, and NumPy-like `matMul` are retained; iterator-compatible fixes
   are made in those definitions. The later unique APIs include
   `coreIter`, `gufunc`, concatenate/stack/expandDims/squeeze/diag, and
-  arg-reductions.
+  arg-reductions. `reshape` delegates view eligibility to `_reshapeIsView`,
+  including compatible non-contiguous stride blocks; incompatible broadcasts
+  report the operand shapes in their formatted error messages.
 - `Low/Linalg.lua` — NdArray-based partial-pivoted LU, Householder QR,
   Cholesky, vector solves, power iteration, and symmetric QR eigendecomposition.
 - `tests/ndarray/ndarray_math_test.lua` and

@@ -1628,6 +1628,19 @@ local function ndSizeLocal(shape)
     return size
 end
 
+local function ndShapeString(shape)
+    local dimensions = {}
+    for axis, size in ipairs(shape) do dimensions[axis] = tostring(size) end
+    return "(" .. table.concat(dimensions, ", ") .. ")"
+end
+
+local function ndBroadcastError(shapes)
+    local formatted = {}
+    for index, shape in ipairs(shapes) do formatted[index] = ndShapeString(shape) end
+    return string.format("operands could not be broadcast together with shapes %s",
+        table.concat(formatted, " and "))
+end
+
 local function ndViewLocal(arr, shape, stride)
     return {
         shape = ndCopyShapeLocal(shape),
@@ -2006,50 +2019,68 @@ function NdArray.copyTo(dst, src, where)
 end
 
 function NdArray._reshapeIsView(shape1, shape2, stride1)
-    local k = 1
-    local compressedShape = {}
-    local compressedStride = {}
-    local ndim1 = #shape1
-    local currentShape = shape1[1]
-    for i=1,ndim1-1 do
-        if stride1[i] == shape1[i + 1] * stride1[i + 1] or shape1[i + 1] == 1 then
-            currentShape = currentShape * shape1[i + 1]
-        else
-            compressedShape[k] = currentShape
-            compressedStride[k] = stride1[k]
-            k = k + 1
-        end
+    if ndSizeLocal(shape1) ~= ndSizeLocal(shape2) then return false, nil end
+
+    -- A zero-sized view has no addresses to preserve.  Give it ordinary
+    -- C-order strides so a later reshape can continue to reason about it.
+    if ndSizeLocal(shape1) == 0 then
+        local stride, step = {}, 1
+        for axis = #shape2, 1, -1 do stride[axis], step = step, step * shape2[axis] end
+        return true, stride
     end
 
-    local p = 1
-    local ndim2 = #shape2
-    local j = #compressedShape
+    -- Remove singleton source dimensions and group adjacent dimensions whose
+    -- addresses are C-contiguous.  A reshape view may split or join one of
+    -- these groups, but it cannot cross a non-contiguous boundary.
+    local blocks = {}
+    local blockSize, blockStride, previousStride
+    for axis, size in ipairs(shape1) do
+        if size > 1 then
+            local stride = stride1[axis]
+            if not blockSize then
+                blockSize, blockStride = size, stride
+            elseif previousStride == size * stride then
+                blockSize, blockStride = blockSize * size, stride
+            else
+                blocks[#blocks + 1] = {size = blockSize, stride = blockStride}
+                blockSize, blockStride = size, stride
+            end
+            previousStride = stride
+        end
+    end
+    if blockSize then blocks[#blocks + 1] = {size = blockSize, stride = blockStride} end
+
+    -- Match target dimensions against source blocks from the inner axis out.
+    -- Singleton target dimensions consume no source elements and may be given
+    -- any stride; zero is both cheap and unambiguous.
     local outputStride = {}
-    for i=ndim2,2,-1 do
-        if p == 1 then
-            outputStride[i] = compressedStride[j]
+    local block = #blocks
+    local remaining = block > 0 and blocks[block].size or 1
+    local innerSize = 1
+    for axis = #shape2, 1, -1 do
+        local size = shape2[axis]
+        if size == 1 then
+            outputStride[axis] = 0
         else
-            outputStride[i] = outputStride[i + 1] * shape2[i]
-        end
-        p = p * shape2[i]
-        if p == compressedShape[j] then
-            p = 1
-            j = j - 1
-        elseif p > compressedShape[j] then
-            return false, nil
+            if block == 0 then return false, nil end
+            outputStride[axis] = blocks[block].stride * innerSize
+            innerSize = innerSize * size
+            if innerSize > remaining then return false, nil end
+            if innerSize == remaining then
+                block = block - 1
+                remaining = block > 0 and blocks[block].size or 1
+                innerSize = 1
+            end
         end
     end
-    if p == 1 then
-        outputStride[1] = compressedStride[j]
-    else
-        outputStride[1] = outputStride[2] * shape2[1]
-    end
+    if block ~= 0 or innerSize ~= 1 then return false, nil end
     return true, outputStride
 end
 
 function NdArray.reshape(arr, ...)
-    local shape = {...}
-    if #shape == 1 and type(shape[1]) == "table" then shape = shape[1] end
+    local requested = {...}
+    local shape = #requested == 1 and type(requested[1]) == "table"
+        and ndCopyShapeLocal(requested[1]) or requested
     local unknown, knownSize = nil, 1
     for axis, dimension in ipairs(shape) do
         if dimension == -1 then
@@ -2062,14 +2093,13 @@ function NdArray.reshape(arr, ...)
     end
     assert(not unknown or knownSize > 0 and arr.size % knownSize == 0, "reshape size is incompatible")
     if unknown then shape[unknown] = arr.size / knownSize else assert(knownSize == arr.size, "reshape size is incompatible") end
-    local contiguous, expected = true, 1
-    for axis = #arr.shape, 1, -1 do
-        if arr.shape[axis] ~= 1 and arr.stride[axis] ~= expected then contiguous = false end
-        expected = expected * arr.shape[axis]
+    local valid, stride = NdArray._reshapeIsView(arr.shape, shape, arr.stride)
+    local source = valid and arr or NdArray.copy(arr)
+    if not valid then
+        stride = {}
+        local step = 1
+        for axis = #shape, 1, -1 do stride[axis], step = step, step * shape[axis] end
     end
-    local source = contiguous and arr or NdArray.copy(arr)
-    local stride, step = {}, 1
-    for axis = #shape, 1, -1 do stride[axis], step = step, step * shape[axis] end
     return ndViewLocal(source, shape, stride)
 end
 
@@ -2446,14 +2476,14 @@ end
 function NdArray.broadcastStride(arrShape, targetShape, arrStride)
     local stride = {}
     local padding = #targetShape - #arrShape
-    assert(padding >= 0, "target shape cannot have lower rank than operand")
+    assert(padding >= 0, ndBroadcastError({arrShape, targetShape}))
     for axis = 1, #targetShape do
         local sourceAxis = axis - padding
         if sourceAxis <= 0 then
             stride[axis] = 0
         else
             local size = arrShape[sourceAxis]
-            assert(size == 1 or size == targetShape[axis], "shapes could not be broadcast together")
+            assert(size == 1 or size == targetShape[axis], ndBroadcastError({arrShape, targetShape}))
             stride[axis] = size == 1 and 0 or arrStride[sourceAxis]
         end
     end
@@ -2492,7 +2522,7 @@ function NdArray.broadcastShapes(shapes)
             local sourceAxis = axis - (maxNdim - #shape)
             local candidate = sourceAxis > 0 and shape[sourceAxis] or 1
             assert(candidate == 1 or size == 1 or candidate == size,
-                "shapes could not be broadcast together")
+                ndBroadcastError(shapes))
             if candidate ~= 1 then size = candidate end
         end
         newShape[axis] = size
@@ -3001,7 +3031,7 @@ local function ndBroadcastShape(shapes)
         for sourceAxis, size in ipairs(shape) do
             local axis = padding + sourceAxis
             assert(size == 1 or result[axis] == 1 or result[axis] == size,
-                "operands could not be broadcast together")
+                ndBroadcastError(shapes))
             if size ~= 1 then result[axis] = size end
         end
     end
@@ -3010,7 +3040,7 @@ end
 
 local function ndAlignedStride(arr, targetShape)
     local padding = #targetShape - #arr.shape
-    assert(padding >= 0, "iteration shape cannot have lower rank than an operand")
+    assert(padding >= 0, ndBroadcastError({arr.shape, targetShape}))
     local result = {}
     for axis = 1, #targetShape do
         local sourceAxis = axis - padding
@@ -3019,7 +3049,7 @@ local function ndAlignedStride(arr, targetShape)
         else
             local size = arr.shape[sourceAxis]
             assert(size == 1 or size == targetShape[axis],
-                "operand cannot be broadcast to the iteration shape")
+                ndBroadcastError({arr.shape, targetShape}))
             result[axis] = size == 1 and 0 or arr.stride[sourceAxis]
         end
     end
@@ -3072,12 +3102,12 @@ local function ndOpAxes(arrs, opAxes, iterShape)
                     if not iterShape then
                         if size ~= 1 then
                             assert(shape[iteratorAxis] == 1 or shape[iteratorAxis] == size,
-                                "op_axes dimensions could not be broadcast")
+                                ndBroadcastError({arr.shape, shape}))
                             shape[iteratorAxis] = size
                         end
                     else
                         assert(size == 1 or size == shape[iteratorAxis],
-                            "operand cannot be broadcast to itershape")
+                            ndBroadcastError({arr.shape, shape}))
                     end
                     strides[operand][iteratorAxis] = size == 1 and 0 or arr.stride[sourceAxis + 1]
                 else
@@ -3154,7 +3184,7 @@ local function ndNormalizeCore(arrs, coreAxes, iterShape)
             else
                 local size = shape[localAxis]
                 assert(size == 1 or size == loopShape[globalAxis],
-                    "loop dimensions could not be broadcast")
+                    ndBroadcastError({shape, loopShape}))
                 loopStrides[operand][globalAxis] = size == 1 and 0
                     or arr.stride[axes[localAxis] + 1]
             end

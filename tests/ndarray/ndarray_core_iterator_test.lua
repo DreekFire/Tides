@@ -19,6 +19,12 @@ for _, values in NdArray.nditer({rows, columns}) do
 end
 assertEqual(table.concat(broadcasted, ","), "11,12,13,21,22,23", "scalar broadcasting")
 
+local scalarIterator = NdArray.nditer(rows)
+local firstIndices, firstValues = scalarIterator()
+local secondIndices, secondValues = scalarIterator()
+assert(firstIndices == secondIndices and firstValues == secondValues,
+    "scalar iteration should reuse index and value tables")
+
 local left = array({2}, {1, 2})
 local right = array({3}, {10, 20, 30})
 local outer = {}
@@ -59,6 +65,25 @@ assertEqual(table.concat(sumsByColumn.data, ","), "5,7,9", "gufunc positional co
 local copyRows = NdArray.gufunc(function(view) return view end, "(n)->(n)")
 local copied = copyRows(matrix)
 assertEqual(table.concat(copied.data, ","), "1,2,3,4,5,6", "gufunc core output")
+
+local reshapeSource = array({2, 3, 4}, {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+})
+local reshapedView = NdArray.reshape(NdArray.transpose(reshapeSource, 0, 1), {3, 1, 2, 1, 4})
+assert(reshapedView.data == reshapeSource.data, "reshape should retain compatible non-contiguous views")
+assertEqual(table.concat(reshapedView.stride, ","), "4,0,12,0,1", "non-contiguous reshape strides")
+
+local reshapedCopy = NdArray.reshape(NdArray.transpose(matrix), {6})
+assert(reshapedCopy.data ~= matrix.data, "incompatible reshape should copy")
+assertEqual(table.concat(reshapedCopy.data, ","), "1,4,2,5,3,6", "incompatible reshape copy")
+
+local broadcastOk, broadcastError = pcall(function()
+    NdArray.broadcastArrays({array({2}), array({3})})
+end)
+assert(not broadcastOk, "incompatible broadcast should fail")
+assert(broadcastError:match("%(2%)") and broadcastError:match("%(3%)"),
+    "broadcast error should include incompatible shapes: " .. tostring(broadcastError))
 
 local transposedCopy = NdArray.gufunc(function(view) return view end, "(n)->(n)", {{0}, {0}})
 local transposed = transposedCopy(array({3, 2}, {1, 2, 3, 4, 5, 6}))
