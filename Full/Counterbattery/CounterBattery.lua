@@ -2,6 +2,32 @@
 -- Each redundant Lua box should have a unique, positive luaIdx (i.e. 1, 2, 3, ...). They will come online if all lower index Lua boxes are destroyed.
 local luaIdx = 1
 
+-- The modular artifact stores vector-distribution covariance in NdArrays,
+-- while this legacy section still consumes Matrix3.  Convert only at that
+-- boundary so the distribution itself remains NdArray-backed.
+local function CounterbatteryCovarianceMatrix(covariance)
+  if covariance and covariance.shape and covariance.data then
+    local values = {}
+    for row = 0, 2 do
+      for col = 0, 2 do
+        values[row * 3 + col + 1] = covariance.data[(covariance.offset or 0)
+          + row * covariance.stride[1] + col * covariance.stride[2] + 1]
+      end
+    end
+    return Matrix3.Matrix3(values)
+  end
+  return covariance
+end
+
+local function CounterbatteryInitialCovariance()
+  if NdArray and NdArray.zeros then
+    local covariance = NdArray.zeros({3, 3}, "float")
+    for i = 1, 3 do covariance.data[(i - 1) * 3 + i] = 2500 end
+    return covariance
+  end
+  return Matrix3.scalarmul(Matrix3.Identity(), 2500)
+end
+
 -- use pCall to avoid crash, retry if failed
 local AllowErrorRecovery = false
 
@@ -175,7 +201,6 @@ local lastFrameTime
 local lastOrigin
 local lastOriginSwitchTime = 0
 local lastProjectilePos
-local nextRecordTime
 local originPopTime = 0
 local prevTime
 local stabilityAvg = 1
@@ -183,6 +208,27 @@ local stabilityWindow
 local t
 local trackLossTime = 0
 local turrets = {}
+
+-- History rings are chronological by logical index, but their cadence is not
+-- guaranteed to be uniform.  The active solver owns the timestamp-aware
+-- lookup; retain the fixed-rate expression only for standalone use of the
+-- original monolith or for old target records without sampleTimes.
+local function CounterbatteryIndexAtTime(enemy, absoluteTime)
+  if CounterbatteryClosestPointSolver
+      and CounterbatteryClosestPointSolver.indexAtTime then
+    return CounterbatteryClosestPointSolver.indexAtTime(
+      enemy, absoluteTime, t, TICKS_PER_S)
+  end
+  return enemy.pos.size + math.floor((absoluteTime - t) * TICKS_PER_S + 0.5)
+end
+
+local function CounterbatterySampleTime(enemy, index)
+  if CounterbatteryClosestPointSolver
+      and CounterbatteryClosestPointSolver.sampleTime then
+    return CounterbatteryClosestPointSolver.sampleTime(enemy, index, t, TICKS_PER_S)
+  end
+  return t - (enemy.pos.size - index) / TICKS_PER_S
+end
 
 -- Tides header
 local BlockUtil = {}
@@ -214,7 +260,6 @@ function Init(I)
     acb.turret = BlockUtil.getWeaponsByName(I, acb.turretName, 1)[1]
   end
 
-  nextRecordTime = I:GetTimeSinceSpawn()
   if stabilityMaxTime > 0 then
     stabilityWindow = LinkedList.LinkedList()
   end
@@ -259,20 +304,20 @@ function CoreUpdate(I)
   frameTime = lastFrameTime and t - lastFrameTime or 0
   lastFrameTime = t
 
+  -- Target history is sampled on every eligible game tick.  The observation
+  -- timestamp is the actual spawn time, so delayed/jittered ticks do not
+  -- silently turn a ring-buffer index into a false fixed-rate timestamp.
+  UpdateEnemyData(I)
+  local stability = I:GetCustomAxis(stabilityAxisName)
+  if stability then
+    CheckStability(stability)
+  end
+
   local target = I:GetTargetInfo(mainframeIdx, 0)
   if not target or not target.Valid then
     return
   end
   local targetPosition = I:GetTargetPositionInfo(mainframeIdx, 0)
-
-  if t >= nextRecordTime - 0.5 / TICKS_PER_S then
-    UpdateEnemyData(I)
-    local stability = I:GetCustomAxis(stabilityAxisName)
-    if stability then
-      CheckStability(stability)
-    end
-    nextRecordTime = nextRecordTime + 1 / TICKS_PER_S
-  end
   currentTargetId = target.Id
 
   local enemy = enemies[currentTargetId]
@@ -378,6 +423,7 @@ function UpdateEnemyData(I)
         local newEnemy = {
                             pos = RingBuffer.RingBuffer(rbsize),
                             vel = RingBuffer.RingBuffer(rbsize),
+                            sampleTimes = RingBuffer.RingBuffer(rbsize),
                             rotation = RingBuffer.RingBuffer(rbsize),
                             origins = RingBuffer.RingBuffer(numOrigins),
                             density = Stats.Distribution({"x", "y", "z"}),
@@ -387,13 +433,14 @@ function UpdateEnemyData(I)
                           }
         newEnemy.density.n = 15
         -- todo: set initial size estimate based on block count
-        newEnemy.density.cov = Matrix3.scalarmul(Matrix3.Identity(), 2500)
+        newEnemy.density.cov = CounterbatteryInitialCovariance()
         enemies[target.Id] = newEnemy
       end
       local e = enemies[target.Id]
       e.valid = true
       RingBuffer.push(e.pos, targetPosition.Position)
       RingBuffer.push(e.vel, targetPosition.Velocity)
+      RingBuffer.push(e.sampleTimes, t)
     end
   end
 
@@ -490,15 +537,15 @@ function GetOrigin(I, line, enemy)
   local relVel = line.ds / line.dt - Vector3(0, line.dv, 0) - enemy.vel[enemy.vel.size]
   local relPos = line.ed - enemy.pos[enemy.pos.size]
   local time2d = math.sqrt((relPos.x ^ 2 + relPos.z ^ 2) / (relVel.x ^ 2 + relVel.z ^2))
-  local tIdx2d = enemy.pos.size - math.floor(time2d * TICKS_PER_S + 0.5)
+  local tIdx2d = CounterbatteryIndexAtTime(enemy, t - time2d)
   local g = I:GetGravityForAltitude(currentLine.start.y)
   local estimate2d = relPos - (relVel * time2d) + 0.5 * g * time2d * time2d
-  if tIdx2d > 0 then
+  if tIdx2d and tIdx2d >= 1 and tIdx2d <= enemy.pos.size then
     estimate2d = Quaternion.Inverse(enemy.rotation[tIdx2d]) * estimate2d
   else
     I:Log(string.format("No target data for %.2f seconds ago", time2d))
   end
-  local covInv = Matrix3.inverse(enemy.density.cov)
+  local covInv = Matrix3.inverse(CounterbatteryCovarianceMatrix(enemy.density.cov))
   if Matrix3.quadform(estimate2d, covInv, estimate2d) < 5 * 5 then
     local closest, closestTimeIdx = RunTrace(I, line, enemy, prevTime)
     if not closest then
@@ -512,8 +559,8 @@ function GetOrigin(I, line, enemy)
     end
     if launchPos then
       I:Log(string.format("Projectile determined to be CRAM shell, fired %f seconds ago", launchTime))
-      local pIdx = enemy.pos.size + math.floor(launchTime * TICKS_PER_S)
-      if pIdx < 1 or pIdx > enemy.pos.size then
+      local pIdx = CounterbatteryIndexAtTime(enemy, t + launchTime)
+      if not pIdx or pIdx < 1 or pIdx > enemy.pos.size then
         I:Log(string.format("CRAM guess has no target data for %.2f seconds ago", launchTime))
         return
       end
@@ -541,7 +588,7 @@ function GetOrigin(I, line, enemy)
       if closestAlt > minAlt and closestAlt < maxAlt then
         local origin = {
           position = closestRotated,
-          time = t + (closestTimeIdx - enemy.pos.size) / TICKS_PER_S,
+          time = CounterbatterySampleTime(enemy, closestTimeIdx),
           relVel = line.ev / frameTime + g * t - enemy.vel[closestTimeIdx],
           rot = eRot,
           detectTime = t,
@@ -566,12 +613,13 @@ function GetMissileOrigin(I, enemy)
     if warn.Valid and not foundMissiles[warn.Id] and warn.TimeSinceLaunch < 0.1 then
       foundMissiles[warn.Id] = 1
       local launcherPos = warn.Position - warn.TimeSinceLaunch * warn.Velocity
-      local tIdx = enemy.pos.size - math.floor(warn.TimeSinceLaunch * TICKS_PER_S + 0.5)
-      tIdx = math.max(tIdx, 1)
+      local tIdx = CounterbatteryIndexAtTime(enemy, t - warn.TimeSinceLaunch)
+      tIdx = math.max(tIdx or 1, 1)
       local targetPosAtLaunch = enemy.pos[tIdx]
       -- todo: set threshold by target size
       local diff = Quaternion.Inverse(enemy.rotation[tIdx]) * (launcherPos - targetPosAtLaunch)
-      if Matrix3.quadform(diff, Matrix3.inverse(enemy.density.cov), diff) < 4 * 4 then
+      if Matrix3.quadform(diff,
+          Matrix3.inverse(CounterbatteryCovarianceMatrix(enemy.density.cov)), diff) < 4 * 4 then
         local closestAlt = launcherPos.y
         if closestAlt > minAlt and closestAlt < maxAlt then
           local lPos = launcherPos - targetPosAtLaunch
@@ -579,7 +627,7 @@ function GetMissileOrigin(I, enemy)
             position = lPos,
             time = t - warn.TimeSinceLaunch,
             relVel = warn.Velocity - enemy.vel[enemy.vel.size],
-            rot = eRot,
+            rot = enemy.rotation[tIdx],
             detectTime = t,
             detectPos = warn.Position,
             type = 2,
@@ -658,9 +706,14 @@ function CheckIfCram(I, line, enemy, closestTimeIdx)
   local bestScoreR = -math.huge
   local t1, t2 = MathUtil.solveQuadratic(-9.81, projVel.y, projPos.y)
   if not t1 then return end
-  for i = math.max(closestTimeIdx - 10, math.floor(t2 * TICKS_PER_S) + enemy.vel.size, 1), math.min(closestTimeIdx + 10, math.floor(t1 * TICKS_PER_S) + enemy.vel.size, enemy.vel.size) do
+  local lowerIndex = CounterbatteryIndexAtTime(enemy, t + t2)
+  local upperIndex = CounterbatteryIndexAtTime(enemy, t + t1)
+  if not lowerIndex or not upperIndex then return end
+  local firstIndex = math.max(closestTimeIdx - 10, lowerIndex, 1)
+  local lastIndex = math.min(closestTimeIdx + 10, upperIndex, enemy.vel.size)
+  for i = firstIndex, lastIndex do
     if enemy.vel[i] then
-      local iTime = (i - enemy.vel.size) / TICKS_PER_S
+      local iTime = CounterbatterySampleTime(enemy, i) - t
       local projPosAtTime = projPos + projVel * iTime - Vector3(0, 0.5 * 9.81 * iTime * iTime, 0)
       local relVelAtClosest = projVel
       relVelAtClosest = relVelAtClosest - enemy.vel[i]
@@ -694,7 +747,7 @@ function CheckIfCram(I, line, enemy, closestTimeIdx)
     return
   end
   idx = math.max(idx - 1, 1)
-  local launchTime = (idx - enemy.vel.size) / TICKS_PER_S
+  local launchTime = CounterbatterySampleTime(enemy, idx) - t
   local projPosAtTime = projPos + projVel * launchTime - Vector3(0, 0.5 * 9.81 * launchTime * launchTime, 0)
   local p = projPosAtTime - enemy.pos[idx]
   return p, launchTime
@@ -862,6 +915,10 @@ function CheckAndUpdateLine(I, line, projectile, tolerance)
 end
 
 function RunTrace(I, line, enemy, timeGuess)
+  if CounterbatteryClosestPointSolver then
+    return CounterbatteryClosestPointSolver.runTrace(I, line, enemy, timeGuess)
+  end
+
   local totalIter = 0
   local targetPos = enemy.pos[enemy.pos.size]
   local targetVel = enemy.vel[enemy.vel.size]
@@ -870,25 +927,12 @@ function RunTrace(I, line, enemy, timeGuess)
       targetPos = enemy.pos[timeGuess]
       targetVel = enemy.vel[timeGuess]
     else
-      I:Log(string.format("No target data for %.2f seconds ago", (enemy.pos.size - timeGuess) / TICKS_PER_S))
+      I:Log(string.format("No target data for %.2f seconds ago", t - CounterbatterySampleTime(enemy, timeGuess)))
     end
   end
   local tIdxClosest = timeGuess or enemy.pos.size
   local cov = enemy.density.cov
-  local covInv = Matrix3.inverse(cov)
-  -- due to bug in FtD's Lua interpreter, inverse is sometimes negated or has columns that are circularly shifted one to the right
-  if Matrix3.determinant(covInv) < 0 then
-    covInv = -covInv
-  end
-  if Matrix3.get(covInv, 1, 2) ~= Matrix3.get(covInv, 2, 1) then
-    for row=1,3 do
-      local temp = covInv[(row - 1) * 3 + 1]
-      for col=1,2 do
-        covInv[(row - 1) * 3 + col] = covInv[(row - 1) * 3 + col + 1]
-      end
-      covInv[(row - 1) * 3 + 3] = temp
-    end
-  end
+  local covInv = Matrix3.inverse(CounterbatteryCovarianceMatrix(cov))
   local iters = tIdxClosest and 2 or 3
   for i = 1, iters do
     -- find the point of closest approach based on current target position and velocity
@@ -910,7 +954,7 @@ function RunTrace(I, line, enemy, timeGuess)
     -- = 2 (x_i S^-1 v_i + x_i S^-1 g t + v_i t S^-1 v_i + v_i t S^-1 g t + 0.5g t^2 S^-1 v_i + 0.5 g t^2 S^-1 g t)
     -- = 2 (x_i S^-1 v_1 + (x_i S^-1 g + v_i S^-1 v_i) t + (v_i S^-1 g + 0.5 g S^-1 v_i) t^2 + 0.5 g S^-1 g t^3)
 
-    local ti = line.tStart - (t - (enemy.pos.size - tIdxClosest) / TICKS_PER_S) -- time from guess to line start
+    local ti = line.tStart - CounterbatterySampleTime(enemy, tIdxClosest) -- time from guess to line start
     local di = line.start - (targetPos + ti * targetVel)
     local projRelVel = line.ds / line.dt - targetVel
     -- accounting exactly for gravity changes over altitude is difficult, just approximate and hope the enemy isn't using mortars
@@ -941,8 +985,9 @@ function RunTrace(I, line, enemy, timeGuess)
       minRoot = a
     end
     -- get target position and velocity at estimated time of closest approach
-    local approachTime = minRoot + line.tStart - t
-    tIdxClosest = math.floor(approachTime * TICKS_PER_S + 0.5) + enemy.pos.size
+    local approachAbsoluteTime = minRoot + line.tStart
+    local approachTime = approachAbsoluteTime - t
+    tIdxClosest = CounterbatteryIndexAtTime(enemy, approachAbsoluteTime)
     if not tIdxClosest then return nil end
     targetPos = enemy.pos[tIdxClosest]
     targetVel = enemy.vel[tIdxClosest]
@@ -956,7 +1001,7 @@ function RunTrace(I, line, enemy, timeGuess)
   -- linear search to find best point
   -- todo: account for target velocity
   function CalcSqrMahaDist(tIdx)
-    local dt = t - (enemy.pos.size - tIdx) / TICKS_PER_S - line.tStart
+    local dt = CounterbatterySampleTime(enemy, tIdx) - line.tStart
     local diff = line.start - enemy.pos[tIdx] + dt * line.ds / line.dt + 0.5 * I:GetGravityForAltitude(line.start.y) * dt * dt
     diff = Quaternion.Inverse(enemy.rotation[tIdx]) * diff
     return Matrix3.quadform(diff, covInv, diff)
@@ -995,7 +1040,7 @@ function RunTrace(I, line, enemy, timeGuess)
   end
   --I:Log(totalIter.." iterations after downwards search")
   -- time of closest approach relative to line.tStart
-  local dt = t - (enemy.pos.size - tIdxClosest) / TICKS_PER_S - line.tStart
+  local dt = CounterbatterySampleTime(enemy, tIdxClosest) - line.tStart
   return line.start - enemy.pos[tIdxClosest] + dt * (line.ds / line.dt) + 0.5 * I:GetGravityForAltitude(line.start.y) * dt * dt, tIdxClosest
 end
 

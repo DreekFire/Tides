@@ -1,11 +1,89 @@
 Stats = Stats or {}
 
+local function assertFiniteWeight(weight)
+  assert(type(weight) == "number" and weight == weight and math.abs(weight) ~= math.huge,
+    "distribution weights must be finite numbers")
+  assert(weight >= 0, "distribution weights must be non-negative")
+end
+
+local function covarianceIndex(cov, row, col)
+  assert(type(cov) == "table" and cov.shape and cov.stride and cov.data,
+    "distribution covariance must be an NdArray")
+  assert(#cov.shape == 2 and cov.shape[1] == cov.shape[2],
+    "distribution covariance must be a square rank-2 NdArray")
+  return (cov.offset or 0) + (row - 1) * cov.stride[1]
+      + (col - 1) * cov.stride[2] + 1
+end
+
+local function covarianceGet(cov, row, col)
+  return cov.data[covarianceIndex(cov, row, col)]
+end
+
+local function covarianceSet(cov, row, col, value)
+  cov.data[covarianceIndex(cov, row, col)] = value
+end
+
+local function sampleValue(sample, variable, index)
+  if type(sample) == "table" and sample.shape and sample.stride and sample.data then
+    assert(#sample.shape == 1, "vector samples must be rank-1 NdArrays")
+    return sample.data[(sample.offset or 0) + (index - 1) * sample.stride[1] + 1]
+  end
+  return sample[variable]
+end
+
+local function vectorMean(distr)
+  local mean = NdArray.zeros({#distr.vars}, "float")
+  for i, variable in ipairs(distr.vars) do
+    mean.data[i] = distr.mean[variable]
+  end
+  return mean
+end
+
+local function mergeMoments(distr, incomingN, incomingMean, incomingCov)
+  local oldN = distr.n
+  assert(type(oldN) == "number" and oldN >= 0 and oldN == oldN and math.abs(oldN) ~= math.huge,
+    "distribution count must be a finite non-negative number")
+  assert(incomingN > 0, "cannot merge a distribution with zero weight")
+
+  local newN = oldN + incomingN
+  if not distr.vars then
+    local oldMean = distr.mean
+    local delta = incomingMean - oldMean
+    local newMean = oldMean + incomingN / newN * delta
+    local newCov = (oldN * distr.cov + incomingN * incomingCov
+        + oldN * incomingN / newN * delta * delta) / newN
+    distr.mean = newMean
+    distr.cov = newCov
+  else
+    local nVars = #distr.vars
+    local oldMean = vectorMean(distr)
+    local delta = NdArray.zeros({nVars}, "float")
+    local newMean = NdArray.zeros({nVars}, "float")
+    for i = 1, nVars do
+      delta.data[i] = incomingMean.data[i] - oldMean.data[i]
+      newMean.data[i] = oldMean.data[i] + incomingN / newN * delta.data[i]
+    end
+
+    for i, variable in ipairs(distr.vars) do
+      distr.mean[variable] = newMean.data[i]
+      for j = i, nVars do
+        local correction = oldN * incomingN / newN * delta.data[i] * delta.data[j]
+        local value = (oldN * covarianceGet(distr.cov, i, j)
+            + incomingN * covarianceGet(incomingCov, i, j) + correction) / newN
+        covarianceSet(distr.cov, i, j, value)
+        covarianceSet(distr.cov, j, i, value)
+      end
+    end
+  end
+  distr.n = newN
+end
+
 function Stats.Distribution(vars)
   local distr = { n = 0, vars = vars }
   if vars then
     local mean = {}
     local nVars = #vars
-    local cov = NdArray.zeros({nVars, nVars})
+    local cov = NdArray.zeros({nVars, nVars}, "float")
     for i, v in ipairs(vars) do
       mean[v] = 0
     end
@@ -19,96 +97,95 @@ function Stats.Distribution(vars)
 end
 
 function Stats.updateDistribution(distr, sample, weight)
-  local oldN = distr.n
   weight = weight or 1
-  distr.n = distr.n + weight
+  assertFiniteWeight(weight)
+  if weight == 0 then return end
 
   if distr.vars then
-    local oldMeans = {}
-    local nVars = distr.vars and #distr.vars or 1
-    for i, v in ipairs(distr.vars) do
-      -- Update mean
-      oldMeans[i] = distr.mean[v]
-      local mu = oldMeans[i] + sample[v] * weight / distr.n
-
-      -- Update covariance
-      for j=i, nVars do
-        local v2 = distr.vars[j]
-        local mu2 = distr.mean[v2]
-        local upd = (weight or 1) * (sample[v] - mu) * (sample[v2] - mu2)
-        local index = (i - 1) * nVars + j
-        local symmetricIndex = (j - 1) * nVars + i
-        distr.cov.data[index] = (distr.cov.data[index] * oldN + upd) / distr.n
-        distr.cov.data[symmetricIndex] = distr.cov.data[index]
-      end
-
-      distr.mean[v] = mu
+    local mean = NdArray.zeros({#distr.vars}, "float")
+    for i, variable in ipairs(distr.vars) do
+      mean.data[i] = sampleValue(sample, variable, i)
     end
+    local cov = NdArray.zeros({#distr.vars, #distr.vars}, "float")
+    mergeMoments(distr, weight, mean, cov)
   else
-    local mu = distr.mean + sample * weight / distr.n
-    distr.cov = (distr.cov * oldN + weight * (sample - mu) * (sample - distr.mean)) / distr.n
-
-    distr.mean = mu
+    mergeMoments(distr, weight, sample, 0)
   end
 end
 
 function Stats.updateDistributionBatched(distr, samples, weights)
   if #samples == 0 then return end
-  local sT = {}
-  local nVars = distr.vars and #distr.vars or 1
-
   local wSum = 0
   for j=1, #samples do
-    wSum = wSum + (weights and weights[j] or 1)
+    local weight = weights and weights[j] or 1
+    assertFiniteWeight(weight)
+    wSum = wSum + weight
   end
-  distr.n = distr.n + wSum
+  if wSum == 0 then return end
 
-  local oldN = distr.n
   if distr.vars then
-    for i, var in ipairs(distr.vars) do
-      local col = {}
-      for j=1, #samples do
-        col[j] = samples[j][var]
+    local nVars = #distr.vars
+    local mean = NdArray.zeros({nVars}, "float")
+    for sampleIndex, sample in ipairs(samples) do
+      local weight = weights and weights[sampleIndex] or 1
+      for i, variable in ipairs(distr.vars) do
+        mean.data[i] = mean.data[i] + weight * sampleValue(sample, variable, i)
       end
-      sT[i] = col
+    end
+    for i = 1, nVars do
+      mean.data[i] = mean.data[i] / wSum
     end
 
-    for i, v in ipairs(distr.vars) do
-      -- Update mean
-      local sum = 0
-      for j, s in ipairs(sT[i]) do
-        sum = sum + s * (weights and weights[j] or 1)
-      end
-      local mu = distr.mean[v] + sum / distr.n
-
-      -- Update covariance
-      for j=i, nVars do
-        local mu2 = distr.mean[distr.vars[j]]
-        sum = 0
-        for s=1, #samples do
-          sum = sum + (weights and weights[s] or 1) * (sT[i][s] - mu) * (sT[j][s] - mu2)
+    local cov = NdArray.zeros({nVars, nVars}, "float")
+    for sampleIndex, sample in ipairs(samples) do
+      local weight = weights and weights[sampleIndex] or 1
+      for i, variableI in ipairs(distr.vars) do
+        local centeredI = sampleValue(sample, variableI, i) - mean.data[i]
+        for j = i, nVars do
+          local centeredJ = sampleValue(sample, distr.vars[j], j) - mean.data[j]
+          covarianceSet(cov, i, j, covarianceGet(cov, i, j)
+              + weight * centeredI * centeredJ / wSum)
         end
-        local index = (i - 1) * nVars + j
-        local symmetricIndex = (j - 1) * nVars + i
-        distr.cov.data[index] = (distr.cov.data[index] * oldN + sum) / distr.n
-        distr.cov.data[symmetricIndex] = distr.cov.data[index]
       end
-
-      distr.mean[v] = mu
     end
+    for i = 1, nVars do
+      for j = i + 1, nVars do
+        covarianceSet(cov, j, i, covarianceGet(cov, i, j))
+      end
+    end
+    mergeMoments(distr, wSum, mean, cov)
   else
-    local sum = 0
-    for i, s in ipairs(samples) do
-      sum = sum + s * (weights and weights[i] or 1)
+    local mean = 0
+    for i, sample in ipairs(samples) do
+      mean = mean + sample * (weights and weights[i] or 1)
     end
-
-    local mu = distr.mean + sum / distr.n
-
-    sum = 0
-    for i, s in ipairs(samples) do
-      sum = sum + (weights and weights[i] or 1) * (s - mu) * (s - distr.mean)
+    mean = mean / wSum
+    local cov = 0
+    for i, sample in ipairs(samples) do
+      local centered = sample - mean
+      cov = cov + (weights and weights[i] or 1) * centered * centered / wSum
     end
-    distr.cov = (distr.cov * oldN + sum) / distr.n
+    mergeMoments(distr, wSum, mean, cov)
+  end
+end
+
+function Stats.mergeDistribution(distr, other)
+  assert(type(other) == "table" and type(other.n) == "number", "expected a distribution to merge")
+  assert(other.n >= 0 and other.n == other.n and math.abs(other.n) ~= math.huge,
+    "distribution count must be a finite non-negative number")
+  if other.n == 0 then return end
+
+  if distr.vars then
+    assert(other.vars and #other.vars == #distr.vars, "distribution dimensions must match")
+    local mean = NdArray.zeros({#distr.vars}, "float")
+    for i, variable in ipairs(distr.vars) do
+      assert(other.vars[i] == variable, "distribution variable order must match")
+      mean.data[i] = other.mean[variable]
+    end
+    mergeMoments(distr, other.n, mean, other.cov)
+  else
+    assert(not other.vars, "distribution dimensions must match")
+    mergeMoments(distr, other.n, other.mean, other.cov)
   end
 end
 
@@ -127,7 +204,7 @@ function Stats.namedCovariance(distr, var1, var2)
     if distr.vars[i] == var1 then
       for j=1,nVars do
         if distr.vars[j] == var2 then
-          return distr.cov.data[(i - 1) * nVars + j]
+          return covarianceGet(distr.cov, i, j)
         end
       end
     end

@@ -13,12 +13,25 @@
   copied rotation estimator.
 - `Full/Counterbattery/Pipeline/TargetDensity.lua` — density product and
   copied aimpoint-derived distribution update.
+- `Full/Counterbattery/Pipeline/ClosestPointSolver.lua` — Mahalanobis
+  closest-point solver with constant-rotation analytic coefficients,
+  timestamp-based interval/index handling, changing-rotation linear scan, and
+  the newer-interpreter warning.
+- `Full/Counterbattery/CounterBattery.lua` — legacy origin and missile-origin
+  callers now use the same timestamp-to-ring-index adapter when the active
+  solver is present; fixed-rate lookup remains only as standalone fallback.
 - `Full/Counterbattery/Pipeline/TargetPipeline.lua` — fixed-tick composition
   of the typed products.
 - `Full/Counterbattery/Pipeline/Entry.lua` — dispatch adapter that preserves
   the legacy `UpdateEnemyData` call site.
 - `Full/Counterbattery/CounterBatteryPipeline.lua` — generated paste-ready
   artifact; rebuild with `Util/concat_counterbattery.py`.
+- `tests/counterbattery/closest_point_solver_test.lua` and
+  `tests/run_counterbattery_solver_tests.py` — focused solver, cubic,
+  timestamp-indexing, interval, and interpreter-workaround regression tests.
+- `tests/rotation/target_rotation_ransac_test.lua` and
+  `tests/run_target_rotation_ransac_tests.py` — deterministic RANSAC,
+  degeneracy, outlier, scale, and quaternion-sign tests.
 
 ### Counterbattery modularization workflow
 

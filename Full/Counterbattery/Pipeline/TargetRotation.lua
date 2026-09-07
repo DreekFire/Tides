@@ -3,12 +3,17 @@
 local TargetRotation = {}
 
 function TargetRotation.new(config)
-  return {
+  return setmetatable({
     aimPointTrackers = config.aimPointTrackers,
     maxTurnRateTracking = config.maxTurnRateTracking,
     TICKS_PER_S = config.TICKS_PER_S,
     trackLossTime = 0,
-  }
+    ransacInlierSqrThreshold = config.ransacInlierSqrThreshold or 0.1,
+    ransacLegSqrTolerance = config.ransacLegSqrTolerance or 0.1,
+    ransacLegRelativeTolerance = config.ransacLegRelativeTolerance or 0.01,
+    ransacMinTriangleAreaRatio = config.ransacMinTriangleAreaRatio or 1e-6,
+    ransacSeed = config.ransacSeed or 1,
+  }, {__index = TargetRotation})
 end
 
 function TargetRotation:update(I, tracks, aimpoints, stamp)
@@ -44,58 +49,209 @@ function TargetRotation:update(I, tracks, aimpoints, stamp)
   })
 end
 
-function TargetRotation:getRotation(oldPts, newPts, iterLim)
-  -- Copied from the original GetRotation implementation.
-  local nTrack = #newPts
-  iterLim = iterLim or 25
+local function validPoint(point)
+  local pointType = type(point)
+  return (pointType == "table" or pointType == "userdata")
+    and type(point.x) == "number"
+    and type(point.y) == "number"
+    and type(point.z) == "number"
+    and point.x == point.x
+    and point.y == point.y
+    and point.z == point.z
+end
 
-  local indices = {}
-  for i = 1, nTrack do
-    indices[i] = i
+local function combinationCount(n)
+  return n * (n - 1) * (n - 2) / 6
+end
+
+-- Return the zero-based lexicographic combination at rank. This lets small
+-- RANSAC problems exhaustively test every triangle without using global RNG.
+local function tripletAtRank(rank, n)
+  local i, j
+  for candidateI = 1, n - 2 do
+    local count = (n - candidateI) * (n - candidateI - 1) / 2
+    if rank < count then
+      i = candidateI
+      break
+    end
+    rank = rank - count
   end
-  local consensusPoints = {}
-  -- iterate through triples of aimpoints, check if the legs are the same length
-  for trip = 1, iterLim do
-    MathUtil.shuffle(indices, true)
-    local oldAimpoints = {}
-    local aimpoints = {}
-    for i = 1, 3 do
-      oldAimpoints[i] = oldPts[indices[i]]
-      aimpoints[i] = newPts[indices[i]]
+  for candidateJ = i + 1, n - 1 do
+    local count = n - candidateJ
+    if rank < count then
+      j = candidateJ
+      break
+    end
+    rank = rank - count
+  end
+  return i, j, j + 1 + rank
+end
+
+local function nextRandom(state)
+  -- Park-Miller is deterministic and does not perturb FtD's global RNG.
+  return (state * 48271) % 2147483647
+end
+
+local function triangleAreaRatio(a, b)
+  local denominator = math.max(1, a.sqrMagnitude * b.sqrMagnitude)
+  return Vector3.Cross(a, b).sqrMagnitude / denominator
+end
+
+function TargetRotation:getRotation(oldPts, newPts, iterLim)
+  if oldPts == nil or newPts == nil or #oldPts ~= #newPts then
+    return nil
+  end
+  local nTrack = #oldPts
+  iterLim = math.floor(iterLim or 25)
+  if nTrack < 3 or iterLim < 1 then
+    return nil
+  end
+
+  for idx = 1, nTrack do
+    if not validPoint(oldPts[idx]) or not validPoint(newPts[idx]) then
+      return nil
+    end
+  end
+
+  local legSqrTolerance = self.ransacLegSqrTolerance or 0.1
+  local legRelativeTolerance = self.ransacLegRelativeTolerance or 0.01
+  local minTriangleAreaRatio = self.ransacMinTriangleAreaRatio or 1e-6
+  local inlierSqrThreshold = self.ransacInlierSqrThreshold or 0.1
+  local maxTurnRate = self.maxTurnRateTracking or math.huge
+  local ticksPerSecond = self.TICKS_PER_S or 1
+
+  local function validLegLength(oldLeg, newLeg)
+    local scale = math.max(1, oldLeg.sqrMagnitude, newLeg.sqrMagnitude)
+    return math.abs(oldLeg.sqrMagnitude - newLeg.sqrMagnitude)
+      <= legSqrTolerance + legRelativeTolerance * scale
+  end
+
+  local function makeHypothesis(i, j, k)
+    local oldA = oldPts[j] - oldPts[i]
+    local oldB = oldPts[k] - oldPts[i]
+    local newA = newPts[j] - newPts[i]
+    local newB = newPts[k] - newPts[i]
+    local oldC = oldPts[k] - oldPts[j]
+    local newC = newPts[k] - newPts[j]
+
+    if not validLegLength(oldA, newA)
+        or not validLegLength(oldB, newB)
+        or not validLegLength(oldC, newC)
+        or triangleAreaRatio(oldA, oldB) <= minTriangleAreaRatio
+        or triangleAreaRatio(newA, newB) <= minTriangleAreaRatio then
+      return nil
     end
 
-    local legs, oldLegs = {}, {}
-    local valid = true
-    for i = 1, 3 do
-      legs[i] = aimpoints[i % 3 + 1] - aimpoints[(i - 1) % 3 + 1]
-      oldLegs[i] = oldAimpoints[i % 3 + 1] - oldAimpoints[(i - 1) % 3 + 1]
-      -- check if aimpoints have changed
-      if math.abs(legs[i].sqrMagnitude - oldLegs[i].sqrMagnitude) > 0.1 then
-        valid = false
+    local oldRot = Quaternion.LookRotation(oldA, oldB)
+    local newRot = Quaternion.LookRotation(newA, newB)
+    if oldRot == nil or newRot == nil then
+      return nil
+    end
+    local deltaRot = newRot * Quaternion.Inverse(oldRot)
+    local w = math.max(-1, math.min(1, math.abs(deltaRot.w)))
+    local turnRate = 2 * math.acos(w) * 180 / math.pi * ticksPerSecond
+    if turnRate >= maxTurnRate then
+      return nil
+    end
+    return deltaRot
+  end
+
+  local function score(deltaRot, anchor)
+    local points = {}
+    local totalError = 0
+    for idx = 1, nTrack do
+      local diff = newPts[idx] - newPts[anchor]
+      local oldDiff = oldPts[idx] - oldPts[anchor]
+      local error = (diff - deltaRot * oldDiff).sqrMagnitude
+      if error <= inlierSqrThreshold then
+        points[#points + 1] = idx
+        totalError = totalError + error
+      end
+    end
+    return #points, totalError, points
+  end
+
+  local function better(count, error, bestCount, bestError)
+    return bestCount == nil
+      or count > bestCount
+      or (count == bestCount and error < bestError)
+  end
+
+  local totalTriplets = combinationCount(nTrack)
+  local attempts = math.min(iterLim, totalTriplets)
+  local randomState = math.floor(self.ransacSeed or 1) % 2147483647
+  if randomState <= 0 then randomState = 1 end
+  local seen = {}
+  local bestRotation, bestCount, bestError, bestPoints
+
+  for attempt = 1, attempts do
+    local rank
+    if totalTriplets <= iterLim then
+      rank = attempt - 1
+    else
+      randomState = nextRandom(randomState)
+      rank = randomState % totalTriplets
+      while seen[rank] do
+        rank = (rank + 1) % totalTriplets
+      end
+    end
+    seen[rank] = true
+
+    local i, j, k = tripletAtRank(rank, nTrack)
+    local deltaRot = makeHypothesis(i, j, k)
+    if deltaRot then
+      local count, error, points = score(deltaRot, i)
+      if better(count, error, bestCount, bestError) then
+        bestRotation, bestCount, bestError, bestPoints = deltaRot, count, error, points
+      end
+      if bestCount == nTrack then
         break
       end
     end
-    if valid then
-      local oldRot = Quaternion.LookRotation(oldLegs[1], oldLegs[2])
-      local rot = Quaternion.LookRotation(legs[1], legs[2])
-      local deltaRot = rot * Quaternion.Inverse(oldRot)
-      if math.acos(math.max(math.min(deltaRot.w, 1), -1)) * 360 / math.pi * self.TICKS_PER_S < self.maxTurnRateTracking then
-        -- check for consensus
-        local votes = 0
-        for idx, ap in ipairs(newPts) do
-          local diff = ap - newPts[indices[1]]
-          local oldDiff = oldPts[idx] - oldPts[indices[1]]
-          if (diff - deltaRot * oldDiff).sqrMagnitude < 0.1 then
-            votes = votes + 1
-            table.insert(consensusPoints, idx)
+  end
+
+  local minimumInliers = math.max(3, math.floor(nTrack / 2) + 1)
+  if bestRotation == nil or bestCount < minimumInliers then
+    return nil
+  end
+
+  -- Refit deterministically from the best-conditioned triangle in the
+  -- consensus set, then score it against every correspondence again.
+  for refinement = 1, 2 do
+    local supportI, supportJ, supportK, supportQuality
+    for a = 1, #bestPoints - 2 do
+      for b = a + 1, #bestPoints - 1 do
+        for c = b + 1, #bestPoints do
+          local i, j, k = bestPoints[a], bestPoints[b], bestPoints[c]
+          local oldA = oldPts[j] - oldPts[i]
+          local oldB = oldPts[k] - oldPts[i]
+          local newA = newPts[j] - newPts[i]
+          local newB = newPts[k] - newPts[i]
+          local quality = math.min(triangleAreaRatio(oldA, oldB), triangleAreaRatio(newA, newB))
+          if supportQuality == nil or quality > supportQuality then
+            supportI, supportJ, supportK, supportQuality = i, j, k, quality
           end
-          if 2 * votes - 3 >= nTrack then
-            return deltaRot, consensusPoints
-          end
-          consensusPoints = {}
         end
       end
     end
+
+    if supportI == nil then
+      break
+    end
+    local refitRotation = makeHypothesis(supportI, supportJ, supportK)
+    if refitRotation == nil then
+      break
+    end
+    local refitCount, refitError, refitPoints = score(refitRotation, supportI)
+    if better(refitCount, refitError, bestCount, bestError) then
+      bestRotation, bestCount, bestError, bestPoints = refitRotation, refitCount, refitError, refitPoints
+    else
+      break
+    end
   end
-  return nil
+
+  if bestCount < minimumInliers then
+    return nil
+  end
+  return bestRotation, bestPoints
 end

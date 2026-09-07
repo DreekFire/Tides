@@ -1,6 +1,17 @@
 -- target/aimpoint
 -- Mainframe aimpoint observations normalized against each mainframe's target
 -- position estimate.  The underlying target/track product is not modified.
+--
+-- `position` is deliberately world-space.  The normalization is:
+--
+--   TargetPositionInfo.Position
+--     + (AimPointPosition - TargetInfo.Position)
+--
+-- This preserves the target-relative offset reported by one mainframe while
+-- translating it onto that mainframe's target-position estimate.  It is not a
+-- center-of-mass claim and it is not rotation-corrected here.  TargetRotation
+-- needs these world-space points, and TargetDensity applies the inverse tracked
+-- rotation after subtracting the target track position.
 local TargetAimpoint = {}
 
 function TargetAimpoint.new(config)

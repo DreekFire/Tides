@@ -15,12 +15,15 @@ OUTPUT = COUNTERBATTERY / "CounterBatteryPipeline.lua"
 
 parts = [
     COUNTERBATTERY / "CounterBattery.lua",
+    ROOT / "Low" / "NdArray.lua",
+    ROOT / "Low" / "Stats.lua",
     COUNTERBATTERY / "Pipeline" / "Types.lua",
     COUNTERBATTERY / "Pipeline" / "TargetTracking.lua",
     COUNTERBATTERY / "Pipeline" / "TargetAimpoint.lua",
     COUNTERBATTERY / "Pipeline" / "TargetRotation.lua",
     COUNTERBATTERY / "Pipeline" / "TargetDensity.lua",
     COUNTERBATTERY / "Pipeline" / "TargetPipeline.lua",
+    COUNTERBATTERY / "Pipeline" / "ClosestPointSolver.lua",
     COUNTERBATTERY / "Pipeline" / "Entry.lua",
 ]
 

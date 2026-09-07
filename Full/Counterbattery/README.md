@@ -18,5 +18,21 @@ target/track → target/aimpoint → target/rotation → target/density
 
 Products are separate values keyed by target ID.  Pipeline stages may retain
 private history, but they do not add fields to or replace the preceding
-product.  The existing solver and the known statistical/math issues are
-intentionally unchanged in this step.
+product.
+
+The generated artifact bundles `Low/NdArray.lua` and the NdArray-backed
+`Low/Stats.lua`, so density covariance is an NdArray.  Legacy Matrix3-only
+callers convert at that boundary rather than changing the distribution.
+
+`Pipeline/ClosestPointSolver.lua` is the active closest-point implementation.
+It stores an explicit timestamp beside each target position/velocity sample,
+uses `Search.interpolatedSearch` to map absolute times back to ring indices,
+freezes rotation only for the analytic Mahalanobis cubic, and uses each
+sample's rotation during the final scan.  `CounterBattery.lua` samples target
+observations on every eligible game tick; timestamps, rather than a cadence
+counter or reconstructed fixed-rate index, define synchronization.
+The origin precheck and missile-origin lookup use the same timestamp-to-ring
+index mapping.  The compatibility helpers retain a fixed-rate fallback only
+for old target records that have no timestamp ring; newly recorded targets
+and the generated artifact use explicit timestamps throughout the active
+path.

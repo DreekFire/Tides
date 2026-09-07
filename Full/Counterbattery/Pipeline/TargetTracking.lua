@@ -2,6 +2,20 @@
 -- Base target observations and the target-owned history buffers.
 local TargetTracking = {}
 
+local function initialDensityCovariance()
+  -- The modular artifact bundles Low/NdArray.lua and Low/Stats.lua, whose
+  -- vector distributions store covariance as an NdArray.  Keep the source
+  -- module usable beside the legacy monolith as well.
+  if NdArray and NdArray.zeros then
+    local covariance = NdArray.zeros({3, 3}, "float")
+    for i = 1, 3 do
+      covariance.data[(i - 1) * 3 + i] = 2500
+    end
+    return covariance
+  end
+  return Matrix3.scalarmul(Matrix3.Identity(), 2500)
+end
+
 function TargetTracking.new(config)
   return {
     enemies = config.enemies,
@@ -28,6 +42,7 @@ function TargetTracking:update(I, stamp)
         local newEnemy = {
                             pos = RingBuffer.RingBuffer(rbsize),
                             vel = RingBuffer.RingBuffer(rbsize),
+                            sampleTimes = RingBuffer.RingBuffer(rbsize),
                             rotation = RingBuffer.RingBuffer(rbsize),
                             origins = RingBuffer.RingBuffer(self.numOrigins),
                             density = Stats.Distribution({"x", "y", "z"}),
@@ -37,13 +52,17 @@ function TargetTracking:update(I, stamp)
                           }
         newEnemy.density.n = 15
         -- todo: set initial size estimate based on block count
-        newEnemy.density.cov = Matrix3.scalarmul(Matrix3.Identity(), 2500)
+        newEnemy.density.cov = initialDensityCovariance()
         enemies[target.Id] = newEnemy
       end
       local e = enemies[target.Id]
       e.valid = true
       RingBuffer.push(e.pos, targetPosition.Position)
       RingBuffer.push(e.vel, targetPosition.Velocity)
+      -- Keep the actual sample time beside the position and velocity.  The
+      -- old solver reconstructed time from the ring index, which is only
+      -- exact when UpdateEnemyData runs at a perfectly uniform cadence.
+      RingBuffer.push(e.sampleTimes, stamp)
     end
   end
 
@@ -66,6 +85,7 @@ function TargetTracking:update(I, stamp)
       velocity = en.vel[en.vel.size],
       positionHistory = en.pos,
       velocityHistory = en.vel,
+      sampleTimeHistory = en.sampleTimes,
       rotationHistory = en.rotation,
     })
   end

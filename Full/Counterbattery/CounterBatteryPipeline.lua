@@ -5,6 +5,32 @@
 -- Each redundant Lua box should have a unique, positive luaIdx (i.e. 1, 2, 3, ...). They will come online if all lower index Lua boxes are destroyed.
 local luaIdx = 1
 
+-- The modular artifact stores vector-distribution covariance in NdArrays,
+-- while this legacy section still consumes Matrix3.  Convert only at that
+-- boundary so the distribution itself remains NdArray-backed.
+local function CounterbatteryCovarianceMatrix(covariance)
+  if covariance and covariance.shape and covariance.data then
+    local values = {}
+    for row = 0, 2 do
+      for col = 0, 2 do
+        values[row * 3 + col + 1] = covariance.data[(covariance.offset or 0)
+          + row * covariance.stride[1] + col * covariance.stride[2] + 1]
+      end
+    end
+    return Matrix3.Matrix3(values)
+  end
+  return covariance
+end
+
+local function CounterbatteryInitialCovariance()
+  if NdArray and NdArray.zeros then
+    local covariance = NdArray.zeros({3, 3}, "float")
+    for i = 1, 3 do covariance.data[(i - 1) * 3 + i] = 2500 end
+    return covariance
+  end
+  return Matrix3.scalarmul(Matrix3.Identity(), 2500)
+end
+
 -- use pCall to avoid crash, retry if failed
 local AllowErrorRecovery = false
 
@@ -178,7 +204,6 @@ local lastFrameTime
 local lastOrigin
 local lastOriginSwitchTime = 0
 local lastProjectilePos
-local nextRecordTime
 local originPopTime = 0
 local prevTime
 local stabilityAvg = 1
@@ -186,6 +211,27 @@ local stabilityWindow
 local t
 local trackLossTime = 0
 local turrets = {}
+
+-- History rings are chronological by logical index, but their cadence is not
+-- guaranteed to be uniform.  The active solver owns the timestamp-aware
+-- lookup; retain the fixed-rate expression only for standalone use of the
+-- original monolith or for old target records without sampleTimes.
+local function CounterbatteryIndexAtTime(enemy, absoluteTime)
+  if CounterbatteryClosestPointSolver
+      and CounterbatteryClosestPointSolver.indexAtTime then
+    return CounterbatteryClosestPointSolver.indexAtTime(
+      enemy, absoluteTime, t, TICKS_PER_S)
+  end
+  return enemy.pos.size + math.floor((absoluteTime - t) * TICKS_PER_S + 0.5)
+end
+
+local function CounterbatterySampleTime(enemy, index)
+  if CounterbatteryClosestPointSolver
+      and CounterbatteryClosestPointSolver.sampleTime then
+    return CounterbatteryClosestPointSolver.sampleTime(enemy, index, t, TICKS_PER_S)
+  end
+  return t - (enemy.pos.size - index) / TICKS_PER_S
+end
 
 -- Tides header
 local BlockUtil = {}
@@ -217,7 +263,6 @@ function Init(I)
     acb.turret = BlockUtil.getWeaponsByName(I, acb.turretName, 1)[1]
   end
 
-  nextRecordTime = I:GetTimeSinceSpawn()
   if stabilityMaxTime > 0 then
     stabilityWindow = LinkedList.LinkedList()
   end
@@ -262,20 +307,20 @@ function CoreUpdate(I)
   frameTime = lastFrameTime and t - lastFrameTime or 0
   lastFrameTime = t
 
+  -- Target history is sampled on every eligible game tick.  The observation
+  -- timestamp is the actual spawn time, so delayed/jittered ticks do not
+  -- silently turn a ring-buffer index into a false fixed-rate timestamp.
+  UpdateEnemyData(I)
+  local stability = I:GetCustomAxis(stabilityAxisName)
+  if stability then
+    CheckStability(stability)
+  end
+
   local target = I:GetTargetInfo(mainframeIdx, 0)
   if not target or not target.Valid then
     return
   end
   local targetPosition = I:GetTargetPositionInfo(mainframeIdx, 0)
-
-  if t >= nextRecordTime - 0.5 / TICKS_PER_S then
-    UpdateEnemyData(I)
-    local stability = I:GetCustomAxis(stabilityAxisName)
-    if stability then
-      CheckStability(stability)
-    end
-    nextRecordTime = nextRecordTime + 1 / TICKS_PER_S
-  end
   currentTargetId = target.Id
 
   local enemy = enemies[currentTargetId]
@@ -381,6 +426,7 @@ function UpdateEnemyData(I)
         local newEnemy = {
                             pos = RingBuffer.RingBuffer(rbsize),
                             vel = RingBuffer.RingBuffer(rbsize),
+                            sampleTimes = RingBuffer.RingBuffer(rbsize),
                             rotation = RingBuffer.RingBuffer(rbsize),
                             origins = RingBuffer.RingBuffer(numOrigins),
                             density = Stats.Distribution({"x", "y", "z"}),
@@ -390,13 +436,14 @@ function UpdateEnemyData(I)
                           }
         newEnemy.density.n = 15
         -- todo: set initial size estimate based on block count
-        newEnemy.density.cov = Matrix3.scalarmul(Matrix3.Identity(), 2500)
+        newEnemy.density.cov = CounterbatteryInitialCovariance()
         enemies[target.Id] = newEnemy
       end
       local e = enemies[target.Id]
       e.valid = true
       RingBuffer.push(e.pos, targetPosition.Position)
       RingBuffer.push(e.vel, targetPosition.Velocity)
+      RingBuffer.push(e.sampleTimes, t)
     end
   end
 
@@ -493,15 +540,15 @@ function GetOrigin(I, line, enemy)
   local relVel = line.ds / line.dt - Vector3(0, line.dv, 0) - enemy.vel[enemy.vel.size]
   local relPos = line.ed - enemy.pos[enemy.pos.size]
   local time2d = math.sqrt((relPos.x ^ 2 + relPos.z ^ 2) / (relVel.x ^ 2 + relVel.z ^2))
-  local tIdx2d = enemy.pos.size - math.floor(time2d * TICKS_PER_S + 0.5)
+  local tIdx2d = CounterbatteryIndexAtTime(enemy, t - time2d)
   local g = I:GetGravityForAltitude(currentLine.start.y)
   local estimate2d = relPos - (relVel * time2d) + 0.5 * g * time2d * time2d
-  if tIdx2d > 0 then
+  if tIdx2d and tIdx2d >= 1 and tIdx2d <= enemy.pos.size then
     estimate2d = Quaternion.Inverse(enemy.rotation[tIdx2d]) * estimate2d
   else
     I:Log(string.format("No target data for %.2f seconds ago", time2d))
   end
-  local covInv = Matrix3.inverse(enemy.density.cov)
+  local covInv = Matrix3.inverse(CounterbatteryCovarianceMatrix(enemy.density.cov))
   if Matrix3.quadform(estimate2d, covInv, estimate2d) < 5 * 5 then
     local closest, closestTimeIdx = RunTrace(I, line, enemy, prevTime)
     if not closest then
@@ -515,8 +562,8 @@ function GetOrigin(I, line, enemy)
     end
     if launchPos then
       I:Log(string.format("Projectile determined to be CRAM shell, fired %f seconds ago", launchTime))
-      local pIdx = enemy.pos.size + math.floor(launchTime * TICKS_PER_S)
-      if pIdx < 1 or pIdx > enemy.pos.size then
+      local pIdx = CounterbatteryIndexAtTime(enemy, t + launchTime)
+      if not pIdx or pIdx < 1 or pIdx > enemy.pos.size then
         I:Log(string.format("CRAM guess has no target data for %.2f seconds ago", launchTime))
         return
       end
@@ -544,7 +591,7 @@ function GetOrigin(I, line, enemy)
       if closestAlt > minAlt and closestAlt < maxAlt then
         local origin = {
           position = closestRotated,
-          time = t + (closestTimeIdx - enemy.pos.size) / TICKS_PER_S,
+          time = CounterbatterySampleTime(enemy, closestTimeIdx),
           relVel = line.ev / frameTime + g * t - enemy.vel[closestTimeIdx],
           rot = eRot,
           detectTime = t,
@@ -569,12 +616,13 @@ function GetMissileOrigin(I, enemy)
     if warn.Valid and not foundMissiles[warn.Id] and warn.TimeSinceLaunch < 0.1 then
       foundMissiles[warn.Id] = 1
       local launcherPos = warn.Position - warn.TimeSinceLaunch * warn.Velocity
-      local tIdx = enemy.pos.size - math.floor(warn.TimeSinceLaunch * TICKS_PER_S + 0.5)
-      tIdx = math.max(tIdx, 1)
+      local tIdx = CounterbatteryIndexAtTime(enemy, t - warn.TimeSinceLaunch)
+      tIdx = math.max(tIdx or 1, 1)
       local targetPosAtLaunch = enemy.pos[tIdx]
       -- todo: set threshold by target size
       local diff = Quaternion.Inverse(enemy.rotation[tIdx]) * (launcherPos - targetPosAtLaunch)
-      if Matrix3.quadform(diff, Matrix3.inverse(enemy.density.cov), diff) < 4 * 4 then
+      if Matrix3.quadform(diff,
+          Matrix3.inverse(CounterbatteryCovarianceMatrix(enemy.density.cov)), diff) < 4 * 4 then
         local closestAlt = launcherPos.y
         if closestAlt > minAlt and closestAlt < maxAlt then
           local lPos = launcherPos - targetPosAtLaunch
@@ -582,7 +630,7 @@ function GetMissileOrigin(I, enemy)
             position = lPos,
             time = t - warn.TimeSinceLaunch,
             relVel = warn.Velocity - enemy.vel[enemy.vel.size],
-            rot = eRot,
+            rot = enemy.rotation[tIdx],
             detectTime = t,
             detectPos = warn.Position,
             type = 2,
@@ -661,9 +709,14 @@ function CheckIfCram(I, line, enemy, closestTimeIdx)
   local bestScoreR = -math.huge
   local t1, t2 = MathUtil.solveQuadratic(-9.81, projVel.y, projPos.y)
   if not t1 then return end
-  for i = math.max(closestTimeIdx - 10, math.floor(t2 * TICKS_PER_S) + enemy.vel.size, 1), math.min(closestTimeIdx + 10, math.floor(t1 * TICKS_PER_S) + enemy.vel.size, enemy.vel.size) do
+  local lowerIndex = CounterbatteryIndexAtTime(enemy, t + t2)
+  local upperIndex = CounterbatteryIndexAtTime(enemy, t + t1)
+  if not lowerIndex or not upperIndex then return end
+  local firstIndex = math.max(closestTimeIdx - 10, lowerIndex, 1)
+  local lastIndex = math.min(closestTimeIdx + 10, upperIndex, enemy.vel.size)
+  for i = firstIndex, lastIndex do
     if enemy.vel[i] then
-      local iTime = (i - enemy.vel.size) / TICKS_PER_S
+      local iTime = CounterbatterySampleTime(enemy, i) - t
       local projPosAtTime = projPos + projVel * iTime - Vector3(0, 0.5 * 9.81 * iTime * iTime, 0)
       local relVelAtClosest = projVel
       relVelAtClosest = relVelAtClosest - enemy.vel[i]
@@ -697,7 +750,7 @@ function CheckIfCram(I, line, enemy, closestTimeIdx)
     return
   end
   idx = math.max(idx - 1, 1)
-  local launchTime = (idx - enemy.vel.size) / TICKS_PER_S
+  local launchTime = CounterbatterySampleTime(enemy, idx) - t
   local projPosAtTime = projPos + projVel * launchTime - Vector3(0, 0.5 * 9.81 * launchTime * launchTime, 0)
   local p = projPosAtTime - enemy.pos[idx]
   return p, launchTime
@@ -865,6 +918,10 @@ function CheckAndUpdateLine(I, line, projectile, tolerance)
 end
 
 function RunTrace(I, line, enemy, timeGuess)
+  if CounterbatteryClosestPointSolver then
+    return CounterbatteryClosestPointSolver.runTrace(I, line, enemy, timeGuess)
+  end
+
   local totalIter = 0
   local targetPos = enemy.pos[enemy.pos.size]
   local targetVel = enemy.vel[enemy.vel.size]
@@ -873,25 +930,12 @@ function RunTrace(I, line, enemy, timeGuess)
       targetPos = enemy.pos[timeGuess]
       targetVel = enemy.vel[timeGuess]
     else
-      I:Log(string.format("No target data for %.2f seconds ago", (enemy.pos.size - timeGuess) / TICKS_PER_S))
+      I:Log(string.format("No target data for %.2f seconds ago", t - CounterbatterySampleTime(enemy, timeGuess)))
     end
   end
   local tIdxClosest = timeGuess or enemy.pos.size
   local cov = enemy.density.cov
-  local covInv = Matrix3.inverse(cov)
-  -- due to bug in FtD's Lua interpreter, inverse is sometimes negated or has columns that are circularly shifted one to the right
-  if Matrix3.determinant(covInv) < 0 then
-    covInv = -covInv
-  end
-  if Matrix3.get(covInv, 1, 2) ~= Matrix3.get(covInv, 2, 1) then
-    for row=1,3 do
-      local temp = covInv[(row - 1) * 3 + 1]
-      for col=1,2 do
-        covInv[(row - 1) * 3 + col] = covInv[(row - 1) * 3 + col + 1]
-      end
-      covInv[(row - 1) * 3 + 3] = temp
-    end
-  end
+  local covInv = Matrix3.inverse(CounterbatteryCovarianceMatrix(cov))
   local iters = tIdxClosest and 2 or 3
   for i = 1, iters do
     -- find the point of closest approach based on current target position and velocity
@@ -913,7 +957,7 @@ function RunTrace(I, line, enemy, timeGuess)
     -- = 2 (x_i S^-1 v_i + x_i S^-1 g t + v_i t S^-1 v_i + v_i t S^-1 g t + 0.5g t^2 S^-1 v_i + 0.5 g t^2 S^-1 g t)
     -- = 2 (x_i S^-1 v_1 + (x_i S^-1 g + v_i S^-1 v_i) t + (v_i S^-1 g + 0.5 g S^-1 v_i) t^2 + 0.5 g S^-1 g t^3)
 
-    local ti = line.tStart - (t - (enemy.pos.size - tIdxClosest) / TICKS_PER_S) -- time from guess to line start
+    local ti = line.tStart - CounterbatterySampleTime(enemy, tIdxClosest) -- time from guess to line start
     local di = line.start - (targetPos + ti * targetVel)
     local projRelVel = line.ds / line.dt - targetVel
     -- accounting exactly for gravity changes over altitude is difficult, just approximate and hope the enemy isn't using mortars
@@ -944,8 +988,9 @@ function RunTrace(I, line, enemy, timeGuess)
       minRoot = a
     end
     -- get target position and velocity at estimated time of closest approach
-    local approachTime = minRoot + line.tStart - t
-    tIdxClosest = math.floor(approachTime * TICKS_PER_S + 0.5) + enemy.pos.size
+    local approachAbsoluteTime = minRoot + line.tStart
+    local approachTime = approachAbsoluteTime - t
+    tIdxClosest = CounterbatteryIndexAtTime(enemy, approachAbsoluteTime)
     if not tIdxClosest then return nil end
     targetPos = enemy.pos[tIdxClosest]
     targetVel = enemy.vel[tIdxClosest]
@@ -959,7 +1004,7 @@ function RunTrace(I, line, enemy, timeGuess)
   -- linear search to find best point
   -- todo: account for target velocity
   function CalcSqrMahaDist(tIdx)
-    local dt = t - (enemy.pos.size - tIdx) / TICKS_PER_S - line.tStart
+    local dt = CounterbatterySampleTime(enemy, tIdx) - line.tStart
     local diff = line.start - enemy.pos[tIdx] + dt * line.ds / line.dt + 0.5 * I:GetGravityForAltitude(line.start.y) * dt * dt
     diff = Quaternion.Inverse(enemy.rotation[tIdx]) * diff
     return Matrix3.quadform(diff, covInv, diff)
@@ -998,7 +1043,7 @@ function RunTrace(I, line, enemy, timeGuess)
   end
   --I:Log(totalIter.." iterations after downwards search")
   -- time of closest approach relative to line.tStart
-  local dt = t - (enemy.pos.size - tIdxClosest) / TICKS_PER_S - line.tStart
+  local dt = CounterbatterySampleTime(enemy, tIdxClosest) - line.tStart
   return line.start - enemy.pos[tIdxClosest] + dt * (line.ds / line.dt) + 0.5 * I:GetGravityForAltitude(line.start.y) * dt * dt, tIdxClosest
 end
 
@@ -1012,6 +1057,2300 @@ end
 -- minified version of Tides library (not meant to be human-readable, see Tides.lua or individual class files for human-readable source)
 function Accumulator.Accumulator(a,b)local c={}c.decay=b;c.window=a;c.time=0;c.weight=0;if a>0 then c.vals=LinkedList.LinkedList()c.times=LinkedList.LinkedList()end;return c end;function Accumulator.update(c,d,e)local f=Mathf.Pow(c.decay,e)if not c.value then c.value=d*e else c.value=c.value*f;c.value=c.value+d*e end;c.time=c.time+e;c.weight=c.weight*f;c.weight=c.weight+e;if c.window>0 then LinkedList.pushFront(c.vals,d)LinkedList.pushFront(c.times,e)while c.time>c.window do local g=LinkedList.popBack(c.times)c.time=c.time-g;local h=Mathf.Pow(c.decay,c.time)c.weight=c.weight-g*h;c.value=c.value-LinkedList.popBack(c.vals)*g*h end end;return c.value,c.weight end;function Accumulator.get(c)return c.value,c.weight end;function Differ.Differ(i)local j={}j.lastVal=i;j.diff=nil;return j end;function Differ.update(j,d)if j.lastVal then j.diff=d-j.lastVal;j.lastVal=d end;j.lastVal=d;return j.diff end;function Differ.get(j)return j.diff end;function Heapq.Heapq(i,k)local l={}l.data=i;l.comp=k or function(m,n)return m<n end;local o=#l.data;l.size=o;for p=math.floor(o/2),1,-1 do Heapq.siftDown(l,p)end;return l end;function Heapq.siftDown(l,q)local r=false;local s=q;local o=#l.data;while not r do r=true;local t=2*s;local u=2*s+1;local v=s;if t<=o and l.comp(l.data[t],l.data[v])then v=t;r=false end;if u<=o and l.comp(l.data[u],l.data[v])then v=u;r=false end;if not r then local w=l.data[v]l.data[v]=l.data[s]l.data[s]=w;s=v end end end;function Heapq.siftUp(l,q)local r=false;local s=q;while not r do r=true;local x=math.floor(s/2)if l.comp(l.data[s],l.data[x])then local w=l.data[x]l.data[x]=l.data[s]l.data[s]=w;s=x;r=false end end end;function Heapq.insert(l,y)l.data[l.size+1]=y;l.size=l.size+1;Heapq.siftUp(l,l.size)end;function Heapq.pop(l)local z=l.data[1]l.data[1]=l.data[l.size]l.data[l.size]=nil;l.size=l.size-1;Heapq.siftDown(l,1)return z end;function Heapq.peek(l)return l.data[1]end;function Heapq.size(l)return l.size end;function LinkedList.LinkedList()local A={}A.value=nil;A.next=A;A.prev=A;return A end;function LinkedList.pushFront(B,d)local A={}A.value=d;LinkedList.connect(A,B.next)LinkedList.connect(B,A)end;function LinkedList.pushBack(B,d)local A={}A.value=d;LinkedList.connect(B.prev,A)LinkedList.connect(A,B)end;function LinkedList.popFront(B)local C=B.next.value;LinkedList.connect(B,B.next.next)return C end;function LinkedList.popBack(B)local C=B.prev.value;LinkedList.connect(B.prev.prev,B)return C end;function LinkedList.peekFront(B)return B.next.val end;function LinkedList.peekBack(B)return B.prev.val end;function LinkedList.connect(D,E)D.next=E;E.prev=D end;function LinkedList.toArray(B)local F=1;local G={}local A=B.next;while A~=B do G[F]=A.value;A=A.next end;return G end;function MathUtil.angleOnPlane(H,I,J)local K=Vector3.ProjectOnPlane(H,J)local g=Vector3.ProjectOnPlane(I,J)return Vector3.SignedAngle(K,g,J)end;function MathUtil.min(L,M)local N=nil;M=M or function(m,n)return m<n end;for O in L do if not N or M(O,N)then N=O end end;return N end;function MathUtil.max(L,M)local P=nil;M=M or function(m,n)return m<n end;for O in L do if not P or M(P,O)then P=O end end;return P end;function MathUtil.range(m,n,Q)local R,S=m,n;local T;if not m then return end;if not n then R=0;S=m;T=R<S and 1 or-1 elseif Q then T=Q end;return function(U,V)local W=V+T;if W==S then return nil end;return W end,nil,R-T end;function MathUtil.shuffle(B,X)local s=X and B or{}if not X then for F=1,#B do s[F]=B[F]end end;for F=#B,2,-1 do local Y=math.random(F)s[F],s[Y]=s[Y],s[F]end;return s end;function MathUtil.combine(m,n,Z)if#m==#n then local z={}for _,a0 in pairs(m)do z[_]=Z(_,a0,n[_])end;return z end end;function MathUtil.angleSSS(m,n,Q)if m+n<Q or m+Q<n or n+Q<m then return nil end;local a1=math.deg(math.acos((n*n+Q*Q-m*m)/(2*n*Q)))local a2,a3=MathUtil.angleSAS(n,a1,Q)return a1,a2,a3 end;function MathUtil.sideSAS(m,a3,n)local a4=m*m+n*n-2*m*n*math.cos(math.rad(a3))return math.sqrt(a4)end;function MathUtil.angleSAS(m,a3,n)local Q=MathUtil.sideSAS(m,a3,n)if MathUtil.isZero(Q)then return nil end;local a1,a2;if m<n then a1=MathUtil.angleLoSin(Q,m,a3)a2=180-a1-a3 else a2=MathUtil.angleLoSin(Q,n,a3)a1=180-a2-a3 end;return a1,a2 end;function MathUtil.sideSSA(m,n,a1)local a5=n*n-m*m;local a6=-2*n*math.cos(math.rad(a1))local a7,a8=MathUtil.solveQuadratic(1,a6,a5)if not a8 then return a7,a8 end;if a7<a8 then return a7,a8 end;return a8,a7 end;function MathUtil.angleSSA(m,n,a1)local a7,a8=MathUtil.sideSSA(m,n,a1)if not a7 then return nil end;local a9,aa=MathUtil.angleSAS(n,a1,a7)if not a8 then return a9,aa end;local ab,ac=MathUtil.angleSAS(n,a1,a8)return a9,aa,ab,ac end;function MathUtil.sideAAS(a1,a2,m)local a3=180-a1-a2;local n=MathUtil.sideLoSin(a1,a2,m)local Q=MathUtil.sideLoSin(a1,a3,m)return n,Q end;function MathUtil.sideLoSin(m,a1,a2)return m*math.sin(math.rad(a2))/math.sin(math.rad(a1))end;function MathUtil.angleLoSin(m,n,a1)return math.deg(math.asin(n*math.sin(math.rad(a1))/m))end;function MathUtil.clampCone(ad,ae,af)local ag=math.min(af,Vector3.Angle(ad,ae))local ah=Vector3.Cross(ad,ae)return Quaternion.AngleAxis(ag,ah)*ad end;function MathUtil.newton(ai,aj,ak,al,am,an)al=al or 1e-5;an=an or 10*al;am=am or 25;aj=aj or function(ao)return(ai(ao+an)-ai(ao))/an end;ak=ak or 0;local ap=al+1;local aq=0;while ap>al and aq<am do local ar=ai(ak)local as=aj(ak)if not ar or not as then return nil end;ap=-ar/as;ak=ak+ap;aq=aq+1 end;if aq<am then return ak,false end;return ak,true end;function MathUtil.ITP(ai,m,n,al,am)if ai(m)*ai(n)>0 then return nil end;if ai(m)>ai(n)then ai=function(ao)return-ai(ao)end end;al=al or 1e-5;am=am or 25;local at=0.2/(n-m)local au=2;local av=1;local aw=math.ceil(math.log((n-m)/(2*al),2))local ax=aw+av;local aq=am;for Y=1,am do local ay=ai(m)local az=ai(n)local aA=ay-az;if aA==0 then return m end;local aB=0.5*(m+n)local aC=(n*ay+m*az)/aA;if aB<m or aB>n then aB=0.5*(m+n)end;local aD=aB-aC;local aE=at*math.abs(n-m)^au;local aF=aD>0 and 1 or(aD==0 and 0 or-1)local aG=aE<=math.abs(aD)and aC+aF*aE or aB;local aH=al*2^(ax-Y)-0.5*(n-m)local aI=math.abs(aG-aB)<=aH and aG or aB-aF*aH;local aJ=ai(aI)if aJ>0 then n=aI elseif aJ<0 then m=aI else return aI,Y==am end;if n-m<2*al then aq=Y;break end end;local ay=ai(m)local az=ai(n)local aA=az-ay;if aA~=0 then return(m*az-n*ay)/aA,aq==am end;return m,aq==am end;function MathUtil.binomCoeffs(aK,aL)if aL then local aM={}else local aM={}aM[1]=1;for _=1,aK do aM[_+1]=aM[_]*(aK-_)/(_+1)end;return aM end end;function MathUtil.ruleOfSigns(aM,aN)local aO={}local aP=#aM;for F=1,aP do aO[F]=aM[aP-F+1]end;if aN~=0 then local aQ={}for F=1,aP do aQ[F]=(F-1)*aM[aP-F+1]end;local aR=1;for F=2,aP do local aS=aN^(F-1)for Y=1,aP-F+1 do local aT=F+Y-1;aO[Y]=aO[Y]+aR*aQ[aT]*aS;aQ[aT]=aQ[aT]*(Y-1)end;aR=aR/F end end;local aU={}local o=1;for F,aV in ipairs(aO)do if aV~=0 then aU[o]=aV;o=o+1 end end;local aW=0;for F=1,#aU-1 do if aU[F]*aU[F+1]<0 then aW=aW+1 end end;return aW end;function MathUtil.cache(ai)local Q={}local aX=getmetatable(Q)or{}function aX.__index(aY,ao)local C=ai(ao)aY[ao]=C;return C end;setmetatable(Q,aX)return function(m)return Q[m]end end;function MathUtil.lerp(ai,R,S,T,aZ)local a_={}for F=1,math.floor((S-R)/T)+1 do a_[F]=ai(R+F*T)end;a_.start=R;a_.stop=S;a_.step=T;a_.lval=aZ and a_[1]or nil;a_.rval=aZ and a_[#a_]or nil;return function(ao)if ao>=a_.stop then return a_.rval end;if ao<=a_.start then return a_.lval end;local F=(ao-a_.start)/a_.step;local b0=F%1;F=math.floor(F)return(1-b0)*a_[F]+b0*a_[F+1]end end;function MathUtil._factorial(o)if o<2 then return 1 end;return MathUtil._factorial(o-1)end;MathUtil.factorial=MathUtil.cache(MathUtil._factorial)MathUtil.eps=1e-9;function MathUtil.isZero(h)return h>-MathUtil.eps and h<MathUtil.eps end;function MathUtil.setTolerance(al)MathUtil.eps=al end;function MathUtil.cuberoot(ao)return ao>0 and ao^(1/3)or-math.abs(ao)^(1/3)end;function MathUtil.solveQuadratic(b1,a7,a8)local b2,b3;local b4,b5,b6;b4=a7/(2*b1)b5=a8/b1;b6=b4*b4-b5;if MathUtil.isZero(b6)then b2=-b4;return b2 elseif b6<0 then return else local b7=math.sqrt(b6)b2=b7-b4;b3=-b7-b4;return b2,b3 end end;function MathUtil.solveCubic(b1,a7,a8,b8)local b2,b3,b9;local ba,bb;local a1,a2,a3;local bc,b4,b5;local bd,b6;a1=a7/b1;a2=a8/b1;a3=b8/b1;bc=a1*a1;b4=1/3*(-(1/3)*bc+a2)b5=0.5*(2/27*a1*bc-1/3*a1*a2+a3)bd=b4*b4*b4;b6=b5*b5+bd;if MathUtil.isZero(b6)then if MathUtil.isZero(b5)then b2=0;ba=1 else local be=MathUtil.cuberoot(-b5)b2=2*be;b3=-be;ba=2 end elseif b6<0 then local bf=1/3*math.acos(-b5/math.sqrt(-bd))local g=2*math.sqrt(-b4)b2=g*math.cos(bf)b3=-g*math.cos(bf+math.pi/3)b9=-g*math.cos(bf-math.pi/3)ba=3 else local b7=math.sqrt(b6)local be=MathUtil.cuberoot(b7-b5)local a0=-MathUtil.cuberoot(b7+b5)b2=be+a0;ba=1 end;bb=1/3*a1;if ba>0 then b2=b2-bb end;if ba>1 then b3=b3-bb end;if ba>2 then b9=b9-bb end;return b2,b3,b9 end;function MathUtil.solveQuartic(b1,a7,a8,b8,bg)local b2,b3,b9,bh;local aM={}local bi,be,a0,bb;local a1,a2,a3,b6;local bc,b4,b5,bj;local ba=0;a1=a7/b1;a2=a8/b1;a3=b8/b1;b6=bg/b1;bc=a1*a1;b4=-0.375*bc+a2;b5=0.125*bc*a1-0.5*a1*a2+a3;bj=-(3/256)*bc*bc+0.0625*bc*a2-0.25*a1*a3+b6;if MathUtil.isZero(bj)then aM[3]=b5;aM[2]=b4;aM[1]=0;aM[0]=1;local bk={MathUtil.solveCubic(aM[0],aM[1],aM[2],aM[3])}ba=#bk;b2,b3,b9=bk[1],bk[2],bk[3]elseif MathUtil.isZero(b5)then local bl={MathUtil.solveQuadratic(1,b4,bj)}if bl[1]>=0 then b2=-math.sqrt(bl[1])b3=math.sqrt(bl[1])ba=2 end;if bl[2]>=0 then if ba==0 then b2=-math.sqrt(bl[2])b3=math.sqrt(bl[2])ba=2 else b9=-math.sqrt(bl[2])bh=math.sqrt(bl[2])ba=4 end end else aM[3]=0.5*bj*b4-0.125*b5*b5;aM[2]=-bj;aM[1]=-0.5*b4;aM[0]=1;b2,b3,b9=MathUtil.solveCubic(aM[0],aM[1],aM[2],aM[3])bi=b2;be=bi*bi-bj;a0=2*bi-b4;if MathUtil.isZero(be)then be=0 elseif be>0 then be=math.sqrt(be)else return end;if MathUtil.isZero(a0)then a0=0 elseif a0>0 then a0=math.sqrt(a0)else return end;aM[2]=bi-be;aM[1]=b5<0 and-a0 or a0;aM[0]=1;do local bk={MathUtil.solveQuadratic(aM[0],aM[1],aM[2])}ba=#bk;b2,b3=bk[1],bk[2]end;aM[2]=bi+be;aM[1]=b5<0 and a0 or-a0;aM[0]=1;if ba==0 then local bk={MathUtil.solveQuadratic(aM[0],aM[1],aM[2])}ba=ba+#bk;b2,b3=bk[1],bk[2]end;if ba==1 then local bk={MathUtil.solveQuadratic(aM[0],aM[1],aM[2])}ba=ba+#bk;b3,b9=bk[1],bk[2]end;if ba==2 then local bk={MathUtil.solveQuadratic(aM[0],aM[1],aM[2])}ba=ba+#bk;b9,bh=bk[1],bk[2]end end;bb=0.25*a1;if ba>0 then b2=b2-bb end;if ba>1 then b3=b3-bb end;if ba>2 then b9=b9-bb end;if ba>3 then bh=bh-bb end;return b2,b3,b9,bh end;function Matrix3.Matrix3(a_)local bm={}for F=1,9 do bm[F]=a_[F]end;setmetatable(bm,Matrix3.meta)return bm end;function Matrix3.get(bm,bn,bo)return bm[(bn-1)*3+bo]end;function Matrix3.set(bm,bn,bo,C)bm[(bn-1)*3+bo]=C end;function Matrix3.scalarmul(bm,s)local bp={}for F=1,9 do bp[F]=s*bm[F]end;return Matrix3.Matrix3(bp)end;function Matrix3.vecmul(bm,bq)local bp=Vector3.zero;for bn=1,3 do local C=0;for bo=1,3 do C=C+bq[bo]*bm[(bn-1)*3+bo]end;bp[bn]=C end;return bp end;function Matrix3.matmul(br,bs)local bp={}for F=1,3 do for Y=1,3 do local C=0;for _=1,3 do C=C+br[(F-1)*3+_]*bs[(_-1)*3+Y]end;bp[(F-1)*3+Y]=C end end;return Matrix3.Matrix3(bp)end;function Matrix3.mul(m,n)if getmetatable(m)~=Matrix3.meta then if type(m)=="table"and m.x then return Matrix3.vecmul(Matrix3.transpose(n),m)end;return Matrix3.mul(n,m)end;if getmetatable(n)==Matrix3.meta then return Matrix3.matmul(m,n)end;if type(n)=="table"and n.x then return Matrix3.vecmul(m,n)end;return Matrix3.scalarmul(m,n)end;function Matrix3.quadform(bt,bm,bu)return Vector3.Dot(bt,bm*bu)end;function Matrix3.Identity()return Matrix3.Matrix3({1,0,0,0,1,0,0,0,1})end;function Matrix3.Zero()return Matrix3.Matrix3({0,0,0,0,0,0,0,0,0})end;function Matrix3.pow(bm,bv)local bw=bm;local bx=bm;while true do bv=math.floor(bv/2)if bv%2==1 then bw=Matrix3.matmul(bm,bx)end;if bv>=2 then bx=Matrix3.matmul(bx,bx)else break end end;return bw end;function Matrix3.add(br,bs)local bp={}for F=1,9 do bp[F]=br[F]+bs[F]end;return Matrix3.Matrix3(bp)end;function Matrix3.hadamard(br,bs)local bp={}for F=1,9 do bp[F]=br[F]*bs[F]end;return Matrix3.Matrix3(bp)end;function Matrix3.transpose(bm)local by={}for bn=1,3 do for bo=1,3 do by[(bo-1)*3+bn]=bm[(bn-1)*3+bo]end end;return Matrix3.Matrix3(by)end;function Matrix3.determinant(bm)local bz=0;local bA=0;for h=1,3 do local bB=1;local bC=1;for s=1,3 do bB=bB*bm[(s-1)*3+(s+h-2)%3+1]bC=bC*bm[(s-1)*3+(-s+h)%3+1]end;bz=bz+bB;bA=bA+bC end;return bz-bA end;function Matrix3.adjugate(bm)local bD={}for bn=1,3 do for bo=1,3 do local bB=1;local bC=1;for F=1,2 do bB=bB*bm[(bn+F-1)%3*3+(bo+F-1)%3+1]bC=bC*bm[(bn+F-1)%3*3+(bo-F-1)%3+1]end;bD[(bo-1)*3+bn]=bB-bC end end;return Matrix3.Matrix3(bD)end;function Matrix3.inverse(bm)local bE=Matrix3.determinant(bm)if MathUtil.isZero(bE)then return end;local bD=Matrix3.adjugate(bm)return 1/bE*bD end;function Matrix3.tostring(bm)local bF=string.format("%f, %f, %f\n%f, %f, %f\n%f, %f, %f",unpack(bm))return bF end;Matrix3.meta={__add=Matrix3.add,__mul=Matrix3.mul,__unm=function(bG)return Matrix3.scalarmul(bG,-1)end,__pow=Matrix3.pow,__tostring=Matrix3.tostring}function RingBuffer.RingBuffer(bH)local bI={}bI.buf={}bI.capacity=bH;bI.size=0;bI.head=1;local aX=getmetatable(bI)or{}aX.__index=RingBuffer.get;setmetatable(bI,aX)return bI end;function RingBuffer.isFull(bI)return bI.size>=bI.capacity end;function RingBuffer.push(bI,d)bI.buf[(bI.head+bI.size-1)%bI.capacity+1]=d;if bI.size==bI.capacity then bI.head=bI.head%bI.capacity+1 else bI.size=bI.size+1 end end;function RingBuffer.pop(bI)if bI.size==0 then return nil end;local C=bI.buf[bI.head]bI.buf[bI.head]=nil;bI.head=bI.head%bI.capacity+1;bI.size=bI.size-1;return C end;function RingBuffer.get(bI,p)if type(p)~="number"or math.floor(p)~=p then return nil end;if p<1 or p>bI.size then return nil end;return bI.buf[(bI.head+p-2)%bI.capacity+1]end;function Search.interpolatedSearch(bJ,t,u,bK,bL,bM)bM=bM or 50;local m,n,bN;local bO=0;while u>t do m=bJ[t]if m==bK then return t end;if m>bK then return bL and t or nil end;n=bJ[u]if n==bK then return u end;if n<bK then return bL and u or nil end;bN=math.floor((bK-m)/(n-m)*(u-t)+t)bN=math.min(math.max(bN,t+1),u-1)if bJ[bN]==bK then return bN end;if bK<bJ[bN]then if bL and math.abs(bJ[bN-1]-bK)>math.abs(bJ[bN]-bK)then return bN end;u=bN-1 else if bL and math.abs(bJ[bN+1]-bK)>math.abs(bJ[bN]-bK)then return bN end;t=bN+1 end;bO=bO+1;if bO>bM then break end end;return bL and t or nil end;function Stats.Distribution(bP)local bQ={n=0,vars=bP}if bP then local bR={}local bS={}local bT=#bP;for F,a0 in ipairs(bP)do bR[a0]=0;for Y=1,bT do bS[(F-1)*bT+Y]=0 end end;bQ.mean=bR;bQ.cov=Matrix3.Matrix3(bS)else bQ.mean=0;bQ.cov=0 end;return bQ end;function Stats.updateDistribution(bQ,bU,bV)local bW=bQ.n;bV=bV or 1;bQ.n=bQ.n+bV;if bQ.vars then local bX={}local bT=bQ.vars and#bQ.vars or 1;for F,a0 in ipairs(bQ.vars)do bX[F]=bQ.mean[a0]local bY=bX[F]+bU[a0]*bV/bQ.n;for Y=F,bT do local ae=bQ.vars[Y]local bZ=bQ.mean[ae]local b_=(bV or 1)*(bU[a0]-bY)*(bU[ae]-bZ)bQ.cov[(F-1)*bT+Y]=(bQ.cov[(F-1)*bT+Y]*bW+b_)/bQ.n;bQ.cov[(Y-1)*bT+F]=bQ.cov[(F-1)*bT+Y]end;bQ.mean[a0]=bY end else local bY=bQ.mean+bU*bV/bQ.n;bQ.cov=(bQ.cov*bW+bV*(bU-bY)*(bU-bQ.mean))/bQ.n;bQ.mean=bY end end;function Stats.updateDistributionBatched(bQ,c0,c1)if#c0==0 then return end;local c2={}local bT=bQ.vars and#bQ.vars or 1;local c3=0;for Y=1,#c0 do c3=c3+(c1 and c1[Y]or 1)end;bQ.n=bQ.n+c3;local bW=bQ.n;if bQ.vars then for F,c4 in ipairs(bQ.vars)do local bo={}for Y=1,#c0 do bo[Y]=c0[Y][c4]end;c2[F]=bo end;for F,a0 in ipairs(bQ.vars)do local c5=0;for Y,s in ipairs(c2[F])do c5=c5+s*(c1 and c1[Y]or 1)end;local bY=bQ.mean[a0]+c5/bQ.n;for Y=F,bT do local bZ=bQ.mean[bQ.vars[Y]]c5=0;for s=1,#c0 do c5=c5+(c1 and c1[s]or 1)*(c2[F][s]-bY)*(c2[Y][s]-bZ)end;bQ.cov[(F-1)*bT+Y]=(bQ.cov[(F-1)*bT+Y]*bW+c5)/bQ.n;bQ.cov[(Y-1)*bT+F]=bQ.cov[(F-1)*bT+Y]end;bQ.mean[a0]=bY end else local c5=0;for F,s in ipairs(c0)do c5=c5+s*(c1 and c1[F]or 1)end;local bY=bQ.mean+c5/bQ.n;c5=0;for F,s in ipairs(c0)do c5=c5+(c1 and c1[F]or 1)*(s-bY)*(s-bQ.mean)end;bQ.cov=(bQ.cov*bW+c5)/bQ.n end end;function Stats.mean(bQ)return bQ.mean end;function Stats.covariance(bQ)return bQ.cov end;function Stats.namedCovariance(bQ,c6,c7)if not bQ.vars then return bQ.cov end;local bT=bQ.vars and#bQ.vars or 1;for F=1,bT do if bQ.vars[F]==c6 then for Y=1,bT do if bQ.vars[Y]==c7 then return bQ.cov[(F-1)*bT+Y]end end end end end;function Stats.normal()local bi,c8=Stats.boxMuller()return bi end;function Stats.normalPDF(bi)return math.exp(-0.5*bi*bi)/math.sqrt(2*math.pi)end;function Stats.normalCDF(bi)local c9=0.2316419;local ca=0.319381530;local cb=-0.356563782;local cc=1.781477937;local cd=-1.821255978;local ce=1.330274429;local g=1/(1+c9*bi)return 1-Stats.normalPDF(bi)*(ca*g+cb*g^2+cc*g^3+cd*g^4+ce*g^5)end;function Stats.inverseNorm(b4)local cf=b4>=0.5 and b4 or-b4;local bi=5.55556*(1-((1-cf)/cf)^0.1186)if b4<0.5 then bi=-bi end;return bi end;function Stats.boxMuller()local cg=math.random()local ch=math.random()ch=math.random()ch=math.random()local bj=math.sqrt(-2*math.log(cg))local ci=2*math.pi*ch;return bj*math.cos(ci),bj*math.sin(ci)end;VectorN.mt=getmetatable({})or{}VectorN.mt.__add=function(m,n)local cj=type(m)=="number"local ck=type(n)=="number"if not cj and ck then return n+m end;if cj and not ck then return Stats.combine(m,n,function(_,ao,cl)return m+cl end)else return Stats.combine(m,n,function(_,ao,cl)return ao+cl end)end end;VectorN.mt.__sub=function(m,n)return m+-n end;VectorN.mt.__mul=function(m,n)local cj=type(m)=="number"local ck=type(n)=="number"if not cj and ck then return n*m end;if cj and not ck then local z={}for _,a0 in pairs(n)do z[_]=m*a0 end;return z else return Stats.combine(m,n,function(_,ao,cl)return ao*cl end)end end;VectorN.mt.__div=function(m,n)local cj=type(m)=="number"local ck=type(n)=="number"if not cj and ck then return m*1/n end;if cj and not ck then local z={}for _,a0 in pairs(n)do z[_]=m/a0 end;return z else return Stats.combine(m,n,function(_,ao,cl)return ao/cl end)end end;VectorN.mt.__unm=function(m)local z={}for _,a0 in pairs(m)do z[_]=-a0 end;return z end;function VectorN.VectorN(B)local bq={}for _,a0 in pairs(B)do if type(a0)=="table"then bq[_]=VectorN.VectorN(a0)else bq[_]=a0 end end;setmetatable(bq,VectorN.mt)return bq end;function Control.PID(cm,cn,co,cp,cq,cr)local cs={}cs.kP=cm;cs.kI=cn;cs.kD=co;cs.Iacc=Accumulator.Accumulator(cp,cq)if cr and cr~=0 then cs.period=cr end;return cs end;function Control.processPID(ct,cu,e)cu=ct.period and(cu+ct.period/2)%ct.period-ct.period/2 or cu;local b4=ct.kP*cu;local F,cv=Accumulator.update(ct.Iacc,cu,e)F=ct.kI*F/cv;local h=ct.kD*(cu-(ct.lastError or cu))/e;ct.lastError=cu;return b4+F+h end;function Control.FF(aM,cr)local cw={}cw.coeffs=aM;cw.degree=#aM-1;if cr and cr~=0 then cw.period=cr end;cw.derivs={}return cw end;function Control.processFF(ct,bK,e)local cx=0*bK;local cy=bK;local cz=bK;for F=1,ct.degree+1 do cz=ct.derivs[F]ct.derivs[F]=cy;cx=cx+ct.coeffs[F]*cy;if cz then local aD=cy-cz;if F==1 and ct.period then aD=(aD+ct.period/2)%ct.period-ct.period/2 end;cy=aD/e else break end end;return cx end;function Nav.toLocal(cA,cB,cC)local cD=cA-cB;return Quaternion.Inverse(cC)*cD end;function Nav.toGlobal(cE,cB,cC)local cD=cC*cE;return cD+cB end;function Nav.cartToPol(cF)local bj=cF.magnitude;local ci=Vector3.SignedAngle(Vector3.forward,cF,Vector3.up)local bf=90-Vector3.Angle(Vector3.up,cF)return Vector3(bj,ci,bf)end;function Nav.cartToCyl(cF)local cG=Vector3(cF.x,0,cF.z)local cH=cG.magnitude;local bf=Vector3.SignedAngle(Vector3.forward,cF,Vector3.up)local bi=cF.y;return Vector3(cH,bf,bi)end;function Nav.polToCart(cF)local bj,ci,bf=cF.x,cF.y,cF.z;local ao=Mathf.Sin(ci)*Mathf.Cos(bf)local cl=Mathf.Sin(bf)local bi=Mathf.Cos(ci)*Mathf.Cos(bf)return bj*Vector3(ao,cl,bi)end;function Nav.cylToCart(cF)local cH,bf,cI=cF.x,cF.y,cF.z;local ao=cH*Mathf.Sin(bf)local cl=cI;local bi=cH*Mathf.Cos(bf)return Vector3(ao,cl,bi)end;function Targeting.firstOrderTargeting(cJ,cK,cL)if cK.sqrMagnitude==0 then return cJ.normalized end;local cM=cJ-Vector3.Project(cJ,cK)local cN=Vector3.Dot(cK,cJ-cM)/cK.sqrMagnitude;local m,n=MathUtil.solveQuadratic(cK.sqrMagnitude-cL*cL,2*cN*cK.sqrMagnitude,cM.sqrMagnitude+cN*cN*cK.sqrMagnitude)local cO=nil;if m and m>=0 then cO=m end;if n and n>=0 and n<m then cO=n end;if cO then return cJ+cO*cK,cO end end;function Targeting.secondOrderTargetingNewton(cJ,cP,cQ,cL,cR,cS,ak)local aD=10000;local cT=0;local aq=0;if not ak then ak=0 end;local cU=cJ+ak*cP+0.5*ak*ak*cQ;while math.abs(aD)>0.001 and aq<10 do local g=cU.magnitude/cL;aD=g-cT;cT=g;aq=aq+1;cU=cJ+g*cP+0.5*g*g*cQ end;return cU,cT,aq end;Targeting.secondOrderTargeting=Targeting.secondOrderTargetingNewton;function Targeting.secondOrderTargetingITP(cJ,cP,cQ,cL,cR,cS,ak)if not ak then ak=0 end;local m=-0.25*cQ.sqrMagnitude;local n=-Vector3.Dot(cP,cQ)local Q=-(cP.sqrMagnitude-cL*cL+Vector3.Dot(cJ,cQ))local h=-2*Vector3.Dot(cJ,cP)local cu=-cJ.sqrMagnitude;local g;local cV=cQ.magnitude;local cW=cP.magnitude;local cX=cJ.magnitude;local cY,cZ=MathUtil.solveQuadratic(0.5*cV,cW+cL,-cX)local c_=math.max(cY,cZ)local d0;local aM={0.5*cV,cW-cL,cX}if MathUtil.ruleOfSigns(aM,0)==2 then local d1,d2=MathUtil.solveQuadratic(aM[1],aM[2],aM[3])if d1 then d0=math.min(d1,d2)end end;if not d0 or d0<c_ then local b2,b3,b9=MathUtil.solveCubic(4*m,3*n,2*Q,h)if not b9 then if b2>c_ then d0=b2 end else local d1=math.min(b2,b9)local d2=math.max(b2,b9)if d1>c_ then d0=d1 elseif d2>c_ then d0=d2 end end;if not d0 then return end end;local function d3(ao)return cu+ao*(h+ao*(Q+ao*(n+ao*m)))end;if ak>c_ and d0>ak then if d3(c_)*d3(g)<0 then d0=ak else c_=ak end end;g=MathUtil.ITP(d3,c_,d0,1e-4,25)if not g then return end;if g>=c_ and g<=d0 then local d4=cJ+cP*g+0.5*cQ*g*g;if d4.magnitude>=cR and d4.magnitude<=cS then return d4,g end end end;function Targeting.AIPPN(d5,cJ,d6,cK,d7)local cP=cK-d6;local d8=Vector3.Dot(-cP,cJ.normalized)if d8<=0 then d8=10 end;local d9=cJ.magnitude/d8;local da=Vector3.Cross(cJ,cP)/cJ.sqrMagnitude;local db=Vector3.Cross(cJ,d7)/cJ.sqrMagnitude*d9/2;local dc=da+db;local dd=Vector3.Cross(dc,cJ.normalized)local de=Vector3.ProjectOnPlane(dd,d6).normalized;local df=d5*d6.magnitude*dc.magnitude;return df*de end;function Targeting.ATPN(d5,cJ,d6,cK,d7)local cP=cK-d6;local d8=-Vector3.Dot(cP,cJ.normalized)if d8<=0 then d8=10 end;local da=Vector3.Cross(cJ,cP)/cJ.sqrMagnitude;local dd=Vector3.Cross(da,cJ.normalized)local dg=Vector3.ProjectOnPlane(d7,cJ)return d5*d8*dd+0.5*d5*d7 end;function BlockUtil.getWeaponsByName(dh,di,aW,dj)if DEBUG then dh:Log("searching for "..di)end;local dk={}aW=aW or-1;local Q=aW;if not dj or dj==0 or dj==2 then for F=0,dh:GetWeaponCount()-1 do if Q==0 then break end;if dh:GetWeaponBlockInfo(F).CustomName==di then table.insert(dk,{subIdx=nil,wpnIdx=F})if DEBUG then dh:Log("found weapon "..di.." on hull, type "..dh:GetWeaponInfo(F).WeaponType)end;Q=Q-1 end end end;if not dj or dj==1 or dj==2 then local dl=dh:GetAllSubConstructs()for p=1,#dl do local bb=dl[p]for F=0,dh:GetWeaponCountOnSubConstruct(bb)-1 do if Q==0 then break end;if dh:GetWeaponBlockInfoOnSubConstruct(bb,F).CustomName==di then table.insert(dk,{subIdx=bb,wpnIdx=F})if DEBUG then dh:Log("found weapon "..di.." on subobj "..bb..", type "..dh:GetWeaponInfoOnSubConstruct(bb,F).WeaponType)end;Q=Q-1 end end end end;if DEBUG then dh:Log("weapon count: "..#dk)end;return dk end;function BlockUtil.getSubConstructsByName(dh,di,aW)if DEBUG then dh:Log("searching for "..di)end;local dl=dh:GetAllSubConstructs()local dm={}aW=aW or-1;local Q=aW;for p=1,#dl do local bb=dl[p]if Q==0 then break end;if dh:GetSubConstructInfo(bb).CustomName==di then table.insert(dm,bb)if DEBUG then dh:Log("found subobj "..di)end;Q=Q-1 end end;if DEBUG then dh:Log("subobj count: "..#dm)end;return dm end;function BlockUtil.getBlocksByName(dh,di,dn,aW)if DEBUG then dh:Log("searching for "..di)end;local dp={}aW=aW or-1;local Q=aW;for p=0,dh:Component_GetCount(dn)-1 do if Q==0 then break end;if dh:Component_GetBlockInfo(dn,p).CustomName==di then table.insert(dp,p)if DEBUG then dh:Log("found component "..di)end;Q=Q-1 end end;if DEBUG then dh:Log("component count: "..#dp)end;return dp end;function BlockUtil.populateWeaponsByName(dh,dj)if DEBUG then dh:Log("populating all weapons, mode "..dj)end;local dk={}for p=0,dh:GetWeaponCount()-1 do local di=dh:Component_GetBlockInfo(type,p).CustomName;if di and di~=''then dk[di]=dk[di]or{}table.insert(dk[di],{subIdx=nil,wpnIdx=p})if DEBUG then dh:Log("found weapon "..di.." on hull, type "..dh:GetWeaponInfo(p).WeaponType)end else table.insert(dk,{subIdx=nil,wpnIdx=p})if DEBUG then dh:Log("found unnamed weapon on hull, type "..dh:GetWeaponInfo(p).WeaponType)end end end;if not dj or dj==1 or dj==2 then local dl=dh:GetAllSubConstructs()for p=1,#dl do local bb=dl[p]for F=0,dh:GetWeaponCountOnSubConstruct(bb)-1 do local di=dh:Component_GetBlockInfo(type,F).CustomName;if di and di~=''then dk[di]=dk[di]or{}table.insert(dk[di],{subIdx=bb,wpnIdx=F})if DEBUG then dh:Log("found weapon "..di.." on subobj "..bb..", type "..dh:GetWeaponInfoOnSubConstruct(bb,F).WeaponType)end else table.insert(dk,{subIdx=bb,wpnIdx=F})if DEBUG then dh:Log("found unnamed weapon on subobj "..bb..", type "..dh:GetWeaponInfoOnSubConstruct(bb,F).WeaponType)end end end end end;if DEBUG then local aW=0;for _,a0 in pairs(dk)do if type(a0)=="table"then aW=aW+#a0 else aW=aW+1 end end;dh:Log("weapon count: "..aW)end;return dk end;function BlockUtil.populateSubConstructsByName(dh)if DEBUG then dh:Log("populating all subconstructs")end;local dl=dh:GetAllSubConstructs()local dm={}for p=1,#dl do local bb=dl[p]local di=dh:GetSubConstructInfo(bb).CustomName;if di and di~=''then dm[di]=dm[di]or{}table.insert(dm[di],bb)if DEBUG then dh:Log("found subobj "..di)end else table.insert(dm,bb)if DEBUG then dh:Log("found unnamed subobj")end end end;if DEBUG then local aW=0;for _,a0 in pairs(dm)do if type(a0)=="table"then aW=aW+#a0 else aW=aW+1 end end;dh:Log("subobject count: "..aW)end;return dm end;function BlockUtil.populateBlocksByName(dh,dn)if DEBUG then dh:Log("populating all blocks of type "..dn)end;local dp={}for p=0,dh:Component_GetCount(dn)-1 do local di=dh:Component_GetBlockInfo(dn,p).CustomName;if di and di~=''then dp[di]=dp[di]or{}table.insert(dp[di],p)if DEBUG then dh:Log("found component "..di)end else table.insert(dp,p)if DEBUG then dh:Log("found unnamed component of type "..dn)end end end;if DEBUG then local aW=0;for _,a0 in pairs(dp)do if type(a0)=="table"then aW=aW+#a0 else aW=aW+1 end end;dh:Log("component count: "..aW)end;return dp end;function BlockUtil.getWeaponInfo(dh,dq)if dq.subIdx then return dh:GetWeaponInfoOnSubConstruct(dq.subIdx,dq.wpnIdx)end;return dh:GetWeaponInfo(dq.wpnIdx)end;function BlockUtil.getWeaponBlockInfo(dh,dq)if dq.subIdx then return dh:GetWeaponBlockInfoOnSubConstruct(dq.subIdx,dq.wpnIdx)end;return dh:GetWeaponBlockInfo(dq.wpnIdx)end;function BlockUtil.aimWeapon(dh,dq,dr,ds)if dq.subIdx then dh:AimWeaponInDirectionOnSubConstruct(dq.subIdx,dq.wpnIdx,dr.x,dr.y,dr.z,ds)else dh:AimWeaponInDirection(dq.wpnIdx,dr.x,dr.y,dr.z,ds)end end;function BlockUtil.fireWeapon(dh,dq,ds)if dq.subIdx then return dh:FireWeaponOnSubConstruct(dq.subIdx,dq.wpnIdx,ds)end;return dh:FireWeapon(dq.wpnIdx,ds)end;function Combat.pickTarget(dh,dt,du)du=du or function(U,dv)return dv.Priority end;local bK,dw;for F in MathUtil.range(dh:GetNumberOfTargets(dt))do local dv=dh:GetTargetInfo(dt,F)local dx=du(dh,dv)if not bK or dx>dw then bK=dv;dw=dx end end;return bK end;function Combat.CheckConstraints(dh,dy,dz,dA)local dB;if dA then dB=dh:GetWeaponConstraintsOnSubConstruct(dA,dz)else dB=dh:GetWeaponConstraints(dz)end;if not dB or not dB.Valid then return true end;local dC=dh:GetConstructForwardVector()local dD=dh:GetConstructUpVector()local dE=Quaternion.LookRotation(dC,dD)dy=Quaternion.Inverse(dE)*dy;if dB.InParentConstructSpace and dA then local dF=dh:GetSubConstructInfo(dA).localRotation;dy=Quaternion.inverse(dF)*dy end;local dG=MathUtil.angleOnPlane(Vector3.forward,dy,Vector3.up)local dH=dy;dH.y=0;local O=Mathf.Atan2(dy.y,dH.magnitude)local dI=dG>dB.MinAzimuth and dG<dB.MaxAzimuth;local dJ=O>dB.MinElevation and O<dB.MaxElevation;if dB.FlipAzimuth then dI=not dI end;if dI and dJ then return true end;dG=dG+180;O=180-O;if O>180 then O=O-360 end;if O<-180 then O=O+360 end;dI=dG>dB.MinAzimuth and dG<dB.MaxAzimuth;dJ=O>dB.MinElevation and O<dB.MaxElevation;if dB.FlipAzimuth then dI=not dI end;if dI and dJ then return true end;return false end;function StringUtil.LogVector(dh,bq,dK)dh:Log(dK.."("..bq.x..", "..bq.y..", "..bq.z..")")end
 -- END Full/Counterbattery/CounterBattery.lua
+
+-- BEGIN Low/NdArray.lua
+NdArray = {}
+
+local function ndCopyShapeLocal(shape)
+    local result = {}
+    for axis, size in ipairs(shape) do result[axis] = size end
+    return result
+end
+
+local function ndSizeLocal(shape)
+    local size = 1
+    for _, dimension in ipairs(shape) do size = size * dimension end
+    return size
+end
+
+local function ndShapeString(shape)
+    local dimensions = {}
+    for axis, size in ipairs(shape) do dimensions[axis] = tostring(size) end
+    return "(" .. table.concat(dimensions, ", ") .. ")"
+end
+
+local function ndTruthy(value)
+    return value ~= nil and value ~= false and value ~= 0
+end
+
+local function ndAsArray(value)
+    if type(value) == "table" and value.shape and value.data then return value end
+    return NdArray.array(value)
+end
+
+local function ndNormalizeDType(dtype)
+    if dtype == nil then return "any" end
+    assert(dtype == "any" or dtype == "bool" or dtype == "int"
+        or dtype == "float" or dtype == "object", "unsupported dtype")
+    return dtype
+end
+
+local function ndValueDType(value)
+    if type(value) == "boolean" then return "bool" end
+    if type(value) ~= "number" then return "object" end
+    return value == math.floor(value) and "int" or "float"
+end
+
+local function ndInferDType(data)
+    if #data == 0 then return "any" end
+    local dtype = ndValueDType(data[1])
+    for index = 2, #data do
+        local valueType = ndValueDType(data[index])
+        if valueType == "object" or dtype == "object" then
+            dtype = "object"
+        elseif valueType == "bool" and dtype ~= "bool" then
+            dtype = "object"
+        elseif dtype == "bool" and valueType ~= "bool" then
+            dtype = "object"
+        elseif valueType == "float" or dtype == "float" then
+            dtype = "float"
+        end
+    end
+    return dtype
+end
+
+local function ndRefreshDType(arr)
+    if arr.size > 0 then arr.dtype = ndInferDType(arr.data) end
+    return arr
+end
+
+local function ndWarning(message)
+    local text = "NdArray warning: " .. message .. "\n"
+    if io and io.stderr then io.stderr:write(text) else print(text) end
+end
+
+local function ndBroadcastError(shapes)
+    local formatted = {}
+    for index, shape in ipairs(shapes) do formatted[index] = ndShapeString(shape) end
+    return string.format("operands could not be broadcast together with shapes %s",
+        table.concat(formatted, " and "))
+end
+
+local function ndViewLocal(arr, shape, stride)
+    local result = {
+        shape = ndCopyShapeLocal(shape),
+        stride = ndCopyShapeLocal(stride),
+        data = arr.data,
+        offset = arr.offset or 0,
+        size = ndSizeLocal(shape),
+        dtype = arr.dtype or "any",
+    }
+    setmetatable(result, NdArray.meta)
+    return result
+end
+
+local function ndAxisLocal(axis, ndim)
+    assert(type(axis) == "number" and axis == math.floor(axis), "axis must be an integer")
+    if axis < 0 then axis = ndim + axis end
+    assert(axis >= 0 and axis < ndim, "axis is out of bounds")
+    return axis
+end
+
+local function ndFlattenLocal(value, data)
+    if type(value) ~= "table" then
+        data[#data + 1] = value
+        return
+    end
+    for index = 1, #value do ndFlattenLocal(value[index], data) end
+end
+
+local function ndInferShapeLocal(value)
+    if type(value) ~= "table" then return {} end
+    local childShape = ndInferShapeLocal(value[1])
+    for index = 2, #value do
+        local shape = ndInferShapeLocal(value[index])
+        assert(#shape == #childShape, "array values must be rectangular")
+        for axis = 1, #shape do assert(shape[axis] == childShape[axis], "array values must be rectangular") end
+    end
+    local shape = {#value}
+    for axis, size in ipairs(childShape) do shape[#shape + 1] = size end
+    return shape
+end
+
+function NdArray.array(lst, dtype)
+    if type(lst) == "table" and lst.shape and lst.data then
+        local result = NdArray.copy(lst)
+        if dtype ~= nil then result.dtype = ndNormalizeDType(dtype) end
+        return result
+    end
+    local shape = ndInferShapeLocal(lst)
+    local result = NdArray.empty(shape, dtype)
+    ndFlattenLocal(lst, result.data)
+    assert(#result.data == result.size, "array values must be rectangular")
+    if dtype == nil then result.dtype = ndInferDType(result.data) end
+    return result
+end
+
+NdArray.Array = NdArray.array
+
+function NdArray.zeros(shape, dtype)
+    return NdArray.full(shape, 0, dtype or "int")
+end
+
+function NdArray.ones(shape, dtype)
+    return NdArray.full(shape, 1, dtype or "int")
+end
+
+function NdArray.full(shape, fill, dtype)
+    local arr = NdArray.empty(shape, dtype or ndValueDType(fill))
+    local data = arr.data
+    for i=1, arr.size do
+        data[i] = fill
+    end
+    return arr
+end
+
+function NdArray.empty(shape, dtype)
+    local size = 1
+    local stride = {}
+    local shape_copy = {}
+    for i, dim in ipairs(shape) do
+        size = size * dim
+        for j, s in ipairs(stride) do
+            stride[j] = stride[j] * dim
+        end
+        stride[i] = 1
+        shape_copy[i] = dim
+    end
+    local data = {}
+    local arr = {
+        size = size,
+        stride = stride,
+        shape = shape_copy,
+        data = data,
+        offset = 0,
+        dtype = ndNormalizeDType(dtype),
+    }
+    setmetatable(arr, NdArray.meta)
+    return arr
+end
+
+function NdArray.zerosLike(arr)
+    return NdArray.zeros(arr.shape, arr.dtype)
+end
+
+function NdArray.onesLike(arr)
+    return NdArray.ones(arr.shape, arr.dtype)
+end
+
+function NdArray.fullLike(arr, fill)
+    return NdArray.full(arr.shape, fill, arr.dtype)
+end
+
+function NdArray.emptyLike(arr)
+    return NdArray.empty(arr.shape, arr.dtype)
+end
+
+-- Lua cannot implicitly coerce a table to a number.  This is the explicit
+-- scalar boundary for rank-zero arrays and is also used by scalar indexing.
+function NdArray.item(arr)
+    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
+    assert(#arr.shape == 0, "item requires a zero-dimensional NdArray")
+    return arr.data[(arr.offset or 0) + 1]
+end
+
+NdArray.scalar = NdArray.item
+
+function NdArray.arange(a, b, c)
+    assert(type(a) == "number", "arange requires at least one number")
+    local start, stop = 0, a
+    if b ~= nil then start, stop = a, b end
+    local step = c or (start <= stop and 1 or -1)
+    assert(step ~= 0, "arange step must not be zero")
+    local data, value = {}, start
+    if step > 0 then
+        while value < stop do data[#data + 1], value = value, value + step end
+    else
+        while value > stop do data[#data + 1], value = value, value + step end
+    end
+    return NdArray.array(data)
+end
+
+function NdArray._callbackIter(func, dst, ...)
+    assert(type(dst) == "table" and dst.shape and dst.data, "expected an NdArray destination")
+    local operands = {dst, ...}
+    local coreAxes = {}
+    for operand = 1, #operands do coreAxes[operand] = {} end
+    local iterator = NdArray.coreIter(operands, coreAxes)
+    local indices, views = iterator()
+    while indices do
+        local args = {}
+        for operand = 2, #views do args[operand - 1] = views[operand].data[views[operand].offset + 1] end
+        views[1].data[views[1].offset + 1] = func(table.unpack(args, 1, #args))
+        indices, views = iterator()
+    end
+    return dst
+end
+
+function NdArray.ndindex(shape)
+    local ndim = #shape
+    local start_idxs = {}
+    for i=1,ndim do
+        start_idxs[i] = 0
+    end
+    start_idxs[ndim] = -1
+    return function()
+        for d=ndim, 1, -1 do
+            if start_idxs[d] == shape[d] then
+                if d == 1 then return nil end
+                start_idxs[d] = 0
+                start_idxs[d - 1] = start_idxs[d - 1] + 1
+            else
+                start_idxs[d] = start_idxs[d] + 1
+                break
+            end
+        end
+        return start_idxs
+    end
+end
+
+-- Specialized C-order walkers retain the same zero-based offset contract as
+-- _strideIter, but keep operand offsets in locals for the 1/2/3-operand paths.
+function NdArray._strideIter1(arr)
+    local shape = arr.shape
+    local stride = arr.stride
+    local ndim = #shape
+    local idxs, offset = {}, arr.offset or 0
+    for axis = 1, ndim do idxs[axis] = 0 end
+    if ndim == 0 then
+        local first = true
+        return function()
+            if not first then return nil end
+            first = false
+            return idxs, offset
+        end
+    end
+    local inner_limit, inner_stride = shape[ndim], stride[ndim]
+    local inner_idx, done = 0, ndSizeLocal(shape) == 0
+    offset = offset - inner_stride
+    return function()
+        if done then return nil end
+        if inner_idx < inner_limit then
+            inner_idx = inner_idx + 1
+            offset = offset + inner_stride
+            idxs[ndim] = inner_idx
+            return idxs, offset
+        end
+        inner_idx = 0
+        idxs[ndim] = 0
+        offset = offset - inner_stride * (inner_limit - 1)
+        if ndim == 1 then
+            done = true
+            return nil
+        end
+        for d = ndim - 1, 1, -1 do
+            if idxs[d] + 1 < shape[d] then
+                idxs[d] = idxs[d] + 1
+                offset = offset + stride[d]
+                break
+            else
+                idxs[d] = 0
+                offset = offset - stride[d] * (shape[d] - 1)
+                if d == 1 then
+                    done = true
+                    return nil
+                end
+            end
+        end
+        inner_idx = 1
+        idxs[ndim] = 1
+        return idxs, offset
+    end
+end
+
+function NdArray._strideIter2(arr1, arr2)
+    local shape = arr1.shape
+    local stride1 = arr1.stride
+    local stride2 = arr2.stride
+    local ndim = #shape
+    local idxs, offset1, offset2 = {}, arr1.offset or 0, arr2.offset or 0
+    for axis = 1, ndim do idxs[axis] = 0 end
+    if ndim == 0 then
+        local first = true
+        return function()
+            if not first then return nil end
+            first = false
+            return idxs, offset1, offset2
+        end
+    end
+    local inner_limit = shape[ndim]
+    local inner_stride1, inner_stride2 = stride1[ndim], stride2[ndim]
+    local inner_idx, done = 0, ndSizeLocal(shape) == 0
+    offset1, offset2 = offset1 - inner_stride1, offset2 - inner_stride2
+    return function()
+        if done then return nil end
+        if inner_idx < inner_limit then
+            inner_idx = inner_idx + 1
+            offset1, offset2 = offset1 + inner_stride1, offset2 + inner_stride2
+            idxs[ndim] = inner_idx
+            return idxs, offset1, offset2
+        end
+        inner_idx = 0
+        idxs[ndim] = 0
+        offset1 = offset1 - inner_stride1 * (inner_limit - 1)
+        offset2 = offset2 - inner_stride2 * (inner_limit - 1)
+        if ndim == 1 then
+            done = true
+            return nil
+        end
+        for d = ndim - 1, 1, -1 do
+            if idxs[d] + 1 < shape[d] then
+                idxs[d] = idxs[d] + 1
+                offset1, offset2 = offset1 + stride1[d], offset2 + stride2[d]
+                break
+            else
+                idxs[d] = 0
+                offset1 = offset1 - stride1[d] * (shape[d] - 1)
+                offset2 = offset2 - stride2[d] * (shape[d] - 1)
+                if d == 1 then
+                    done = true
+                    return nil
+                end
+            end
+        end
+        inner_idx = 1
+        idxs[ndim] = 1
+        return idxs, offset1, offset2
+    end
+end
+
+function NdArray._strideIter3(arr1, arr2, arr3)
+    local shape = arr1.shape
+    local stride1 = arr1.stride
+    local stride2 = arr2.stride
+    local stride3 = arr3.stride
+    local ndim = #shape
+    local idxs, offset1, offset2, offset3 = {}, arr1.offset or 0, arr2.offset or 0, arr3.offset or 0
+    for axis = 1, ndim do idxs[axis] = 0 end
+    if ndim == 0 then
+        local first = true
+        return function()
+            if not first then return nil end
+            first = false
+            return idxs, offset1, offset2, offset3
+        end
+    end
+    local inner_limit = shape[ndim]
+    local inner_stride1, inner_stride2, inner_stride3 = stride1[ndim], stride2[ndim], stride3[ndim]
+    local inner_idx, done = 0, ndSizeLocal(shape) == 0
+    offset1, offset2, offset3 = offset1 - inner_stride1, offset2 - inner_stride2, offset3 - inner_stride3
+    return function()
+        if done then return nil end
+        if inner_idx < inner_limit then
+            inner_idx = inner_idx + 1
+            offset1, offset2, offset3 = offset1 + inner_stride1, offset2 + inner_stride2, offset3 + inner_stride3
+            idxs[ndim] = inner_idx
+            return idxs, offset1, offset2, offset3
+        end
+        inner_idx = 0
+        idxs[ndim] = 0
+        offset1 = offset1 - inner_stride1 * (inner_limit - 1)
+        offset2 = offset2 - inner_stride2 * (inner_limit - 1)
+        offset3 = offset3 - inner_stride3 * (inner_limit - 1)
+        if ndim == 1 then
+            done = true
+            return nil
+        end
+        for d = ndim - 1, 1, -1 do
+            if idxs[d] + 1 < shape[d] then
+                idxs[d] = idxs[d] + 1
+                offset1, offset2, offset3 = offset1 + stride1[d], offset2 + stride2[d], offset3 + stride3[d]
+                break
+            else
+                idxs[d] = 0
+                offset1 = offset1 - stride1[d] * (shape[d] - 1)
+                offset2 = offset2 - stride2[d] * (shape[d] - 1)
+                offset3 = offset3 - stride3[d] * (shape[d] - 1)
+                if d == 1 then
+                    done = true
+                    return nil
+                end
+            end
+        end
+        inner_idx = 1
+        idxs[ndim] = 1
+        return idxs, offset1, offset2, offset3
+    end
+end
+
+function NdArray.copy(arr)
+    assert(type(arr) == "table" and arr.shape and arr.stride and arr.data, "expected an NdArray")
+    local ret = NdArray.empty(arr.shape, arr.dtype)
+    local position = 1
+    for _, values in NdArray.nditer(arr, nil, "C") do
+        ret.data[position], position = values[1], position + 1
+    end
+    return ndRefreshDType(ret)
+end
+
+function NdArray.copyTo(dst, src, where)
+    if where == false then return end
+    if where == nil or where == true then
+        dst, src = table.unpack(NdArray.broadcastArrays({dst, src}))
+        for offsets in NdArray._strideIter(dst.shape, {dst.stride, src.stride}, {dst.offset or 0, src.offset or 0}) do
+            dst.data[offsets[1] + 1] = src.data[offsets[2] + 1]
+        end
+    else
+        dst, src, where = table.unpack(NdArray.broadcastArrays({dst, src, where}))
+        for offsets in NdArray._strideIter(dst.shape, {dst.stride, src.stride, where.stride},
+            {dst.offset or 0, src.offset or 0, where.offset or 0}) do
+            if ndTruthy(where.data[offsets[3] + 1]) then
+                dst.data[offsets[1] + 1] = src.data[offsets[2] + 1]
+            end
+        end
+    end
+end
+
+function NdArray._reshapeIsView(shape1, shape2, stride1)
+    if ndSizeLocal(shape1) ~= ndSizeLocal(shape2) then return false, nil end
+
+    -- A zero-sized view has no addresses to preserve.  Give it ordinary
+    -- C-order strides so a later reshape can continue to reason about it.
+    if ndSizeLocal(shape1) == 0 then
+        local stride, step = {}, 1
+        for axis = #shape2, 1, -1 do stride[axis], step = step, step * shape2[axis] end
+        return true, stride
+    end
+
+    -- Remove singleton source dimensions and group adjacent dimensions whose
+    -- addresses are C-contiguous.  A reshape view may split or join one of
+    -- these groups, but it cannot cross a non-contiguous boundary.
+    local blocks = {}
+    local blockSize, blockStride, previousStride
+    for axis, size in ipairs(shape1) do
+        if size > 1 then
+            local stride = stride1[axis]
+            if not blockSize then
+                blockSize, blockStride = size, stride
+            elseif previousStride == size * stride then
+                blockSize, blockStride = blockSize * size, stride
+            else
+                blocks[#blocks + 1] = {size = blockSize, stride = blockStride}
+                blockSize, blockStride = size, stride
+            end
+            previousStride = stride
+        end
+    end
+    if blockSize then blocks[#blocks + 1] = {size = blockSize, stride = blockStride} end
+
+    -- Match target dimensions against source blocks from the inner axis out.
+    -- Singleton target dimensions consume no source elements and may be given
+    -- any stride; zero is both cheap and unambiguous.
+    local outputStride = {}
+    local block = #blocks
+    local remaining = block > 0 and blocks[block].size or 1
+    local innerSize = 1
+    for axis = #shape2, 1, -1 do
+        local size = shape2[axis]
+        if size == 1 then
+            outputStride[axis] = 0
+        else
+            if block == 0 then return false, nil end
+            outputStride[axis] = blocks[block].stride * innerSize
+            innerSize = innerSize * size
+            if innerSize > remaining then return false, nil end
+            if innerSize == remaining then
+                block = block - 1
+                remaining = block > 0 and blocks[block].size or 1
+                innerSize = 1
+            end
+        end
+    end
+    if block ~= 0 or innerSize ~= 1 then return false, nil end
+    return true, outputStride
+end
+
+function NdArray.reshape(arr, ...)
+    local requested = {...}
+    local shape = #requested == 1 and type(requested[1]) == "table"
+        and ndCopyShapeLocal(requested[1]) or requested
+    local unknown, knownSize = nil, 1
+    for axis, dimension in ipairs(shape) do
+        if dimension == -1 then
+            assert(not unknown, "reshape permits only one inferred dimension")
+            unknown = axis
+        else
+            assert(dimension >= 0 and dimension == math.floor(dimension), "invalid reshape dimension")
+            knownSize = knownSize * dimension
+        end
+    end
+    assert(not unknown or knownSize > 0 and arr.size % knownSize == 0, "reshape size is incompatible")
+    if unknown then shape[unknown] = arr.size / knownSize else assert(knownSize == arr.size, "reshape size is incompatible") end
+    local valid, stride = NdArray._reshapeIsView(arr.shape, shape, arr.stride)
+    local source = valid and arr or NdArray.copy(arr)
+    if not valid then
+        stride = {}
+        local step = 1
+        for axis = #shape, 1, -1 do stride[axis], step = step, step * shape[axis] end
+    end
+    return ndViewLocal(source, shape, stride)
+end
+
+function NdArray.transpose(arr, axis1, axis2)
+    local ndim = #arr.shape
+    local shape, stride = {}, {}
+    if axis1 == nil then
+        for axis = 1, ndim do
+            shape[axis], stride[axis] = arr.shape[ndim - axis + 1], arr.stride[ndim - axis + 1]
+        end
+    else
+        axis1, axis2 = ndAxisLocal(axis1, ndim), ndAxisLocal(axis2, ndim)
+        shape, stride = ndCopyShapeLocal(arr.shape), ndCopyShapeLocal(arr.stride)
+        shape[axis1 + 1], shape[axis2 + 1] = shape[axis2 + 1], shape[axis1 + 1]
+        stride[axis1 + 1], stride[axis2 + 1] = stride[axis2 + 1], stride[axis1 + 1]
+    end
+    return ndViewLocal(arr, shape, stride)
+end
+
+function NdArray.permuteDims(arr, dims)
+    local ndim = #arr.shape
+    dims = dims or {}
+    if #dims == 0 then for axis = 0, ndim - 1 do dims[axis + 1] = ndim - axis - 1 end end
+    assert(#dims == ndim, "permutation rank mismatch")
+    local shape, stride, seen = {}, {}, {}
+    for position, axis in ipairs(dims) do
+        axis = ndAxisLocal(axis, ndim)
+        assert(not seen[axis], "permutation axes must be unique")
+        seen[axis] = true
+        shape[position], stride[position] = arr.shape[axis + 1], arr.stride[axis + 1]
+    end
+    return ndViewLocal(arr, shape, stride)
+end
+
+function NdArray.ravel(arr)
+    return NdArray.reshape(arr, -1)
+end
+
+function NdArray.flatten(arr)
+    local flat = NdArray.copy(arr)
+    flat.stride = {1}
+    flat.shape = {flat.size}
+    return flat
+end
+
+function NdArray._elementwise(func, ...)
+    local operands = {...}
+    for i = 1, #operands do operands[i] = ndAsArray(operands[i]) end
+    local broadcasted = NdArray.broadcastArrays(operands)
+    local n = #broadcasted
+    local ret = NdArray.empty(broadcasted[1].shape)
+    local args = {}
+    local position = 1
+    for _, values in NdArray.nditer(broadcasted, nil, "C") do
+        for i = 1, n do args[i] = values[i] end
+        ret.data[position], position = func(table.unpack(args, 1, n)), position + 1
+    end
+    return ndRefreshDType(ret)
+end
+
+function NdArray.add(arr1, arr2)
+    return NdArray._elementwise(function(a, b) return a + b end, arr1, arr2)
+end
+
+function NdArray.sub(arr1, arr2)
+    return NdArray._elementwise(function(a, b) return a - b end, arr1, arr2)
+end
+
+function NdArray.mul(arr1, arr2)
+    return NdArray._elementwise(function(a, b) return a * b end, arr1, arr2)
+end
+
+function NdArray.matMul(arr1, arr2)
+    assert(arr1 and arr2 and arr1.shape and arr2.shape, "matMul expects NdArrays")
+    local leftRank, rightRank = #arr1.shape, #arr2.shape
+    assert(leftRank > 0 and rightRank > 0, "matMul operands must have at least one dimension")
+    local leftVector, rightVector = leftRank == 1, rightRank == 1
+    local left = leftVector and ndViewLocal(arr1, {1, arr1.shape[1]}, {0, arr1.stride[1]}) or arr1
+    local right = rightVector and ndViewLocal(arr2, {arr2.shape[1], 1}, {arr2.stride[1], 0}) or arr2
+    assert(left.shape[#left.shape] == right.shape[#right.shape - 1], "matMul core dimensions do not match")
+    local leftAxes, rightAxes = {}, {}
+    leftAxes[1], leftAxes[2] = #left.shape - 2, #left.shape - 1
+    rightAxes[1], rightAxes[2] = #right.shape - 2, #right.shape - 1
+    local iterator = NdArray.coreIter({left, right}, {leftAxes, rightAxes})
+    local firstIndices, firstViews = iterator()
+    -- coreIter's loop indices are the broadcasted batch shape; obtain its
+    -- exact shape from the operands so zero-size batches are preserved.
+    local leftBatch, rightBatch = {}, {}
+    for axis = 1, #left.shape - 2 do leftBatch[axis] = left.shape[axis] end
+    for axis = 1, #right.shape - 2 do rightBatch[axis] = right.shape[axis] end
+    local loopShape = NdArray.broadcastShapes({leftBatch, rightBatch})
+    local n, k, m = left.shape[#left.shape - 1], left.shape[#left.shape], right.shape[#right.shape]
+    local outputShape = ndCopyShapeLocal(loopShape)
+    if leftVector and rightVector then
+        local sum = 0
+        local views = firstViews
+        for t = 0, k - 1 do
+            sum = sum + views[1].data[views[1].offset + t * views[1].stride[2] + 1]
+                * views[2].data[views[2].offset + t * views[2].stride[1] + 1]
+        end
+        return sum
+    end
+    if leftVector then outputShape[#outputShape + 1] = m
+    elseif rightVector then outputShape[#outputShape + 1] = n
+    else outputShape[#outputShape + 1], outputShape[#outputShape + 2] = n, m end
+    local result = NdArray.empty(outputShape)
+    local indices, views = firstIndices, firstViews
+    while indices do
+        local outputBase = 0
+        for axis = 1, #loopShape do outputBase = outputBase + indices[axis] * result.stride[axis] end
+        if leftVector then
+            for col = 0, m - 1 do
+                local sum = 0
+                for t = 0, k - 1 do
+                    sum = sum + views[1].data[views[1].offset + t * views[1].stride[2] + 1]
+                        * views[2].data[views[2].offset + t * views[2].stride[1] + col * views[2].stride[2] + 1]
+                end
+                result.data[outputBase + col * result.stride[#result.shape] + 1] = sum
+            end
+        elseif rightVector then
+            for row = 0, n - 1 do
+                local sum = 0
+                for t = 0, k - 1 do
+                    sum = sum + views[1].data[views[1].offset + row * views[1].stride[1] + t * views[1].stride[2] + 1]
+                        * views[2].data[views[2].offset + t * views[2].stride[1] + 1]
+                end
+                result.data[outputBase + row * result.stride[#result.shape] + 1] = sum
+            end
+        else
+            for row = 0, n - 1 do
+                for col = 0, m - 1 do
+                    local sum = 0
+                    for t = 0, k - 1 do
+                        sum = sum + views[1].data[views[1].offset + row * views[1].stride[1] + t * views[1].stride[2] + 1]
+                            * views[2].data[views[2].offset + t * views[2].stride[1] + col * views[2].stride[2] + 1]
+                    end
+                    result.data[outputBase + row * result.stride[#result.shape - 1] + col * result.stride[#result.shape] + 1] = sum
+                end
+            end
+        end
+        indices, views = iterator()
+    end
+    return result
+end
+
+NdArray.matmul = NdArray.matMul
+NdArray.MatMul = NdArray.matMul
+
+function NdArray.div(arr1, arr2)
+    return NdArray._elementwise(function(a, b) return a / b end, arr1, arr2)
+end
+
+function NdArray.map(func, arr)
+    local res, position = NdArray.emptyLike(arr), 1
+    for _, values in NdArray.nditer(arr, nil, "C") do
+        res.data[position], position = func(values[1]), position + 1
+    end
+    return res
+end
+
+function NdArray.sqrt(arr)
+    return NdArray.map(function(a) return math.sqrt(a) end, arr)
+end
+
+function NdArray.negative(arr)
+    return NdArray.map(function(a) return -a end, arr)
+end
+
+function NdArray.vectorize(func, excluded, signature)
+    if not signature then
+        return function(...)
+            local arg = {...}
+            local arrs = {}
+            for i, v in ipairs(arg) do
+                if getmetatable(v) == NdArray.meta and (not excluded or not excluded[i]) then
+                    arrs[#arrs + 1] = v
+                else
+                    arrs[#arrs + 1] = nil
+                end
+            end
+            if #arrs == 0 then
+                return func(...)
+            else
+                local ofs = 0
+                arrs = NdArray.broadcastArrays(arrs)
+                local ret = NdArray.emptyLike(arrs)
+                local args = {}
+                for idx, vals in NdArray.nditer(arrs) do
+                    for i, v in ipairs(arg) do
+                        if getmetatable(v) == NdArray.meta and (not excluded or not excluded[i]) then
+                            args[i] = vals[i - ofs]
+                        else
+                            args[i] = v
+                            ofs = ofs + 1
+                        end
+                    end
+                    NdArray._setSingle(ret, idx, func(table.unpack(args)))
+                end
+            end
+        end
+    end
+    local batchShape = {}
+    for i, d in ipairs(arr.shape) do
+        if inAxes == nil or i > #inAxes then
+            batchShape[i] = d
+        end
+    end
+    for i, ax in ipairs(inAxes) do
+        batchShape[i] = 1
+    end
+    local batchIdx = {}
+    local outputShape = {}
+    for i, d in ipairs(batchShape) do
+        outputShape[i] = d
+    end
+    local out
+    for idx, _ in NdArray.ndindex(batchShape) do
+        for i, k in ipairs(idx) do
+            batchIdx[i] = k
+        end
+        for i, ax in ipairs(inAxes) do
+            batchIdx[ax] = NdArray.sliceAll
+        end
+        local input = NdArray.get(arr, batchIdx)
+        local output = func(input)
+        if out == nil then
+            if getmetatable(output) == NdArray.meta then
+                for i, d in ipairs(output.shape) do
+                    outputShape[#outputShape + 1] = d
+                end
+            end
+            out = NdArray.empty(outputShape)
+        end
+        NdArray.set(out, idx, output)
+    end
+    if not keepdim then
+        out = NdArray.squeeze(out, inAxes)
+    end
+    return out
+end
+
+function NdArray.reduce(func, arr, axis, keepdim)
+    if axis == nil then
+        local result, seen = nil, false
+        for _, values in NdArray.nditer(arr, nil, "C") do
+            result = result == nil and values[1] or func(result, values[1])
+            seen = true
+        end
+        assert(seen, "cannot reduce an empty array")
+        return result
+    end
+    axis = ndAxisLocal(axis, #arr.shape)
+    local outputShape = {}
+    for sourceAxis = 0, #arr.shape - 1 do
+        if keepdim or sourceAxis ~= axis then
+            outputShape[#outputShape + 1] = sourceAxis == axis and 1 or arr.shape[sourceAxis + 1]
+        end
+    end
+    local result = NdArray.empty(outputShape)
+    local iterator = NdArray.coreIter({arr}, {{axis}})
+    local indices, views = iterator()
+    while indices do
+        local view, value = views[1], nil
+        for i = 0, view.shape[1] - 1 do
+            local current = view.data[view.offset + i * view.stride[1] + 1]
+            value = value == nil and current or func(value, current)
+        end
+        assert(value ~= nil, "cannot reduce an empty axis")
+        local outputOffset, loopPosition = 0, 1
+        for sourceAxis = 0, #arr.shape - 1 do
+            if sourceAxis ~= axis then
+                local targetAxis = keepdim and sourceAxis or sourceAxis - (sourceAxis > axis and 1 or 0)
+                outputOffset = outputOffset + indices[loopPosition] * result.stride[targetAxis + 1]
+                loopPosition = loopPosition + 1
+            end
+        end
+        result.data[outputOffset + 1] = value
+        indices, views = iterator()
+    end
+    return result
+end
+
+function NdArray.sum(arr, axis, keepdim)
+    return NdArray.reduce(function(a, b) return a + b end, arr, axis, keepdim)
+end
+
+function NdArray.prod(arr, axis, keepdim)
+    return NdArray.reduce(function(a, b) return a * b end, arr, axis, keepdim)
+end
+
+function NdArray.max(arr, axis, keepdim)
+    return NdArray.reduce(math.max, arr, axis, keepdim)
+end
+
+function NdArray.min(arr, axis, keepdim)
+    return NdArray.reduce(math.min, arr, axis, keepdim)
+end
+
+function NdArray.mean(arr, axis, keepdim)
+    local res = NdArray.sum(arr, axis, keepdim)
+    local count = axis == nil and arr.size or arr.shape[ndAxisLocal(axis, #arr.shape) + 1]
+    if type(res) == "number" then return res / count end
+    for i = 1, res.size do res.data[i] = res.data[i] / count end
+    return res
+end
+
+function NdArray.sort(arr, axis)
+    if axis then
+        if axis < 0 then
+            axis = #arr.shape + axis
+        end
+        local ret = NdArray.emptyLike(arr)
+        axis = axis + 1
+        local stride = arr.stride[axis]
+        local n = arr.shape[axis]
+        ret.stride[axis] = 1
+        ret.shape[axis] = 1
+        for _, offset in NdArray._strideIter1(ret) do
+            local values = {}
+            for i=1,n do
+                values[i] = arr.data[offset + (i - 1) * stride + 1]
+            end
+            table.sort(values)
+            for i=1,n do
+                ret.data[offset + (i - 1) * stride + 1] = values[i]
+            end
+        end
+        ret.stride[axis] = stride
+        ret.shape[axis] = n
+        return ret
+    else
+        local ret = NdArray.flatten(arr)
+        table.sort(ret.data)
+        return ret
+    end
+end
+
+function NdArray.argsort(arr, axis)
+    if axis then
+        if axis < 0 then
+            axis = #arr.shape + axis
+        end
+        local ret = NdArray.emptyLike(arr)
+        axis = axis + 1
+        local stride = arr.stride[axis]
+        local n = arr.shape[axis]
+        ret.stride[axis] = 1
+        ret.shape[axis] = 1
+        local idxs = {}
+        for i=1, n do
+            idxs[i] = i - 1
+        end
+        for _, offset in NdArray._strideIter1(ret) do
+            table.sort(idxs, function(a, b) return arr.data[offset + a * stride + 1] < arr.data[offset + b * stride + 1] end)
+            for i=1,n do
+                ret.data[offset + (i - 1) * stride + 1] = idxs[i]
+            end
+        end
+        ret.stride[axis] = stride
+        ret.shape[axis] = n
+        return ret
+    else
+        local ravel = NdArray.ravel(arr)
+        local idxs = {}
+        for i=1, arr.size do
+            idxs[i] = i
+        end
+        table.sort(idxs, function(a, b) return ravel.data[a] < ravel.data[b] end)
+        for i=1, arr.size do
+            idxs[i] = idxs[i] - 1
+        end
+        return NdArray.array(idxs)
+    end
+end
+
+function NdArray.broadcastStride(arrShape, targetShape, arrStride)
+    local stride = {}
+    local padding = #targetShape - #arrShape
+    assert(padding >= 0, ndBroadcastError({arrShape, targetShape}))
+    for axis = 1, #targetShape do
+        local sourceAxis = axis - padding
+        if sourceAxis <= 0 then
+            stride[axis] = 0
+        else
+            local size = arrShape[sourceAxis]
+            assert(size == 1 or size == targetShape[axis], ndBroadcastError({arrShape, targetShape}))
+            stride[axis] = size == 1 and 0 or arrStride[sourceAxis]
+        end
+    end
+    return stride
+end
+
+function NdArray.broadcastTo(arr, shape)
+    shape = ndCopyShapeLocal(shape)
+    local stride = NdArray.broadcastStride(arr.shape, shape, arr.stride)
+    return ndViewLocal(arr, shape, stride)
+end
+
+function NdArray.broadcastArrays(arrs)
+    if arrs and arrs.shape then arrs = {arrs} end
+    assert(type(arrs) == "table" and #arrs > 0, "broadcastArrays requires operands")
+    local shapes = {}
+    for i, arr in ipairs(arrs) do
+        shapes[i] = arr.shape
+    end
+    local new_shape = NdArray.broadcastShapes(shapes)
+    local views = {}
+    for i, arr in ipairs(arrs) do
+        views[i] = NdArray.broadcastTo(arr, new_shape)
+    end
+    return views
+end
+
+function NdArray.broadcastShapes(shapes)
+    assert(type(shapes) == "table" and #shapes > 0, "broadcastShapes requires shapes")
+    local newShape = {}
+    local maxNdim = 0
+    for _, shape in ipairs(shapes) do maxNdim = math.max(maxNdim, #shape) end
+    for axis = 1, maxNdim do
+        local size = 1
+        for _, shape in ipairs(shapes) do
+            local sourceAxis = axis - (maxNdim - #shape)
+            local candidate = sourceAxis > 0 and shape[sourceAxis] or 1
+            assert(candidate == 1 or size == 1 or candidate == size,
+                ndBroadcastError(shapes))
+            if candidate ~= 1 then size = candidate end
+        end
+        newShape[axis] = size
+    end
+    return newShape
+end
+
+function NdArray.convertAndBroadcast(...)
+    local arrs = {}
+    for i, arr in ipairs({...}) do
+        if type(arr) ~= "table" or not arr.shape or not arr.data then arr = NdArray.array(arr) end
+        arrs[i] = arr
+    end
+    return NdArray.broadcastArrays(arrs)
+end
+
+function NdArray.nonzero(arr)
+    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
+    local ndim = #arr.shape
+    local coordinates = {}
+    for axis = 1, ndim do coordinates[axis] = {} end
+    local count = 0
+    for idxs, values in NdArray.nditer(arr, nil, "C") do
+        if ndTruthy(values[1]) then
+            count = count + 1
+            for axis = 1, ndim do coordinates[axis][count] = idxs[axis] end
+        end
+    end
+    for axis = 1, ndim do
+        coordinates[axis] = NdArray.array(coordinates[axis], "int")
+    end
+    return table.unpack(coordinates, 1, ndim)
+end
+
+function NdArray.countNonzero(arr)
+    local count = 0
+    for _, values in NdArray.nditer(arr, nil, "C") do
+        if ndTruthy(values[1]) then count = count + 1 end
+    end
+    return count
+end
+
+function NdArray.any(arr)
+    return NdArray.countNonzero(arr) > 0
+end
+
+function NdArray.all(arr)
+    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
+    return NdArray.countNonzero(arr) == arr.size
+end
+
+function NdArray.argwhere(arr)
+    assert(type(arr) == "table" and arr.shape and arr.data, "expected an NdArray")
+    local ndim, count, position = #arr.shape, 0, 0
+    local data = {}
+    for idx, values in NdArray.nditer(arr, nil, "C") do
+        if ndTruthy(values[1]) then
+            count = count + 1
+            for axis = 1, ndim do
+                position = position + 1
+                data[position] = idx[axis]
+            end
+        end
+    end
+    return NdArray.reshape(NdArray.array(data, "int"), {count, ndim})
+end
+
+function NdArray.where(cond, ifTrue, ifFalse)
+    if ifTrue == nil then
+        return NdArray.nonzero(cond)
+    end
+    cond, ifTrue, ifFalse = table.unpack(NdArray.broadcastArrays({cond, ifTrue, ifFalse}))
+    local ret = NdArray.empty(cond.shape)
+    for offsets in NdArray._strideIter(
+        cond.shape,
+        {ret.stride, cond.stride, ifTrue.stride, ifFalse.stride},
+        {ret.offset or 0, cond.offset or 0, ifTrue.offset or 0, ifFalse.offset or 0}
+    ) do
+        local retOfs, condOfs, trueOfs, falseOfs = offsets[1], offsets[2], offsets[3], offsets[4]
+        if ndTruthy(cond.data[condOfs + 1]) then
+            ret.data[retOfs + 1] = ifTrue.data[trueOfs + 1]
+        else
+            ret.data[retOfs + 1] = ifFalse.data[falseOfs + 1]
+        end
+    end
+
+    return ndRefreshDType(ret)
+end
+
+NdArray._sliceMt = {
+    __index=function(table, key)
+        if type(key) ~= "number" then return nil end
+        return table.start + key * table.step
+    end,
+    __len=function(table)
+        if table.start == nil or table.stop == nil then return 0 end
+        return math.max(0, math.ceil((table.stop - table.start) / table.step))
+    end,
+}
+
+function NdArray.slice(start, stop, step)
+    step = step or 1
+    assert(type(step) == "number" and step == math.floor(step) and step ~= 0,
+        "slice step must be a non-zero integer")
+    local slice = setmetatable({
+            start=start,
+            stop=stop,
+            step=step,
+        },
+        NdArray._sliceMt)
+    return slice
+end
+
+NdArray.sliceAll = NdArray.slice()
+
+NdArray.newaxis = "None"
+
+NdArray.ellipsis = "..."
+
+local function ndSliceBounds(dim, start, stop, step)
+    if step > 0 then
+        start = start == nil and 0 or start
+        stop = stop == nil and dim or stop
+        if start < 0 then start = start + dim end
+        if stop < 0 then stop = stop + dim end
+        start, stop = math.max(0, math.min(dim, start)), math.max(0, math.min(dim, stop))
+        return start, stop, step, math.max(0, math.ceil((stop - start) / step))
+    end
+    local omittedStop = stop == nil
+    start = start == nil and dim - 1 or start
+    stop = stop == nil and -1 or stop
+    if start < 0 then start = start + dim end
+    if stop < 0 and not omittedStop then stop = stop + dim end
+    start = math.max(-1, math.min(dim - 1, start))
+    stop = math.max(-1, math.min(dim - 1, stop))
+    return start, stop, step, math.max(0, math.ceil((start - stop) / -step))
+end
+
+local function ndIsBooleanArray(arr)
+    if arr.dtype == "bool" then return true end
+    if arr.size == 0 then return false end
+    for _, values in NdArray.nditer(arr, nil, "C") do
+        if type(values[1]) ~= "boolean" then return false end
+    end
+    return true
+end
+
+local function ndIndexArray(index)
+    if type(index) == "table" and index.shape and index.data then return index end
+    assert(type(index) == "table", "advanced indices must be arrays or Lua tables")
+    return NdArray.array(index)
+end
+
+local function ndIndexBooleanRank(index)
+    if type(index) ~= "table" or getmetatable(index) == NdArray._sliceMt then return nil end
+    local advanced = ndIndexArray(index)
+    if ndIsBooleanArray(advanced) then return #advanced.shape end
+    return nil
+end
+
+local function ndScalarIndexToken(token)
+    if type(token) == "table" and token.shape and token.data and #token.shape == 0 then
+        return NdArray.item(token)
+    end
+    return token
+end
+
+local function ndNormalizeIndex(index, dimension, axis)
+    assert(type(index) == "number" and index == math.floor(index),
+        string.format("All indices must be integers; got %s on dimension %d", tostring(index), axis))
+    if index < 0 then index = index + dimension end
+    assert(index >= 0 and index < dimension,
+        string.format("Index %d is out of bounds for dimension %d with size %d", index, axis, dimension))
+    return index
+end
+
+-- Build one coordinate map for basic, fancy, and boolean indexing. Basic
+-- entries remain views; only advanced entries use the materialized map.
+local function ndIndexPlan(arr, idxs)
+    idxs = idxs or {}
+    assert(type(idxs) == "table", "indices must be supplied as a table")
+    local raw = {}
+    for position, token in ipairs(idxs) do raw[position] = ndScalarIndexToken(token) end
+    local consumed, ellipsis = 0, nil
+    for position, token in ipairs(raw) do
+        if token == NdArray.ellipsis then
+            assert(not ellipsis, "an index may contain only one ellipsis")
+            ellipsis = position
+        elseif token ~= NdArray.newaxis and type(token) ~= "boolean" then
+            consumed = consumed + (ndIndexBooleanRank(token) or 1)
+        end
+    end
+    assert(consumed <= #arr.shape, "too many indices for array")
+    local expanded, inserted = {}, false
+    for position = 1, #raw + 1 do
+        if position == ellipsis then
+            for _ = 1, #arr.shape - consumed do expanded[#expanded + 1] = NdArray.sliceAll end
+            inserted = true
+        elseif position <= #raw then expanded[#expanded + 1] = raw[position] end
+    end
+    if not inserted then for _ = consumed + 1, #arr.shape do expanded[#expanded + 1] = NdArray.sliceAll end end
+
+    local sourceAxis, entries, fancyArrays = 1, {}, {}
+    for position, token in ipairs(expanded) do
+        if token == NdArray.newaxis then
+            entries[#entries + 1] = {kind = "newaxis"}
+        elseif type(token) == "boolean" then
+            entries[#entries + 1] = {kind = "boolScalar", value = token}
+        else
+            assert(sourceAxis <= #arr.shape, "too many indices for array")
+            if type(token) == "number" then
+                entries[#entries + 1] = {kind = "index", axis = sourceAxis,
+                    value = ndNormalizeIndex(token, arr.shape[sourceAxis], sourceAxis)}
+                sourceAxis = sourceAxis + 1
+            elseif type(token) == "table" and getmetatable(token) == NdArray._sliceMt then
+                local start, stop, step, size = ndSliceBounds(arr.shape[sourceAxis], token.start, token.stop, token.step)
+                entries[#entries + 1] = {kind = "slice", axis = sourceAxis, start = start, step = step, size = size}
+                sourceAxis = sourceAxis + 1
+            elseif type(token) == "table" then
+                local advanced = ndIndexArray(token)
+                if ndIsBooleanArray(advanced) then
+                    local rank = #advanced.shape
+                    assert(rank > 0, "a zero-dimensional boolean index must be a scalar boolean")
+                    assert(sourceAxis + rank - 1 <= #arr.shape,
+                        "boolean index has more dimensions than the indexed array")
+                    for axis = 1, rank do
+                        assert(advanced.shape[axis] == arr.shape[sourceAxis + axis - 1],
+                            ndBroadcastError({advanced.shape, {table.unpack(arr.shape, sourceAxis, sourceAxis + rank - 1)}}))
+                    end
+                    local coordinates = {NdArray.nonzero(advanced)}
+                    for axis = 1, rank do
+                        local coordinate = coordinates[axis]
+                        entries[#entries + 1] = {kind = "fancy", axis = sourceAxis + axis - 1,
+                            array = coordinate}
+                        fancyArrays[#fancyArrays + 1] = coordinate
+                    end
+                    sourceAxis = sourceAxis + rank
+                else
+                    entries[#entries + 1] = {kind = "fancy", axis = sourceAxis, array = advanced}
+                    fancyArrays[#fancyArrays + 1] = advanced
+                    sourceAxis = sourceAxis + 1
+                end
+            else
+                error(string.format("unsupported index type %s at position %d", type(token), position))
+            end
+        end
+    end
+    local fancyShape
+    if #fancyArrays > 0 then
+        for _, entry in ipairs(entries) do
+            if entry.kind == "boolScalar" then
+                error("boolean scalar indices cannot be combined with array indices")
+            end
+        end
+        local broadcasted = NdArray.broadcastArrays(fancyArrays)
+        fancyShape = broadcasted[1].shape
+        local fancyIndex = 0
+        for _, entry in ipairs(entries) do
+            if entry.kind == "fancy" then fancyIndex = fancyIndex + 1; entry.array = broadcasted[fancyIndex] end
+        end
+    else
+        for _, entry in ipairs(entries) do
+            if entry.kind == "boolScalar" then
+                fancyShape = {entry.value and 1 or 0}
+                break
+            end
+        end
+        fancyShape = fancyShape or {}
+    end
+    local firstFancy, advancedSeparated, sawBasicAfterFancy = nil, false, false
+    for position, entry in ipairs(entries) do
+        local isFancy = entry.kind == "fancy" or entry.kind == "boolScalar"
+        if isFancy then
+            if not firstFancy then firstFancy = position end
+            if sawBasicAfterFancy then advancedSeparated = true end
+        elseif firstFancy then
+            sawBasicAfterFancy = true
+        end
+    end
+    local shape, fancyStart = {}, nil
+    if firstFancy and advancedSeparated then
+        fancyStart = 1
+        for _, size in ipairs(fancyShape) do shape[#shape + 1] = size end
+        for _, entry in ipairs(entries) do
+            if entry.kind == "slice" then entry.outputAxis = #shape + 1; shape[#shape + 1] = entry.size
+            elseif entry.kind == "newaxis" then entry.outputAxis = #shape + 1; shape[#shape + 1] = 1 end
+        end
+    else
+        for _, entry in ipairs(entries) do
+            if entry.kind == "fancy" or entry.kind == "boolScalar" then
+                if not fancyStart then
+                    fancyStart = #shape + 1
+                    for _, size in ipairs(fancyShape) do shape[#shape + 1] = size end
+                end
+            elseif entry.kind == "slice" then
+                entry.outputAxis = #shape + 1; shape[#shape + 1] = entry.size
+            elseif entry.kind == "newaxis" then
+                entry.outputAxis = #shape + 1; shape[#shape + 1] = 1
+            end
+        end
+    end
+    return {entries = entries, shape = shape, fancyShape = fancyShape, fancyStart = fancyStart}
+end
+
+local function ndIndexOffset(arr, plan, outputIndices)
+    local offset = arr.offset or 0
+    local fancyCoordinate = {}
+    if plan.fancyStart then
+        for axis = 1, #plan.fancyShape do fancyCoordinate[axis] = outputIndices[plan.fancyStart + axis - 1] end
+    end
+    for _, entry in ipairs(plan.entries) do
+        if entry.kind == "index" then
+            offset = offset + entry.value * arr.stride[entry.axis]
+        elseif entry.kind == "slice" then
+            offset = offset + (entry.start + outputIndices[entry.outputAxis] * entry.step) * arr.stride[entry.axis]
+        elseif entry.kind == "newaxis" then
+        elseif entry.kind == "fancy" then
+            local coordinateOffset = entry.array.offset or 0
+            for axis = 1, #plan.fancyShape do coordinateOffset = coordinateOffset + fancyCoordinate[axis] * entry.array.stride[axis] end
+            local value = entry.array.data[coordinateOffset + 1]
+            offset = offset + ndNormalizeIndex(value, arr.shape[entry.axis], entry.axis) * arr.stride[entry.axis]
+        end
+    end
+    return offset
+end
+
+function NdArray._getOffset(arr, idxs)
+    local offset = arr.offset or 0
+    for i, idx in ipairs(idxs) do
+        if idx < 0 then
+            idx = idx + arr.shape[i]
+        end
+        if idx >= arr.shape[i] or idx < 0 then
+            error(string.format("Index %d is out of bounds for dimension %d with size %d", idx, i, arr.shape[i]))
+        end
+        offset = offset + arr.stride[i] * idx
+    end
+    return offset
+end
+
+function NdArray._getSingle(arr, idxs)
+    return arr.data[NdArray._getOffset(arr, idxs) + 1]
+end
+
+function NdArray._setSingle(arr, idxs, value)
+    arr.data[NdArray._getOffset(arr, idxs) + 1] = value
+end
+
+-- Final indexing entry points use one normalized plan for basic, fancy, and
+-- boolean indexing. The scalar helpers above remain for internal callers.
+function NdArray.get(arr, idxs)
+    assert(type(arr) == "table" and arr.shape and arr.stride and arr.data, "expected an NdArray")
+    local plan = ndIndexPlan(arr, idxs)
+    if not plan.fancyStart then
+        local ret = {}
+        for key, value in pairs(arr) do ret[key] = value end
+        local metatable = getmetatable(arr); if metatable then setmetatable(ret, metatable) end
+        local offset, shape, stride = arr.offset or 0, {}, {}
+        for _, entry in ipairs(plan.entries) do
+            if entry.kind == "index" then offset = offset + entry.value * arr.stride[entry.axis]
+            elseif entry.kind == "slice" then
+                shape[entry.outputAxis], stride[entry.outputAxis] = entry.size, arr.stride[entry.axis] * entry.step
+                offset = offset + entry.start * arr.stride[entry.axis]
+            else shape[entry.outputAxis], stride[entry.outputAxis] = 1, 0 end
+        end
+        ret.shape, ret.stride, ret.offset, ret.size = shape, stride, offset, ndSizeLocal(shape)
+        return ret
+    end
+    local ret, position = NdArray.empty(plan.shape, arr.dtype), 1
+    local zeroStride = {}; for axis = 1, #plan.shape do zeroStride[axis] = 0 end
+    local iterator = NdArray._strideIter(plan.shape, {zeroStride}, {0}, "C", true)
+    while true do
+        local indices = iterator(); if not indices then break end
+        ret.data[position] = arr.data[ndIndexOffset(arr, plan, indices) + 1]
+        position = position + 1
+    end
+    return ret
+end
+
+function NdArray.set(arr, idxs, vals)
+    assert(type(arr) == "table" and arr.shape and arr.stride and arr.data, "expected an NdArray")
+    local plan = ndIndexPlan(arr, idxs)
+    if not plan.fancyStart then
+        if type(vals) ~= "table" or not vals.shape or not vals.data then vals = NdArray.array(vals) end
+        if vals.data == arr.data then
+            ndWarning("assignment source shares storage with destination; use an explicit copy to avoid overlap ambiguity")
+        end
+        NdArray.copyTo(NdArray.get(arr, idxs), vals); return
+    end
+    if type(vals) ~= "table" or not vals.shape or not vals.data then vals = NdArray.array(vals) end
+    if vals.data == arr.data then
+        ndWarning("assignment source shares storage with destination; use an explicit copy to avoid overlap ambiguity")
+    end
+    vals = NdArray.broadcastTo(NdArray.copy(vals), plan.shape)
+    local zeroStride = {}; for axis = 1, #plan.shape do zeroStride[axis] = 0 end
+    local iterator = NdArray._strideIter(plan.shape, {zeroStride}, {0}, "C", true)
+    while true do
+        local indices = iterator(); if not indices then break end
+        local valueOffset = vals.offset or 0
+        for axis = 1, #plan.shape do valueOffset = valueOffset + indices[axis] * vals.stride[axis] end
+        arr.data[ndIndexOffset(arr, plan, indices) + 1] = vals.data[valueOffset + 1]
+    end
+end
+
+-- Minimal iterator layers for the generic array representation. An operand
+-- only needs shape, stride, data, and an optional offset.
+local function ndCopyShape(shape)
+    assert(type(shape) == "table", "shape must be a table")
+    local result = {}
+    for axis, size in ipairs(shape) do
+        assert(type(size) == "number" and size >= 0 and size == math.floor(size),
+            "shape dimensions must be non-negative integers")
+        result[axis] = size
+    end
+    return result
+end
+
+local function ndSize(shape)
+    local size = 1
+    for _, dimension in ipairs(shape) do size = size * dimension end
+    return size
+end
+
+local function ndAxis(axis, ndim)
+    assert(type(axis) == "number" and axis == math.floor(axis), "axis must be an integer")
+    if axis < 0 then axis = ndim + axis end
+    assert(axis >= 0 and axis < ndim, "axis is out of bounds")
+    return axis
+end
+
+local function ndOrder(order, ndim, strides)
+    if order == nil or order == "C" then
+        local result = {}
+        for axis = 1, ndim do result[axis] = axis end
+        return result
+    end
+    if order == "K" then
+        assert(strides, "K order requires operand strides")
+        local result, costs = {}, {}
+        for axis = 1, ndim do
+            local cost = 0
+            for _, operandStrides in ipairs(strides) do
+                local stride = math.abs(operandStrides[axis] or 0)
+                if stride > cost then cost = stride end
+            end
+            costs[axis] = cost
+            result[axis] = axis
+        end
+
+        -- `result` is ordered from outermost to innermost. Keep the
+        -- largest-stride axes outermost so the smallest stride is advanced
+        -- most frequently. Insertion sort keeps ties in logical-axis order
+        -- and avoids a comparator closure in this one-time setup path.
+        for position = 2, ndim do
+            local axis, cost = result[position], costs[result[position]]
+            local insert = position - 1
+            while insert >= 1 and costs[result[insert]] < cost do
+                result[insert + 1] = result[insert]
+                insert = insert - 1
+            end
+            result[insert + 1] = axis
+        end
+        return result
+    end
+    if order == "F" then
+        local result = {}
+        for axis = 1, ndim do result[axis] = ndim - axis + 1 end
+        return result
+    end
+    assert(type(order) == "table" and #order == ndim,
+        "order must be nil, 'C', 'F', or an axis permutation")
+    local zeroBased = false
+    for _, axis in ipairs(order) do zeroBased = zeroBased or axis == 0 end
+    local result, seen = {}, {}
+    for position, axis in ipairs(order) do
+        axis = zeroBased and axis + 1 or axis
+        assert(type(axis) == "number" and axis == math.floor(axis)
+            and axis >= 1 and axis <= ndim, "order contains an invalid axis")
+        assert(not seen[axis], "order must be a permutation")
+        seen[axis] = true
+        result[position] = axis
+    end
+    return result
+end
+
+-- Lowest-level generic traversal.  It advances logical offsets only; it never
+-- reads an operand and it reuses its offset table on every yield.  The
+-- optional `withIndices` result is for layers that also need coordinates.
+function NdArray._strideIter(shape, strides, baseOffsets, order, withIndices)
+    local ndim = #shape
+    local positions, offsets = {}, {}
+    for axis = 1, ndim do positions[axis] = 0 end
+    local indices = withIndices and positions or nil
+    for operand, offset in ipairs(baseOffsets) do offsets[operand] = offset or 0 end
+    local axisOrder = ndOrder(order, ndim, strides)
+    local first, done = true, ndSize(shape) == 0
+    return function()
+        if done then return nil end
+        if first then
+            first = false
+            if indices then return indices, offsets end
+            return offsets
+        end
+        if ndim == 0 then done = true; return nil end
+        for position = ndim, 1, -1 do
+            local axis = axisOrder[position]
+            local index = positions[axis]
+            if index + 1 < shape[axis] then
+                positions[axis] = index + 1
+                for operand, stride in ipairs(strides) do
+                    offsets[operand] = offsets[operand] + stride[axis]
+                end
+                if indices then return indices, offsets end
+                return offsets
+            end
+            positions[axis] = 0
+            for operand, stride in ipairs(strides) do
+                offsets[operand] = offsets[operand] - stride[axis] * (shape[axis] - 1)
+            end
+            if position == 1 then done = true; return nil end
+        end
+    end
+end
+
+local function ndBroadcastShape(shapes)
+    local rank = 0
+    for _, shape in ipairs(shapes) do rank = math.max(rank, #shape) end
+    local result = {}
+    for axis = 1, rank do result[axis] = 1 end
+    for _, shape in ipairs(shapes) do
+        local padding = rank - #shape
+        for sourceAxis, size in ipairs(shape) do
+            local axis = padding + sourceAxis
+            assert(size == 1 or result[axis] == 1 or result[axis] == size,
+                ndBroadcastError(shapes))
+            if size ~= 1 then result[axis] = size end
+        end
+    end
+    return result
+end
+
+local function ndAlignedStride(arr, targetShape)
+    local padding = #targetShape - #arr.shape
+    assert(padding >= 0, ndBroadcastError({arr.shape, targetShape}))
+    local result = {}
+    for axis = 1, #targetShape do
+        local sourceAxis = axis - padding
+        if sourceAxis <= 0 then
+            result[axis] = 0
+        else
+            local size = arr.shape[sourceAxis]
+            assert(size == 1 or size == targetShape[axis],
+                ndBroadcastError({arr.shape, targetShape}))
+            result[axis] = size == 1 and 0 or arr.stride[sourceAxis]
+        end
+    end
+    return result
+end
+
+local function ndCheckArray(arr)
+    assert(type(arr) == "table" and type(arr.shape) == "table"
+        and type(arr.stride) == "table" and type(arr.data) == "table",
+        "expected an NdArray-like operand")
+end
+
+local function ndOpAxes(arrs, opAxes, iterShape)
+    local ndim = iterShape and #iterShape or 0
+    if opAxes then
+        for operand = 1, #arrs do
+            local mapping = opAxes[operand]
+            if mapping then ndim = math.max(ndim, #mapping) end
+        end
+    else
+        for _, arr in ipairs(arrs) do ndim = math.max(ndim, #arr.shape) end
+    end
+    if iterShape then assert(#iterShape == ndim, "itershape rank does not match op_axes") end
+
+    local shape
+    if iterShape then
+        shape = ndCopyShape(iterShape)
+    elseif opAxes then
+        shape = {}
+    else
+        local shapes = {}
+        for operand, arr in ipairs(arrs) do shapes[operand] = arr.shape end
+        shape = ndBroadcastShape(shapes)
+    end
+    for axis = 1, ndim do shape[axis] = shape[axis] or 1 end
+    local strides = {}
+    for operand, arr in ipairs(arrs) do
+        local mapping = opAxes and opAxes[operand]
+        if mapping then
+            assert(#mapping == ndim, "each op_axes mapping must match iterator rank")
+            local used = {}
+            strides[operand] = {}
+            for iteratorAxis = 1, ndim do
+                local sourceAxis = mapping[iteratorAxis]
+                if sourceAxis ~= -1 then
+                    sourceAxis = ndAxis(sourceAxis, #arr.shape)
+                    assert(not used[sourceAxis], "an operand axis may appear only once in op_axes")
+                    used[sourceAxis] = true
+                    local size = arr.shape[sourceAxis + 1]
+                    if not iterShape then
+                        if size ~= 1 then
+                            assert(shape[iteratorAxis] == 1 or shape[iteratorAxis] == size,
+                                ndBroadcastError({arr.shape, shape}))
+                            shape[iteratorAxis] = size
+                        end
+                    else
+                        assert(size == 1 or size == shape[iteratorAxis],
+                            ndBroadcastError({arr.shape, shape}))
+                    end
+                    strides[operand][iteratorAxis] = size == 1 and 0 or arr.stride[sourceAxis + 1]
+                else
+                    strides[operand][iteratorAxis] = 0
+                end
+            end
+        else
+            strides[operand] = ndAlignedStride(arr, shape)
+        end
+    end
+    return shape, strides
+end
+
+-- Scalar iterator.  `opAxes[operand][iteratorAxis]` is a complete mapping
+-- (zero-based operand axes, or -1 for newaxis), matching numpy.nditer.
+function NdArray.nditer(arrs, opFlags, order, opAxes, iterShape)
+    if arrs and arrs.shape then arrs = {arrs} end
+    assert(type(arrs) == "table" and #arrs > 0, "nditer requires operands")
+    for _, arr in ipairs(arrs) do ndCheckArray(arr) end
+    local shape, strides = ndOpAxes(arrs, opAxes, iterShape)
+    local offsets = {}
+    for operand, arr in ipairs(arrs) do offsets[operand] = arr.offset or 0 end
+    local iterator = NdArray._strideIter(shape, strides, offsets, order, true)
+    local values = {}
+    return function()
+        local indices, currentOffsets = iterator()
+        if not indices then return nil end
+        for operand, arr in ipairs(arrs) do
+            values[operand] = arr.data[currentOffsets[operand] + 1]
+        end
+        return indices, values
+    end
+end
+
+local function ndNormalizeCore(arrs, coreAxes, iterShape)
+    local loopShapes, loopAxes = {}, {}
+    local coreShapes, coreStrides = {}, {}
+    for operand, arr in ipairs(arrs) do
+        ndCheckArray(arr)
+        local axes = coreAxes[operand] or {}
+        local selected, normalized = {}, {}
+        for position, axis in ipairs(axes) do
+            axis = ndAxis(axis, #arr.shape)
+            assert(not selected[axis], "an operand core axis may appear only once")
+            selected[axis] = true
+            normalized[position] = axis
+            coreShapes[operand] = coreShapes[operand] or {}
+            coreStrides[operand] = coreStrides[operand] or {}
+            coreShapes[operand][position] = arr.shape[axis + 1]
+            coreStrides[operand][position] = arr.stride[axis + 1]
+        end
+        loopAxes[operand] = {}
+        loopShapes[operand] = {}
+        for axis = 0, #arr.shape - 1 do
+            if not selected[axis] then
+                loopAxes[operand][#loopAxes[operand] + 1] = axis
+                loopShapes[operand][#loopShapes[operand] + 1] = arr.shape[axis + 1]
+            end
+        end
+        coreShapes[operand] = coreShapes[operand] or {}
+        coreStrides[operand] = coreStrides[operand] or {}
+    end
+    local loopShape = iterShape and ndCopyShape(iterShape) or ndBroadcastShape(loopShapes)
+    local loopStrides, offsets = {}, {}
+    for operand, arr in ipairs(arrs) do
+        local axes, shape = loopAxes[operand], loopShapes[operand]
+        local padding = #loopShape - #shape
+        assert(padding >= 0, "loop shape cannot have lower rank than an operand")
+        loopStrides[operand] = {}
+        for globalAxis = 1, #loopShape do
+            local localAxis = globalAxis - padding
+            if localAxis <= 0 then
+                loopStrides[operand][globalAxis] = 0
+            else
+                local size = shape[localAxis]
+                assert(size == 1 or size == loopShape[globalAxis],
+                    ndBroadcastError({shape, loopShape}))
+                loopStrides[operand][globalAxis] = size == 1 and 0
+                    or arr.stride[axes[localAxis] + 1]
+            end
+        end
+        offsets[operand] = arr.offset or 0
+    end
+    return loopShape, loopStrides, offsets, coreShapes, coreStrides
+end
+
+local function ndView(arr, shape, stride, offset)
+    local result = {
+        shape = shape, stride = stride, data = arr.data, offset = offset,
+        size = ndSize(shape), dtype = arr.dtype or "any",
+    }
+    setmetatable(result, NdArray.meta)
+    return result
+end
+
+-- Direct-axis core iterator.  Unlike nditer, this preserves the selected
+-- axes as reusable N-D views and broadcasts only the remaining loop axes.
+function NdArray.coreIter(arrs, coreAxes, order, iterShape)
+    if arrs and arrs.shape then arrs = {arrs} end
+    assert(type(arrs) == "table" and #arrs > 0, "coreIter requires operands")
+    coreAxes = coreAxes or {}
+    local loopShape, loopStrides, offsets, coreShapes, coreStrides =
+        ndNormalizeCore(arrs, coreAxes, iterShape)
+    local iterator = NdArray._strideIter(loopShape, loopStrides, offsets, order, true)
+    local views = {}
+    for operand, arr in ipairs(arrs) do
+        views[operand] = ndView(arr, coreShapes[operand], coreStrides[operand], offsets[operand])
+    end
+    return function()
+        local indices, currentOffsets = iterator()
+        if not indices then return nil end
+        for operand, arr in ipairs(arrs) do
+            views[operand].offset = currentOffsets[operand]
+        end
+        return indices, views
+    end
+end
+
+local function ndParseSignature(signature)
+    assert(type(signature) == "string", "gufunc signature must be a string")
+    local inputText, outputText = signature:match("^%s*(.-)%s*%-%>%s*(.-)%s*$")
+    assert(inputText and outputText, "gufunc signature must contain '->'")
+    local function parsePart(text)
+        local result, consumed = {}, 0
+        for group in text:gmatch("%b()") do
+            local start = text:find(group, consumed + 1, true)
+            assert(start == consumed + 1 or text:sub(consumed + 1, start - 1):match("^%s*,%s*$"),
+                "invalid gufunc signature")
+            consumed = start + #group
+            local dimensions = {}
+            local body = group:sub(2, -2)
+            for label in body:gmatch("[^,%s]+") do
+                assert(label:match("^[%a_][%w_]*$"), "invalid core dimension name")
+                dimensions[#dimensions + 1] = label
+            end
+            result[#result + 1] = dimensions
+        end
+        assert(text:sub(consumed + 1):match("^%s*$"), "invalid gufunc signature")
+        return result
+    end
+    local inputs, outputs = parsePart(inputText), parsePart(outputText)
+    assert(#outputs == 1, "this minimal gufunc wrapper supports one output")
+    return inputs, outputs[1]
+end
+
+local function ndDefaultCoreAxes(arr, rank)
+    assert(rank <= #arr.shape, "operand rank is smaller than its core rank")
+    local result = {}
+    for position = 0, rank - 1 do result[position + 1] = #arr.shape - rank + position end
+    return result
+end
+
+local function ndContiguousArray(shape, dtype)
+    local result, stride = {}, {}
+    local step = 1
+    for axis = #shape, 1, -1 do
+        stride[axis] = step
+        step = step * shape[axis]
+    end
+    result.shape, result.stride, result.data, result.offset, result.size, result.dtype =
+        ndCopyShape(shape), stride, {}, 0, step, ndNormalizeDType(dtype)
+    setmetatable(result, NdArray.meta)
+    return result
+end
+
+local function ndOutputLayout(loopShape, coreShape, coreAxes)
+    local rank = #loopShape + #coreShape
+    local axes = coreAxes and {} or nil
+    if not axes then
+        axes = {}
+        for position = 0, #coreShape - 1 do axes[position + 1] = #loopShape + position end
+    else
+        for position, axis in ipairs(coreAxes) do axes[position] = ndAxis(axis, rank) end
+        assert(#axes == #coreShape, "output axes must match output core rank")
+        local used = {}
+        for _, axis in ipairs(axes) do assert(not used[axis], "output axes must be unique"); used[axis] = true end
+    end
+    local shape, coreAt = {}, {}
+    for position, axis in ipairs(axes) do coreAt[axis] = position end
+    local loopPosition = 1
+    for axis = 0, rank - 1 do
+        local corePosition = coreAt[axis]
+        if corePosition then shape[axis + 1] = coreShape[corePosition]
+        else shape[axis + 1] = loopShape[loopPosition]; loopPosition = loopPosition + 1 end
+    end
+    return shape, axes
+end
+
+local function ndCopyCore(result, output, outputBase, outputAxes, coreShape)
+    local rank = #coreShape
+    if rank == 0 then
+        assert(type(result) == "number", "scalar gufunc output must be a number")
+        output.data[outputBase + 1] = result
+        return
+    end
+    ndCheckArray(result)
+    assert(#result.shape == rank, "gufunc result rank does not match its signature")
+    for axis = 1, rank do assert(result.shape[axis] == coreShape[axis], "gufunc result shape does not match its signature") end
+    local iterator = NdArray._strideIter(coreShape, {result.stride}, {result.offset or 0}, "C", true)
+    while true do
+        local indices, offsets = iterator()
+        if not indices then break end
+        local outputOffset = outputBase
+        for axis = 1, rank do outputOffset = outputOffset + indices[axis] * output.stride[outputAxes[axis] + 1] end
+        output.data[outputOffset + 1] = result.data[offsets[1] + 1]
+    end
+end
+
+-- Signature layer.  `axes` is optional and, when supplied, contains one
+-- zero-based core-axis list per input followed by the output core-axis list.
+function NdArray.gufunc(func, signature, axes)
+    assert(type(func) == "function", "gufunc requires a function")
+    local inputDims, outputDims = ndParseSignature(signature)
+    return function(...)
+        local args = {...}
+        assert(#args == #inputDims, "gufunc argument count does not match signature")
+        local inputAxes, outputAxes = {}, nil
+        for operand, dimensions in ipairs(inputDims) do
+            inputAxes[operand] = axes and axes[operand] or ndDefaultCoreAxes(args[operand], #dimensions)
+            assert(#inputAxes[operand] == #dimensions, "input axes do not match signature")
+        end
+        if axes and axes[#inputDims + 1] then outputAxes = axes[#inputDims + 1] end
+
+        local labelSizes = {}
+        for operand, dimensions in ipairs(inputDims) do
+            for position, label in ipairs(dimensions) do
+                local axis = ndAxis(inputAxes[operand][position], #args[operand].shape)
+                local size = args[operand].shape[axis + 1]
+                assert(not labelSizes[label] or labelSizes[label] == size,
+                    "gufunc core dimensions must match exactly")
+                labelSizes[label] = size
+            end
+        end
+        local outputCoreShape = {}
+        for position, label in ipairs(outputDims) do
+            assert(labelSizes[label], "output core dimension is not inferable from inputs")
+            outputCoreShape[position] = labelSizes[label]
+        end
+
+        local loopShape, loopStrides, offsets, coreShapes, coreStrides =
+            ndNormalizeCore(args, inputAxes)
+        for operand, dimensions in ipairs(inputDims) do
+            assert(#coreShapes[operand] == #dimensions)
+        end
+        local outputShape, normalizedOutputAxes = ndOutputLayout(loopShape, outputCoreShape, outputAxes)
+        local output = ndContiguousArray(outputShape)
+        local iterator = NdArray._strideIter(loopShape, loopStrides, offsets, "C", true)
+        local views = {}
+        for operand, arr in ipairs(args) do
+            views[operand] = ndView(arr, coreShapes[operand], coreStrides[operand], offsets[operand])
+        end
+        while true do
+            local indices, currentOffsets = iterator()
+            if not indices then break end
+            for operand = 1, #args do views[operand].offset = currentOffsets[operand] end
+            local result = func(table.unpack(views, 1, #views))
+            local outputBase = output.offset or 0
+            local outputCoreSet = {}
+            for _, axis in ipairs(normalizedOutputAxes) do outputCoreSet[axis] = true end
+            local loopPosition = 1
+            for axis = 0, #outputShape - 1 do
+                if not outputCoreSet[axis] then
+                    outputBase = outputBase + indices[loopPosition] * output.stride[axis + 1]
+                    loopPosition = loopPosition + 1
+                end
+            end
+            ndCopyCore(result, output, outputBase, normalizedOutputAxes, outputCoreShape)
+        end
+        return output
+    end
+end
+
+function NdArray.eye(size)
+    local result = NdArray.zeros({size, size})
+    for i = 0, size - 1 do result.data[i * size + i + 1] = 1 end
+    return result
+end
+
+NdArray.identity = NdArray.eye
+
+-- These remain named functions intentionally.  Lua comparison metamethods
+-- (__eq/__lt/__le, where supported) must produce one boolean for the
+-- comparison expression; they cannot return an elementwise NdArray.
+NdArray.equal = function(a, b) return NdArray._elementwise(function(x, y) return x == y end, a, b) end
+NdArray.notEqual = function(a, b) return NdArray._elementwise(function(x, y) return x ~= y end, a, b) end
+NdArray.less = function(a, b) return NdArray._elementwise(function(x, y) return x < y end, a, b) end
+NdArray.lessEqual = function(a, b) return NdArray._elementwise(function(x, y) return x <= y end, a, b) end
+NdArray.greater = function(a, b) return NdArray._elementwise(function(x, y) return x > y end, a, b) end
+NdArray.greaterEqual = function(a, b) return NdArray._elementwise(function(x, y) return x >= y end, a, b) end
+
+local function ndWriteTraversal(source, output, axisOffset, axis)
+    local iterator = NdArray._strideIter(source.shape, {source.stride}, {source.offset or 0}, "C", true)
+    while true do
+        local indices, offsets = iterator()
+        if not indices then break end
+        local outputOffset = output.offset or 0
+        for dimension = 0, #source.shape - 1 do
+            local targetDimension = dimension == axis and axisOffset + indices[dimension + 1] or indices[dimension + 1]
+            outputOffset = outputOffset + targetDimension * output.stride[dimension + 1]
+        end
+        output.data[outputOffset + 1] = source.data[offsets[1] + 1]
+    end
+end
+
+function NdArray.concatenate(arrays, axis)
+    assert(type(arrays) == "table" and #arrays > 0, "concatenate requires arrays")
+    ndCheckArray(arrays[1])
+    axis = ndAxis(axis or 0, #arrays[1].shape)
+    local shape = ndCopyShape(arrays[1].shape)
+    shape[axis + 1] = 0
+    for _, arr in ipairs(arrays) do
+        ndCheckArray(arr); assert(#arr.shape == #shape, "concatenate ranks must match")
+        for dimension = 1, #shape do
+            if dimension ~= axis + 1 then assert(arr.shape[dimension] == arrays[1].shape[dimension], "concatenate shapes must match") end
+        end
+        shape[axis + 1] = shape[axis + 1] + arr.shape[axis + 1]
+    end
+    local result, offset = ndContiguousArray(shape), 0
+    for _, arr in ipairs(arrays) do
+        ndWriteTraversal(arr, result, offset, axis)
+        offset = offset + arr.shape[axis + 1]
+    end
+    return result
+end
+
+function NdArray.stack(arrays, axis)
+    assert(type(arrays) == "table" and #arrays > 0, "stack requires arrays")
+    local expanded = {}
+    for i, arr in ipairs(arrays) do expanded[i] = NdArray.expandDims(arr, axis or 0) end
+    return NdArray.concatenate(expanded, axis or 0)
+end
+
+function NdArray.expandDims(arr, axis)
+    ndCheckArray(arr)
+    axis = axis or 0
+    if axis < 0 then axis = #arr.shape + axis + 1 end
+    assert(axis >= 0 and axis <= #arr.shape, "axis is out of bounds")
+    local shape, stride = {}, {}
+    for dimension = 0, #arr.shape do
+        if dimension == axis then shape[dimension + 1], stride[dimension + 1] = 1, 0
+        else
+            local source = dimension > axis and dimension or dimension + 1
+            shape[dimension + 1], stride[dimension + 1] = arr.shape[source], arr.stride[source]
+        end
+    end
+    return ndView(arr, shape, stride, arr.offset or 0)
+end
+
+function NdArray.squeeze(arr, axis)
+    ndCheckArray(arr)
+    local remove = {}
+    if axis == nil then
+        for dimension, size in ipairs(arr.shape) do if size == 1 then remove[dimension] = true end end
+    else
+        axis = ndAxis(axis, #arr.shape); assert(arr.shape[axis + 1] == 1, "squeeze axis must have size one"); remove[axis + 1] = true
+    end
+    local shape, stride = {}, {}
+    for dimension = 1, #arr.shape do
+        if not remove[dimension] then shape[#shape + 1], stride[#stride + 1] = arr.shape[dimension], arr.stride[dimension] end
+    end
+    return ndView(arr, shape, stride, arr.offset or 0)
+end
+
+function NdArray.diag(arr, offset)
+    ndCheckArray(arr); offset = offset or 0
+    if #arr.shape == 1 then
+        local size = arr.shape[1] + math.abs(offset)
+        local result = NdArray.zeros({size, size})
+        for i = 0, arr.shape[1] - 1 do
+            local row, col = offset >= 0 and i or i - offset, offset >= 0 and i + offset or i
+            result.data[row * size + col + 1] = arr.data[(arr.offset or 0) + i * arr.stride[1] + 1]
+        end
+        return result
+    end
+    assert(#arr.shape == 2, "diag requires a vector or matrix")
+    local startRow, startCol = offset < 0 and -offset or 0, offset > 0 and offset or 0
+    local length = math.max(0, math.min(arr.shape[1] - startRow, arr.shape[2] - startCol))
+    local result = NdArray.empty({length})
+    for i = 0, length - 1 do
+        result.data[i + 1] = arr.data[(arr.offset or 0) + (startRow + i) * arr.stride[1]
+            + (startCol + i) * arr.stride[2] + 1]
+    end
+    return result
+end
+
+local function ndArgReduce(comparison, arr, axis, keepdim)
+    ndCheckArray(arr)
+    if axis == nil then
+        local best, index, position = nil, nil, 0
+        for _, values in NdArray.nditer(arr, nil, "C") do
+            if best == nil or comparison(values[1], best) then best, index = values[1], position end
+            position = position + 1
+        end
+        assert(index ~= nil, "cannot reduce an empty array")
+        return index
+    end
+    axis = ndAxis(axis, #arr.shape)
+    local outputShape = {}
+    for dimension = 0, #arr.shape - 1 do
+        if keepdim or dimension ~= axis then outputShape[#outputShape + 1] = dimension == axis and 1 or arr.shape[dimension + 1] end
+    end
+    local result = ndContiguousArray(outputShape)
+    local iterator = NdArray.coreIter({arr}, {{axis}})
+    local indices, views = iterator()
+    while indices do
+        local view, best, bestIndex = views[1], nil, nil
+        for i = 0, view.shape[1] - 1 do
+            local value = view.data[view.offset + i * view.stride[1] + 1]
+            if best == nil or comparison(value, best) then best, bestIndex = value, i end
+        end
+        assert(bestIndex ~= nil, "cannot reduce an empty axis")
+        local outputOffset, loopPosition = 0, 1
+        for dimension = 0, #arr.shape - 1 do if dimension ~= axis then
+            local target = keepdim and dimension or dimension - (dimension > axis and 1 or 0)
+            outputOffset = outputOffset + indices[loopPosition] * result.stride[target + 1]; loopPosition = loopPosition + 1
+        end end
+        result.data[outputOffset + 1] = bestIndex
+        indices, views = iterator()
+    end
+    return result
+end
+
+NdArray.argmax = function(arr, axis, keepdim) return ndArgReduce(function(x, y) return x > y end, arr, axis, keepdim) end
+NdArray.argmin = function(arr, axis, keepdim) return ndArgReduce(function(x, y) return x < y end, arr, axis, keepdim) end
+
+local function ndComparisonOperatorError()
+    error("NdArray comparison operators are disabled; use NdArray.equal, NdArray.notEqual, "
+        .. "NdArray.less, NdArray.lessEqual, NdArray.greater, or NdArray.greaterEqual", 2)
+end
+
+-- Lua has no __bool metamethod, but its arithmetic and comparison operators
+-- can be redirected. Elementwise comparisons remain named functions because
+-- Lua comparison expressions must produce one boolean rather than an array.
+NdArray.meta = {
+    __add = NdArray.add,
+    __sub = NdArray.sub,
+    __mul = NdArray.mul,
+    __div = NdArray.div,
+    __unm = NdArray.negative,
+    __eq = ndComparisonOperatorError,
+    __lt = ndComparisonOperatorError,
+    __le = ndComparisonOperatorError,
+}
+-- END Low/NdArray.lua
+
+-- BEGIN Low/Stats.lua
+Stats = Stats or {}
+
+local function assertFiniteWeight(weight)
+  assert(type(weight) == "number" and weight == weight and math.abs(weight) ~= math.huge,
+    "distribution weights must be finite numbers")
+  assert(weight >= 0, "distribution weights must be non-negative")
+end
+
+local function covarianceIndex(cov, row, col)
+  assert(type(cov) == "table" and cov.shape and cov.stride and cov.data,
+    "distribution covariance must be an NdArray")
+  assert(#cov.shape == 2 and cov.shape[1] == cov.shape[2],
+    "distribution covariance must be a square rank-2 NdArray")
+  return (cov.offset or 0) + (row - 1) * cov.stride[1]
+      + (col - 1) * cov.stride[2] + 1
+end
+
+local function covarianceGet(cov, row, col)
+  return cov.data[covarianceIndex(cov, row, col)]
+end
+
+local function covarianceSet(cov, row, col, value)
+  cov.data[covarianceIndex(cov, row, col)] = value
+end
+
+local function sampleValue(sample, variable, index)
+  if type(sample) == "table" and sample.shape and sample.stride and sample.data then
+    assert(#sample.shape == 1, "vector samples must be rank-1 NdArrays")
+    return sample.data[(sample.offset or 0) + (index - 1) * sample.stride[1] + 1]
+  end
+  return sample[variable]
+end
+
+local function vectorMean(distr)
+  local mean = NdArray.zeros({#distr.vars}, "float")
+  for i, variable in ipairs(distr.vars) do
+    mean.data[i] = distr.mean[variable]
+  end
+  return mean
+end
+
+local function mergeMoments(distr, incomingN, incomingMean, incomingCov)
+  local oldN = distr.n
+  assert(type(oldN) == "number" and oldN >= 0 and oldN == oldN and math.abs(oldN) ~= math.huge,
+    "distribution count must be a finite non-negative number")
+  assert(incomingN > 0, "cannot merge a distribution with zero weight")
+
+  local newN = oldN + incomingN
+  if not distr.vars then
+    local oldMean = distr.mean
+    local delta = incomingMean - oldMean
+    local newMean = oldMean + incomingN / newN * delta
+    local newCov = (oldN * distr.cov + incomingN * incomingCov
+        + oldN * incomingN / newN * delta * delta) / newN
+    distr.mean = newMean
+    distr.cov = newCov
+  else
+    local nVars = #distr.vars
+    local oldMean = vectorMean(distr)
+    local delta = NdArray.zeros({nVars}, "float")
+    local newMean = NdArray.zeros({nVars}, "float")
+    for i = 1, nVars do
+      delta.data[i] = incomingMean.data[i] - oldMean.data[i]
+      newMean.data[i] = oldMean.data[i] + incomingN / newN * delta.data[i]
+    end
+
+    for i, variable in ipairs(distr.vars) do
+      distr.mean[variable] = newMean.data[i]
+      for j = i, nVars do
+        local correction = oldN * incomingN / newN * delta.data[i] * delta.data[j]
+        local value = (oldN * covarianceGet(distr.cov, i, j)
+            + incomingN * covarianceGet(incomingCov, i, j) + correction) / newN
+        covarianceSet(distr.cov, i, j, value)
+        covarianceSet(distr.cov, j, i, value)
+      end
+    end
+  end
+  distr.n = newN
+end
+
+function Stats.Distribution(vars)
+  local distr = { n = 0, vars = vars }
+  if vars then
+    local mean = {}
+    local nVars = #vars
+    local cov = NdArray.zeros({nVars, nVars}, "float")
+    for i, v in ipairs(vars) do
+      mean[v] = 0
+    end
+    distr.mean = mean
+    distr.cov = cov
+  else
+    distr.mean = 0
+    distr.cov = 0
+  end
+  return distr
+end
+
+function Stats.updateDistribution(distr, sample, weight)
+  weight = weight or 1
+  assertFiniteWeight(weight)
+  if weight == 0 then return end
+
+  if distr.vars then
+    local mean = NdArray.zeros({#distr.vars}, "float")
+    for i, variable in ipairs(distr.vars) do
+      mean.data[i] = sampleValue(sample, variable, i)
+    end
+    local cov = NdArray.zeros({#distr.vars, #distr.vars}, "float")
+    mergeMoments(distr, weight, mean, cov)
+  else
+    mergeMoments(distr, weight, sample, 0)
+  end
+end
+
+function Stats.updateDistributionBatched(distr, samples, weights)
+  if #samples == 0 then return end
+  local wSum = 0
+  for j=1, #samples do
+    local weight = weights and weights[j] or 1
+    assertFiniteWeight(weight)
+    wSum = wSum + weight
+  end
+  if wSum == 0 then return end
+
+  if distr.vars then
+    local nVars = #distr.vars
+    local mean = NdArray.zeros({nVars}, "float")
+    for sampleIndex, sample in ipairs(samples) do
+      local weight = weights and weights[sampleIndex] or 1
+      for i, variable in ipairs(distr.vars) do
+        mean.data[i] = mean.data[i] + weight * sampleValue(sample, variable, i)
+      end
+    end
+    for i = 1, nVars do
+      mean.data[i] = mean.data[i] / wSum
+    end
+
+    local cov = NdArray.zeros({nVars, nVars}, "float")
+    for sampleIndex, sample in ipairs(samples) do
+      local weight = weights and weights[sampleIndex] or 1
+      for i, variableI in ipairs(distr.vars) do
+        local centeredI = sampleValue(sample, variableI, i) - mean.data[i]
+        for j = i, nVars do
+          local centeredJ = sampleValue(sample, distr.vars[j], j) - mean.data[j]
+          covarianceSet(cov, i, j, covarianceGet(cov, i, j)
+              + weight * centeredI * centeredJ / wSum)
+        end
+      end
+    end
+    for i = 1, nVars do
+      for j = i + 1, nVars do
+        covarianceSet(cov, j, i, covarianceGet(cov, i, j))
+      end
+    end
+    mergeMoments(distr, wSum, mean, cov)
+  else
+    local mean = 0
+    for i, sample in ipairs(samples) do
+      mean = mean + sample * (weights and weights[i] or 1)
+    end
+    mean = mean / wSum
+    local cov = 0
+    for i, sample in ipairs(samples) do
+      local centered = sample - mean
+      cov = cov + (weights and weights[i] or 1) * centered * centered / wSum
+    end
+    mergeMoments(distr, wSum, mean, cov)
+  end
+end
+
+function Stats.mergeDistribution(distr, other)
+  assert(type(other) == "table" and type(other.n) == "number", "expected a distribution to merge")
+  assert(other.n >= 0 and other.n == other.n and math.abs(other.n) ~= math.huge,
+    "distribution count must be a finite non-negative number")
+  if other.n == 0 then return end
+
+  if distr.vars then
+    assert(other.vars and #other.vars == #distr.vars, "distribution dimensions must match")
+    local mean = NdArray.zeros({#distr.vars}, "float")
+    for i, variable in ipairs(distr.vars) do
+      assert(other.vars[i] == variable, "distribution variable order must match")
+      mean.data[i] = other.mean[variable]
+    end
+    mergeMoments(distr, other.n, mean, other.cov)
+  else
+    assert(not other.vars, "distribution dimensions must match")
+    mergeMoments(distr, other.n, other.mean, other.cov)
+  end
+end
+
+function Stats.mean(distr)
+  return distr.mean
+end
+
+function Stats.covariance(distr)
+  return distr.cov
+end
+
+function Stats.namedCovariance(distr, var1, var2)
+  if not distr.vars then return distr.cov end
+  local nVars = distr.vars and #distr.vars or 1
+  for i=1,nVars do
+    if distr.vars[i] == var1 then
+      for j=1,nVars do
+        if distr.vars[j] == var2 then
+          return covarianceGet(distr.cov, i, j)
+        end
+      end
+    end
+  end
+end
+
+--[[
+  Returns:
+    z - a normally distributed random number
+--]]
+function Stats.normal()
+  local z, z1 = Stats.boxMuller()
+  return z
+end
+
+--[[
+  Arguments:
+    z - a z-score
+  Returns:
+    d - the standard normal probability density function at z
+]]
+function Stats.normalPDF(z)
+  return math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+end
+
+--[[
+  Arguments:
+    z - a z-score
+  Returns:
+    p - the p-value corresponding to that z-score. Approximately calculated using Zelen and Severo (1964) approximation
+--]]
+function Stats.normalCDF(z)
+  local b0 = 0.2316419
+  local b1 = 0.319381530
+  local b2 = -0.356563782
+  local b3 = 1.781477937
+  local b4 = -1.821255978
+  local b5 = 1.330274429
+  local t = 1 / (1 + b0 * z)
+  return 1 - Stats.normalPDF(z) * (b1 * t + b2 * t^2 + b3 * t^3 + b4 * t^4 + b5 * t^5)
+end
+
+--[[
+  Arguments:
+    p - a p-value
+  Returns:
+    z - the z-score corresponding to that p-value. Approximately calculated using Shore (1982) approximation
+--]]
+function Stats.inverseNorm(p)
+  local pRight = p >= 0.5 and p or -p
+  local z = 5.55556 * (1 - ((1 - pRight) / pRight) ^ 0.1186) -- Shore (1982) approximation for normal quantile
+  if p < 0.5 then z = -z end
+  return z
+end
+
+--[[
+  Returns:
+    z1, z2 - two normally distributed random numbers
+--]]
+function Stats.boxMuller()
+  local u1 = math.random()
+  local u2 = math.random() -- idk what algorithm math.random uses, but it might be an LCG since it's simple and common
+  u2 = math.random() -- it's also not very high-quality, which also describes LCGs. Box-Muller performs poorly when the
+  u2 = math.random() -- input comes from two consecutive numbers of an LCG, so we throw away values in between.
+  local r = math.sqrt(-2 * math.log(u1))
+  local theta = 2 * math.pi * u2
+  return r * math.cos(theta), r * math.sin(theta)
+end
+-- END Low/Stats.lua
 
 -- BEGIN Full/Counterbattery/Pipeline/Types.lua
 -- Runtime tags for the counterbattery data pipeline.
@@ -1044,6 +3383,20 @@ end
 -- Base target observations and the target-owned history buffers.
 local TargetTracking = {}
 
+local function initialDensityCovariance()
+  -- The modular artifact bundles Low/NdArray.lua and Low/Stats.lua, whose
+  -- vector distributions store covariance as an NdArray.  Keep the source
+  -- module usable beside the legacy monolith as well.
+  if NdArray and NdArray.zeros then
+    local covariance = NdArray.zeros({3, 3}, "float")
+    for i = 1, 3 do
+      covariance.data[(i - 1) * 3 + i] = 2500
+    end
+    return covariance
+  end
+  return Matrix3.scalarmul(Matrix3.Identity(), 2500)
+end
+
 function TargetTracking.new(config)
   return {
     enemies = config.enemies,
@@ -1070,6 +3423,7 @@ function TargetTracking:update(I, stamp)
         local newEnemy = {
                             pos = RingBuffer.RingBuffer(rbsize),
                             vel = RingBuffer.RingBuffer(rbsize),
+                            sampleTimes = RingBuffer.RingBuffer(rbsize),
                             rotation = RingBuffer.RingBuffer(rbsize),
                             origins = RingBuffer.RingBuffer(self.numOrigins),
                             density = Stats.Distribution({"x", "y", "z"}),
@@ -1079,13 +3433,17 @@ function TargetTracking:update(I, stamp)
                           }
         newEnemy.density.n = 15
         -- todo: set initial size estimate based on block count
-        newEnemy.density.cov = Matrix3.scalarmul(Matrix3.Identity(), 2500)
+        newEnemy.density.cov = initialDensityCovariance()
         enemies[target.Id] = newEnemy
       end
       local e = enemies[target.Id]
       e.valid = true
       RingBuffer.push(e.pos, targetPosition.Position)
       RingBuffer.push(e.vel, targetPosition.Velocity)
+      -- Keep the actual sample time beside the position and velocity.  The
+      -- old solver reconstructed time from the ring index, which is only
+      -- exact when UpdateEnemyData runs at a perfectly uniform cadence.
+      RingBuffer.push(e.sampleTimes, stamp)
     end
   end
 
@@ -1108,6 +3466,7 @@ function TargetTracking:update(I, stamp)
       velocity = en.vel[en.vel.size],
       positionHistory = en.pos,
       velocityHistory = en.vel,
+      sampleTimeHistory = en.sampleTimes,
       rotationHistory = en.rotation,
     })
   end
@@ -1121,6 +3480,17 @@ end
 -- target/aimpoint
 -- Mainframe aimpoint observations normalized against each mainframe's target
 -- position estimate.  The underlying target/track product is not modified.
+--
+-- `position` is deliberately world-space.  The normalization is:
+--
+--   TargetPositionInfo.Position
+--     + (AimPointPosition - TargetInfo.Position)
+--
+-- This preserves the target-relative offset reported by one mainframe while
+-- translating it onto that mainframe's target-position estimate.  It is not a
+-- center-of-mass claim and it is not rotation-corrected here.  TargetRotation
+-- needs these world-space points, and TargetDensity applies the inverse tracked
+-- rotation after subtracting the target track position.
 local TargetAimpoint = {}
 
 function TargetAimpoint.new(config)
@@ -1178,12 +3548,17 @@ end
 local TargetRotation = {}
 
 function TargetRotation.new(config)
-  return {
+  return setmetatable({
     aimPointTrackers = config.aimPointTrackers,
     maxTurnRateTracking = config.maxTurnRateTracking,
     TICKS_PER_S = config.TICKS_PER_S,
     trackLossTime = 0,
-  }
+    ransacInlierSqrThreshold = config.ransacInlierSqrThreshold or 0.1,
+    ransacLegSqrTolerance = config.ransacLegSqrTolerance or 0.1,
+    ransacLegRelativeTolerance = config.ransacLegRelativeTolerance or 0.01,
+    ransacMinTriangleAreaRatio = config.ransacMinTriangleAreaRatio or 1e-6,
+    ransacSeed = config.ransacSeed or 1,
+  }, {__index = TargetRotation})
 end
 
 function TargetRotation:update(I, tracks, aimpoints, stamp)
@@ -1219,60 +3594,211 @@ function TargetRotation:update(I, tracks, aimpoints, stamp)
   })
 end
 
-function TargetRotation:getRotation(oldPts, newPts, iterLim)
-  -- Copied from the original GetRotation implementation.
-  local nTrack = #newPts
-  iterLim = iterLim or 25
+local function validPoint(point)
+  local pointType = type(point)
+  return (pointType == "table" or pointType == "userdata")
+    and type(point.x) == "number"
+    and type(point.y) == "number"
+    and type(point.z) == "number"
+    and point.x == point.x
+    and point.y == point.y
+    and point.z == point.z
+end
 
-  local indices = {}
-  for i = 1, nTrack do
-    indices[i] = i
+local function combinationCount(n)
+  return n * (n - 1) * (n - 2) / 6
+end
+
+-- Return the zero-based lexicographic combination at rank. This lets small
+-- RANSAC problems exhaustively test every triangle without using global RNG.
+local function tripletAtRank(rank, n)
+  local i, j
+  for candidateI = 1, n - 2 do
+    local count = (n - candidateI) * (n - candidateI - 1) / 2
+    if rank < count then
+      i = candidateI
+      break
+    end
+    rank = rank - count
   end
-  local consensusPoints = {}
-  -- iterate through triples of aimpoints, check if the legs are the same length
-  for trip = 1, iterLim do
-    MathUtil.shuffle(indices, true)
-    local oldAimpoints = {}
-    local aimpoints = {}
-    for i = 1, 3 do
-      oldAimpoints[i] = oldPts[indices[i]]
-      aimpoints[i] = newPts[indices[i]]
+  for candidateJ = i + 1, n - 1 do
+    local count = n - candidateJ
+    if rank < count then
+      j = candidateJ
+      break
+    end
+    rank = rank - count
+  end
+  return i, j, j + 1 + rank
+end
+
+local function nextRandom(state)
+  -- Park-Miller is deterministic and does not perturb FtD's global RNG.
+  return (state * 48271) % 2147483647
+end
+
+local function triangleAreaRatio(a, b)
+  local denominator = math.max(1, a.sqrMagnitude * b.sqrMagnitude)
+  return Vector3.Cross(a, b).sqrMagnitude / denominator
+end
+
+function TargetRotation:getRotation(oldPts, newPts, iterLim)
+  if oldPts == nil or newPts == nil or #oldPts ~= #newPts then
+    return nil
+  end
+  local nTrack = #oldPts
+  iterLim = math.floor(iterLim or 25)
+  if nTrack < 3 or iterLim < 1 then
+    return nil
+  end
+
+  for idx = 1, nTrack do
+    if not validPoint(oldPts[idx]) or not validPoint(newPts[idx]) then
+      return nil
+    end
+  end
+
+  local legSqrTolerance = self.ransacLegSqrTolerance or 0.1
+  local legRelativeTolerance = self.ransacLegRelativeTolerance or 0.01
+  local minTriangleAreaRatio = self.ransacMinTriangleAreaRatio or 1e-6
+  local inlierSqrThreshold = self.ransacInlierSqrThreshold or 0.1
+  local maxTurnRate = self.maxTurnRateTracking or math.huge
+  local ticksPerSecond = self.TICKS_PER_S or 1
+
+  local function validLegLength(oldLeg, newLeg)
+    local scale = math.max(1, oldLeg.sqrMagnitude, newLeg.sqrMagnitude)
+    return math.abs(oldLeg.sqrMagnitude - newLeg.sqrMagnitude)
+      <= legSqrTolerance + legRelativeTolerance * scale
+  end
+
+  local function makeHypothesis(i, j, k)
+    local oldA = oldPts[j] - oldPts[i]
+    local oldB = oldPts[k] - oldPts[i]
+    local newA = newPts[j] - newPts[i]
+    local newB = newPts[k] - newPts[i]
+    local oldC = oldPts[k] - oldPts[j]
+    local newC = newPts[k] - newPts[j]
+
+    if not validLegLength(oldA, newA)
+        or not validLegLength(oldB, newB)
+        or not validLegLength(oldC, newC)
+        or triangleAreaRatio(oldA, oldB) <= minTriangleAreaRatio
+        or triangleAreaRatio(newA, newB) <= minTriangleAreaRatio then
+      return nil
     end
 
-    local legs, oldLegs = {}, {}
-    local valid = true
-    for i = 1, 3 do
-      legs[i] = aimpoints[i % 3 + 1] - aimpoints[(i - 1) % 3 + 1]
-      oldLegs[i] = oldAimpoints[i % 3 + 1] - oldAimpoints[(i - 1) % 3 + 1]
-      -- check if aimpoints have changed
-      if math.abs(legs[i].sqrMagnitude - oldLegs[i].sqrMagnitude) > 0.1 then
-        valid = false
+    local oldRot = Quaternion.LookRotation(oldA, oldB)
+    local newRot = Quaternion.LookRotation(newA, newB)
+    if oldRot == nil or newRot == nil then
+      return nil
+    end
+    local deltaRot = newRot * Quaternion.Inverse(oldRot)
+    local w = math.max(-1, math.min(1, math.abs(deltaRot.w)))
+    local turnRate = 2 * math.acos(w) * 180 / math.pi * ticksPerSecond
+    if turnRate >= maxTurnRate then
+      return nil
+    end
+    return deltaRot
+  end
+
+  local function score(deltaRot, anchor)
+    local points = {}
+    local totalError = 0
+    for idx = 1, nTrack do
+      local diff = newPts[idx] - newPts[anchor]
+      local oldDiff = oldPts[idx] - oldPts[anchor]
+      local error = (diff - deltaRot * oldDiff).sqrMagnitude
+      if error <= inlierSqrThreshold then
+        points[#points + 1] = idx
+        totalError = totalError + error
+      end
+    end
+    return #points, totalError, points
+  end
+
+  local function better(count, error, bestCount, bestError)
+    return bestCount == nil
+      or count > bestCount
+      or (count == bestCount and error < bestError)
+  end
+
+  local totalTriplets = combinationCount(nTrack)
+  local attempts = math.min(iterLim, totalTriplets)
+  local randomState = math.floor(self.ransacSeed or 1) % 2147483647
+  if randomState <= 0 then randomState = 1 end
+  local seen = {}
+  local bestRotation, bestCount, bestError, bestPoints
+
+  for attempt = 1, attempts do
+    local rank
+    if totalTriplets <= iterLim then
+      rank = attempt - 1
+    else
+      randomState = nextRandom(randomState)
+      rank = randomState % totalTriplets
+      while seen[rank] do
+        rank = (rank + 1) % totalTriplets
+      end
+    end
+    seen[rank] = true
+
+    local i, j, k = tripletAtRank(rank, nTrack)
+    local deltaRot = makeHypothesis(i, j, k)
+    if deltaRot then
+      local count, error, points = score(deltaRot, i)
+      if better(count, error, bestCount, bestError) then
+        bestRotation, bestCount, bestError, bestPoints = deltaRot, count, error, points
+      end
+      if bestCount == nTrack then
         break
       end
     end
-    if valid then
-      local oldRot = Quaternion.LookRotation(oldLegs[1], oldLegs[2])
-      local rot = Quaternion.LookRotation(legs[1], legs[2])
-      local deltaRot = rot * Quaternion.Inverse(oldRot)
-      if math.acos(math.max(math.min(deltaRot.w, 1), -1)) * 360 / math.pi * self.TICKS_PER_S < self.maxTurnRateTracking then
-        -- check for consensus
-        local votes = 0
-        for idx, ap in ipairs(newPts) do
-          local diff = ap - newPts[indices[1]]
-          local oldDiff = oldPts[idx] - oldPts[indices[1]]
-          if (diff - deltaRot * oldDiff).sqrMagnitude < 0.1 then
-            votes = votes + 1
-            table.insert(consensusPoints, idx)
+  end
+
+  local minimumInliers = math.max(3, math.floor(nTrack / 2) + 1)
+  if bestRotation == nil or bestCount < minimumInliers then
+    return nil
+  end
+
+  -- Refit deterministically from the best-conditioned triangle in the
+  -- consensus set, then score it against every correspondence again.
+  for refinement = 1, 2 do
+    local supportI, supportJ, supportK, supportQuality
+    for a = 1, #bestPoints - 2 do
+      for b = a + 1, #bestPoints - 1 do
+        for c = b + 1, #bestPoints do
+          local i, j, k = bestPoints[a], bestPoints[b], bestPoints[c]
+          local oldA = oldPts[j] - oldPts[i]
+          local oldB = oldPts[k] - oldPts[i]
+          local newA = newPts[j] - newPts[i]
+          local newB = newPts[k] - newPts[i]
+          local quality = math.min(triangleAreaRatio(oldA, oldB), triangleAreaRatio(newA, newB))
+          if supportQuality == nil or quality > supportQuality then
+            supportI, supportJ, supportK, supportQuality = i, j, k, quality
           end
-          if 2 * votes - 3 >= nTrack then
-            return deltaRot, consensusPoints
-          end
-          consensusPoints = {}
         end
       end
     end
+
+    if supportI == nil then
+      break
+    end
+    local refitRotation = makeHypothesis(supportI, supportJ, supportK)
+    if refitRotation == nil then
+      break
+    end
+    local refitCount, refitError, refitPoints = score(refitRotation, supportI)
+    if better(refitCount, refitError, bestCount, bestError) then
+      bestRotation, bestCount, bestError, bestPoints = refitRotation, refitCount, refitError, refitPoints
+    else
+      break
+    end
   end
-  return nil
+
+  if bestCount < minimumInliers then
+    return nil
+  end
+  return bestRotation, bestPoints
 end
 -- END Full/Counterbattery/Pipeline/TargetRotation.lua
 
@@ -1357,6 +3883,287 @@ function CounterbatteryPipeline:update(I, stamp)
   return self.outputs
 end
 -- END Full/Counterbattery/Pipeline/TargetPipeline.lua
+
+-- BEGIN Full/Counterbattery/Pipeline/ClosestPointSolver.lua
+-- target/closest-point
+-- Closest point between the projectile trace and the target distribution.
+--
+-- The analytic pass freezes the target rotation at an observed history sample.
+-- The final pass evaluates every available history sample with that sample's
+-- rotation, so the scan does not inherit the constant-rotation approximation.
+local CounterbatteryClosestPointSolver = {}
+local solverWarningShown = false
+local degenerateCubicWarningShown = false
+local ROOT_EPS = 1e-7
+local CUBIC_EPS = 1e-12
+
+local function covarianceMatrix(covariance)
+  if covariance and covariance.shape and covariance.data then
+    local values = {}
+    for row = 0, 2 do
+      for col = 0, 2 do
+        values[row * 3 + col + 1] = covariance.data[(covariance.offset or 0)
+          + row * covariance.stride[1] + col * covariance.stride[2] + 1]
+      end
+    end
+    return Matrix3.Matrix3(values)
+  end
+  return covariance
+end
+
+local function max(a, b)
+  if a > b then return a end
+  return b
+end
+
+local function min(a, b)
+  if a < b then return a end
+  return b
+end
+
+local function logInterpreterChange(I)
+  if solverWarningShown then return end
+  solverWarningShown = true
+  if I and I.Log then
+    I:Log("Counterbattery: legacy covariance-inverse negation/row-shifting workaround removed; FtD now uses the newer Lua interpreter.")
+  end
+end
+
+local function historySize(enemy)
+  local history = enemy.sampleTimes or enemy.sampleTimeHistory
+  if history then return history.size end
+  return enemy.pos and enemy.pos.size or 0
+end
+
+function CounterbatteryClosestPointSolver.sampleTime(enemy, index, now, ticksPerSecond)
+  local history = enemy.sampleTimes or enemy.sampleTimeHistory
+  if history and history[index] ~= nil then
+    return history[index]
+  end
+  -- Compatibility fallback for enemies created by the old monolith.  New
+  -- targets always have explicit timestamps, including jittered samples.
+  local size = enemy.pos and enemy.pos.size or 0
+  ticksPerSecond = ticksPerSecond or 1
+  return now - (size - index) / ticksPerSecond
+end
+
+function CounterbatteryClosestPointSolver.indexAtTime(enemy, absoluteTime, now, ticksPerSecond)
+  local size = historySize(enemy)
+  if size < 1 then return nil end
+
+  local history = enemy.sampleTimes or enemy.sampleTimeHistory
+  local monotonic = true
+  if history then
+    for i = 2, size do
+      if history[i] == nil or history[i] < history[i - 1] then
+        monotonic = false
+        break
+      end
+    end
+  end
+  if history and monotonic and size > 1 and history[size] > history[1]
+      and Search and Search.interpolatedSearch then
+    -- Search.interpolatedSearch returns the closest entry when findClosest is
+    -- true.  The explicit scan below remains a safe fallback for a malformed
+    -- or non-monotonic timestamp ring.
+    local index = Search.interpolatedSearch(history, 1, size, absoluteTime, true)
+    if index and history[index] ~= nil then
+      return index
+    end
+  end
+
+  local bestIndex
+  local bestDistance
+  for index = 1, size do
+    local sample = CounterbatteryClosestPointSolver.sampleTime(enemy, index, now, ticksPerSecond)
+    local distance = math.abs(sample - absoluteTime)
+    if not bestDistance or distance < bestDistance then
+      bestIndex = index
+      bestDistance = distance
+    end
+  end
+  return bestIndex
+end
+
+function CounterbatteryClosestPointSolver.validInterval(enemy, line, now, ticksPerSecond)
+  local size = historySize(enemy)
+  if size < 1 or not line or not line.tStart or not line.dt or line.dt <= 0 then
+    return nil
+  end
+  local oldest = CounterbatteryClosestPointSolver.sampleTime(enemy, 1, now, ticksPerSecond)
+  local newest = CounterbatteryClosestPointSolver.sampleTime(enemy, size, now, ticksPerSecond)
+  local lower = max(0, oldest - line.tStart)
+  local upper = min(line.dt, newest - line.tStart)
+  if upper < lower then return nil end
+  return lower, upper
+end
+
+local function quadraticForm(vector, matrix, other)
+  return Matrix3.quadform(vector, matrix, other or vector)
+end
+
+function CounterbatteryClosestPointSolver.polynomialCoefficients(di, relativeVelocity, gravity, covInv)
+  -- For r(s) = di + relativeVelocity*s + 1/2*gravity*s^2,
+  -- d(r^T A r)/ds = 2*(r^T A*(relativeVelocity + gravity*s)).
+  -- The common factor 2 is omitted because it does not change the roots.
+  local q3 = 0.5 * quadraticForm(gravity, covInv)
+  local q2 = quadraticForm(relativeVelocity, covInv, gravity)
+    + 0.5 * quadraticForm(gravity, covInv, relativeVelocity)
+  local q1 = quadraticForm(di, covInv, gravity)
+    + quadraticForm(relativeVelocity, covInv)
+  local q0 = quadraticForm(di, covInv, relativeVelocity)
+  return q3, q2, q1, q0
+end
+
+local function addRoot(roots, root, lower, upper)
+  if not root or root ~= root then return end
+  if root >= lower - ROOT_EPS and root <= upper + ROOT_EPS then
+    root = min(upper, max(lower, root))
+    for _, existing in ipairs(roots) do
+      if math.abs(existing - root) <= ROOT_EPS then return end
+    end
+    roots[#roots + 1] = root
+  end
+end
+
+function CounterbatteryClosestPointSolver.selectAnalyticRoot(candidateRoots, lower, upper, objective)
+  local roots = {}
+  addRoot(roots, lower, lower, upper)
+  addRoot(roots, upper, lower, upper)
+  for _, root in ipairs(candidateRoots or {}) do
+    addRoot(roots, root, lower, upper)
+  end
+
+  local bestRoot
+  local bestObjective
+  for _, root in ipairs(roots) do
+    local value = objective(root)
+    if value and (not bestObjective or value < bestObjective) then
+      bestRoot = root
+      bestObjective = value
+    end
+  end
+  return bestRoot, bestObjective
+end
+
+local function solveCandidates(q3, q2, q1, q0)
+  if math.abs(q3) > CUBIC_EPS then
+    local a, b, c = MathUtil.solveCubic(q3, q2, q1, q0)
+    return {a, b, c}, "cubic"
+  end
+  if math.abs(q2) > CUBIC_EPS then
+    local a, b = MathUtil.solveQuadratic(q2, q1, q0)
+    return {a, b}, "quadratic"
+  end
+  if math.abs(q1) > CUBIC_EPS then
+    return {-q0 / q1}, "linear"
+  end
+  return {}, "constant"
+end
+
+function CounterbatteryClosestPointSolver.chooseAnalyticRoot(q3, q2, q1, q0, lower, upper, objective)
+  local candidates, degree = solveCandidates(q3, q2, q1, q0)
+  local root, value = CounterbatteryClosestPointSolver.selectAnalyticRoot(
+    candidates, lower, upper, objective)
+  return root, value, degree
+end
+
+local function gravityAt(I, altitude)
+  return I:GetGravityForAltitude(altitude)
+end
+
+local function projectileDifference(line, projectileVelocity, gravity, targetPosition, dt)
+  return line.start - targetPosition + dt * projectileVelocity + 0.5 * gravity * dt * dt
+end
+
+local function rotationAt(enemy, index)
+  return enemy.rotation and enemy.rotation[index] or Quaternion.identity
+end
+
+local function scanClosest(I, line, enemy, covInv, lower, upper, now, ticksPerSecond, gravity, projectileVelocity)
+  local size = historySize(enemy)
+  local bestIndex
+  local bestObjective
+  for index = 1, size do
+    local sampleTime = CounterbatteryClosestPointSolver.sampleTime(enemy, index, now, ticksPerSecond)
+    local dt = sampleTime - line.tStart
+    if dt >= lower - ROOT_EPS and dt <= upper + ROOT_EPS then
+      local diff = projectileDifference(line, projectileVelocity, gravity, enemy.pos[index], dt)
+      local localDiff = Quaternion.Inverse(rotationAt(enemy, index)) * diff
+      local objective = quadraticForm(localDiff, covInv)
+      if not bestObjective or objective < bestObjective then
+        bestIndex = index
+        bestObjective = objective
+      end
+    end
+  end
+  return bestIndex, bestObjective
+end
+
+function CounterbatteryClosestPointSolver.runTrace(I, line, enemy, timeGuess)
+  local now = I:GetTimeSinceSpawn()
+  local ticksPerSecond = TICKS_PER_S or 1
+  local lower, upper = CounterbatteryClosestPointSolver.validInterval(enemy, line, now, ticksPerSecond)
+  if not lower then return nil end
+
+  logInterpreterChange(I)
+  local covInv = Matrix3.inverse(covarianceMatrix(enemy.density.cov))
+  if not covInv then return nil end
+  local projectileVelocity = line.ds / line.dt
+  local gravity = gravityAt(I, line.start.y)
+  local anchorIndex = timeGuess and enemy.pos[timeGuess] and timeGuess
+    or CounterbatteryClosestPointSolver.indexAtTime(enemy, line.tStart + upper, now, ticksPerSecond)
+  if not anchorIndex then return nil end
+
+  -- Re-anchor the constant-rotation polynomial at the selected history sample
+  -- twice.  This keeps the cubic cheap while moving the local linearization
+  -- toward the candidate time before the changing-rotation scan.
+  for _ = 1, 2 do
+    local anchorTime = CounterbatteryClosestPointSolver.sampleTime(enemy, anchorIndex, now, ticksPerSecond)
+    local targetPosition = enemy.pos[anchorIndex]
+    local targetVelocity = enemy.vel[anchorIndex]
+    if not targetPosition or not targetVelocity then return nil end
+    local di = line.start - (targetPosition + (line.tStart - anchorTime) * targetVelocity)
+    local relativeVelocity = projectileVelocity - targetVelocity
+    local inverseRotation = Quaternion.Inverse(rotationAt(enemy, anchorIndex))
+    local localDi = inverseRotation * di
+    local localRelativeVelocity = inverseRotation * relativeVelocity
+    local localGravity = inverseRotation * gravity
+    local q3, q2, q1, q0 = CounterbatteryClosestPointSolver.polynomialCoefficients(
+      localDi, localRelativeVelocity, localGravity, covInv)
+    if math.abs(q3) <= CUBIC_EPS and not degenerateCubicWarningShown and I and I.Log then
+      degenerateCubicWarningShown = true
+      I:Log("Counterbattery: Mahalanobis cubic term is degenerate; using a lower-degree fallback.")
+    end
+    local root = CounterbatteryClosestPointSolver.chooseAnalyticRoot(
+      q3, q2, q1, q0, lower, upper, function(candidate)
+        local candidateDiff = localDi
+          + candidate * localRelativeVelocity
+          + 0.5 * candidate * candidate * localGravity
+        return quadraticForm(candidateDiff, covInv)
+      end)
+    if not root then return nil end
+    anchorIndex = CounterbatteryClosestPointSolver.indexAtTime(
+      enemy, line.tStart + root, now, ticksPerSecond)
+    if not anchorIndex then return nil end
+  end
+
+  local bestIndex = scanClosest(
+    I, line, enemy, covInv, lower, upper, now, ticksPerSecond, gravity, projectileVelocity)
+  if not bestIndex then return nil end
+  local bestTime = CounterbatteryClosestPointSolver.sampleTime(enemy, bestIndex, now, ticksPerSecond)
+  local dt = bestTime - line.tStart
+  return projectileDifference(line, projectileVelocity, gravity, enemy.pos[bestIndex], dt), bestIndex
+end
+
+-- Exposed for the Lua test harness; the generated FtD script calls runTrace
+-- through the global RunTrace entrypoint below.
+_G.CounterbatteryClosestPointSolver = CounterbatteryClosestPointSolver
+
+function RunTrace(I, line, enemy, timeGuess)
+  return CounterbatteryClosestPointSolver.runTrace(I, line, enemy, timeGuess)
+end
+-- END Full/Counterbattery/Pipeline/ClosestPointSolver.lua
 
 -- BEGIN Full/Counterbattery/Pipeline/Entry.lua
 -- Pipeline entrypoint appended to the legacy counterbattery script.
