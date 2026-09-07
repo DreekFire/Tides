@@ -4,7 +4,7 @@
 -- CounterBatteryPipeline.lua artifact.
 local counterbatteryPipeline
 
-local function getCounterbatteryPipeline()
+function GetCounterbatteryPipeline()
   if not counterbatteryPipeline then
     counterbatteryPipeline = CounterbatteryPipeline.new({
       enemies = enemies,
@@ -12,6 +12,7 @@ local function getCounterbatteryPipeline()
       TICKS_PER_S = TICKS_PER_S,
       numOrigins = numOrigins,
       trackClusterDistance = trackClusterDistance,
+      missileOverlapDistance = missileOverlapDistance,
       aimPointTrackers = aimPointTrackers,
       maxTurnRateTracking = maxTurnRateTracking,
       onTargetLost = function(id)
@@ -27,5 +28,13 @@ local function getCounterbatteryPipeline()
 end
 
 function UpdateEnemyData(I)
-  return getCounterbatteryPipeline():update(I, t)
+  return GetCounterbatteryPipeline():update(I, t)
+end
+
+function ObserveCounterbatteryProjectile(I, observation)
+  return GetCounterbatteryPipeline():observeProjectile(I, observation, t)
+end
+
+function ObserveCounterbatteryMissiles(I, observations)
+  return GetCounterbatteryPipeline():observeMissiles(I, observations, t)
 end

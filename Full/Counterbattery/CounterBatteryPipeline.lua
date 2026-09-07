@@ -48,6 +48,8 @@ local numOrigins = 3
 -- maximum shortest distance between reconstructed trajectory lines in one
 -- deduplicated target/track-cluster product
 local trackClusterDistance = 5
+-- Ballistic detections this close to a missile warning are not ballistic.
+local missileOverlapDistance = 5
 -- time between switching targets
 local originSwitchTime = 2
 -- maximum time to remember origin points
@@ -347,8 +349,30 @@ function CoreUpdate(I)
   local alt = altScale * I:GetPropulsionRequest(9) -- A axis, set in projectile avoidance routine
   local relBear = bearScale * I:GetPropulsionRequest(10) -- B axis (is this guaranteed to be -180 to 180?)
   local dist = distScale * I:GetPropulsionRequest(12) -- D axis (maybe increase to account for large/huge missiles)
+  local missileObservations = {}
+  if missileCounter then
+    for widx = 0, I:GetNumberOfWarnings(mainframeIdx) - 1 do
+      local warn = I:GetMissileWarning(mainframeIdx, widx)
+      if warn.Valid and warn.Position then
+        missileObservations[#missileObservations + 1] = {
+          id = warn.Id,
+          position = warn.Position,
+        }
+      end
+    end
+  end
+  ObserveCounterbatteryMissiles(I, missileObservations)
   local projectile = GetProjectile(I, alt, relBear, dist)
-
+  local projectileObservation = ObserveCounterbatteryProjectile(I, {
+    streamId = "sensor-projectile",
+    detected = projectile ~= nil,
+    position = projectile or lastProjectilePos,
+    centerOfMass = I:GetConstructCenterOfMass(),
+    reportedRange = dist,
+  })
+  if projectileObservation and not projectileObservation.accepted then
+    projectile = nil
+  end
   if not projectile then
     currentLine = {}
     lastProjectilePos = nil
@@ -597,6 +621,7 @@ function GetOrigin(I, line, enemy)
           rot = enemyRotAtTime,
           detectTime = t,
           detectPos = line.ed,
+          detectCenterOfMass = I:GetConstructCenterOfMass(),
           type = 1,
         }
         I:Log("CRAM origin found")
@@ -615,6 +640,7 @@ function GetOrigin(I, line, enemy)
           rot = eRot,
           detectTime = t,
           detectPos = line.ed,
+          detectCenterOfMass = I:GetConstructCenterOfMass(),
           type = 0,
         }
         I:Log("Origin found")
@@ -652,6 +678,7 @@ function GetMissileOrigin(I, enemy)
             rot = enemy.rotation[tIdx],
             detectTime = t,
             detectPos = warn.Position,
+            detectCenterOfMass = I:GetConstructCenterOfMass(),
             type = 2,
           }
           table.insert(origins, origin)
@@ -3897,6 +3924,432 @@ function TargetDensity:update(I, tracks, aimpoints, rotations, stamp)
 end
 -- END Full/Counterbattery/Pipeline/TargetDensity.lua
 
+-- BEGIN Full/Counterbattery/Pipeline/ProjectileEstimation.lua
+-- target/track-cluster/projectile
+-- Projectile metadata enrichment for reconstructed origins.
+--
+-- The FtD Lua API gives us projectile position/velocity observations and
+-- vehicle self-awareness dimensions, but not projectile caliber or a firing
+-- event/cannon identifier.  Size is inferred from detection range through a
+-- supplied calibration (or retained as an uncalibrated range proxy), never
+-- read from a nonexistent API field.
+local TargetProjectileEstimation = {}
+
+local RANGE_EPSILON = 1e-9
+
+local function magnitude(vector)
+  if not vector then return nil end
+  if vector.sqrMagnitude then return math.sqrt(vector.sqrMagnitude) end
+  if vector.magnitude then return vector.magnitude end
+  if vector.x and vector.y and vector.z then
+    return math.sqrt(vector.x * vector.x + vector.y * vector.y + vector.z * vector.z)
+  end
+  return nil
+end
+
+local function distance(first, second)
+  if not first or not second then return nil end
+  return magnitude(first - second)
+end
+
+local function dot(first, second)
+  if not first or not second then return nil end
+  if Vector3 and Vector3.Dot then return Vector3.Dot(first, second) end
+  return first.x * second.x + first.y * second.y + first.z * second.z
+end
+
+local function readVector(I, methodName)
+  local method = I and I[methodName]
+  if type(method) ~= "function" then return nil end
+  local ok, value = pcall(method, I)
+  if ok then return value end
+  return nil
+end
+
+local function finite(value)
+  return type(value) == "number" and value == value and value < math.huge and value > -math.huge
+end
+
+local function componentwiseClampDistance(localPoint, minimum, maximum)
+  local dx = 0
+  local dy = 0
+  local dz = 0
+  if localPoint.x < minimum.x then dx = minimum.x - localPoint.x
+  elseif localPoint.x > maximum.x then dx = localPoint.x - maximum.x end
+  if localPoint.y < minimum.y then dy = minimum.y - localPoint.y
+  elseif localPoint.y > maximum.y then dy = localPoint.y - maximum.y end
+  if localPoint.z < minimum.z then dz = minimum.z - localPoint.z
+  elseif localPoint.z > maximum.z then dz = localPoint.z - maximum.z end
+  return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+local function directBounds(config)
+  local bounds = config and config.vehicleBounds
+  if not bounds or not bounds.minimum or not bounds.maximum then return nil end
+  return {
+    center = bounds.center,
+    minimum = bounds.minimum,
+    maximum = bounds.maximum,
+    right = bounds.right,
+    up = bounds.up,
+    forward = bounds.forward,
+  }
+end
+
+local function vehicleBounds(I, config)
+  local configured = directBounds(config)
+  if configured then return configured end
+
+  local minimum = readVector(I, "GetConstructMinDimensions")
+  local maximum = readVector(I, "GetConstructMaxDimensions")
+  local center = readVector(I, "GetConstructPosition")
+  if not minimum or not maximum or not center then return nil end
+  return {
+    center = center,
+    minimum = minimum,
+    maximum = maximum,
+    right = readVector(I, "GetConstructRightVector"),
+    up = readVector(I, "GetConstructUpVector"),
+    forward = readVector(I, "GetConstructForwardVector"),
+  }
+end
+
+local function boxDistance(I, point, config)
+  local bounds = vehicleBounds(I, config)
+  if not bounds or not bounds.center then return nil end
+  local delta = point - bounds.center
+  local localPoint
+  if bounds.right and bounds.up and bounds.forward then
+    localPoint = {
+      x = dot(delta, bounds.right),
+      y = dot(delta, bounds.up),
+      z = dot(delta, bounds.forward),
+    }
+  else
+    -- This is also useful for tests and for older bindings.  Without axes,
+    -- the dimensions are conservatively treated as world-aligned.
+    localPoint = delta
+  end
+  return componentwiseClampDistance(localPoint, bounds.minimum, bounds.maximum)
+end
+
+local function sizeFrom(origin, config, detectionRange)
+  local value = origin and (origin.projectileSize or origin.size or origin.diameter or origin.caliber)
+  if value == nil and config then
+    value = config.projectileSize
+  end
+  if type(value) == "table" then
+    value = value.estimate or value.value
+  end
+  if type(value) == "number" and value >= 0 then
+    return value, "origin-or-config"
+  end
+  if config and type(config.projectileSizeFromDetectionRange) == "function" then
+    local ok, estimate = pcall(config.projectileSizeFromDetectionRange,
+      detectionRange and detectionRange.lowerBound,
+      detectionRange and detectionRange.upperBound, origin)
+    if ok and type(estimate) == "number" and estimate >= 0 then
+      return estimate, "detection-range-estimator"
+    end
+  end
+  if config and type(config.projectileSizeEstimator) == "function" then
+    local ok, estimate = pcall(config.projectileSizeEstimator, origin, detectionRange)
+    if ok and type(estimate) == "number" and estimate >= 0 then
+      return estimate, "configured-estimator"
+    end
+  end
+  if config and type(config.projectileSizeDetectionRanges) == "table"
+      and detectionRange and detectionRange.lowerBound ~= nil then
+    local lower = detectionRange.lowerBound
+    for _, band in ipairs(config.projectileSizeDetectionRanges) do
+      local maximum = band.maxRange or band.maximumRange
+      local estimate = band.size or band.estimate
+      if type(maximum) == "number" and type(estimate) == "number"
+          and lower <= maximum then
+        return estimate, "detection-range-band"
+      end
+    end
+  end
+  -- Detection range alone cannot identify physical diameter without the
+  -- vehicle's sensor threshold curve.  Keep this observable for calibration.
+  if detectionRange and detectionRange.lowerBound ~= nil then
+    return nil, "requires-detection-range-calibration"
+  end
+  return nil, "missing-detection-range"
+end
+
+local function originStreamId(origin)
+  if origin and origin.streamId then return origin.streamId end
+  if origin and origin.type == 2 and origin.missileId then
+    return "missile:" .. tostring(origin.missileId)
+  end
+  return "custom-axis"
+end
+
+function TargetProjectileEstimation.new(config)
+  config = config or {}
+  return setmetatable({
+    config = config,
+    maxDetectionRange = config.maxDetectionRange or math.huge,
+    missileOverlapDistance = config.missileOverlapDistance or 5,
+    observations = {},
+    missiles = {},
+  }, {__index = TargetProjectileEstimation})
+end
+
+function TargetProjectileEstimation:observeMissiles(I, observations, stamp)
+  self.missiles = {}
+  for _, observation in ipairs(observations or {}) do
+    if observation.position then
+      self.missiles[#self.missiles + 1] = {
+        id = observation.id,
+        position = observation.position,
+        stamp = stamp,
+      }
+    end
+  end
+  return CounterbatteryTypes.collection(
+    "target/track-cluster/missile-observation", stamp, self.missiles)
+end
+
+function TargetProjectileEstimation:rangeBounds(I, point, centerOfMass)
+  local center = centerOfMass or readVector(I, "GetConstructCenterOfMass")
+  if not point or not center then return nil end
+  local upper = distance(point, center)
+  local lower = boxDistance(I, point, self.config)
+  if lower == nil then lower = upper end
+  if lower > upper then lower, upper = upper, lower end
+  return {lower = lower, upper = upper}
+end
+
+-- Record one sensor stream's state.  `position` may be the last known
+-- position when detected=false; that lets a one-tick disappearance create a
+-- conservative interval without pretending the projectile was observed.
+function TargetProjectileEstimation:observe(I, observation, stamp)
+  observation = observation or {}
+  local streamId = observation.streamId or "custom-axis"
+  local detected = observation.detected == true
+  local bounds = observation.position and self:rangeBounds(
+    I, observation.position, observation.centerOfMass)
+  local previous = self.observations[streamId]
+  local missileId
+  if detected and observation.position then
+    for _, missile in ipairs(self.missiles) do
+      if distance(observation.position, missile.position)
+          <= self.missileOverlapDistance then
+        missileId = missile.id
+        break
+      end
+    end
+  end
+  local accepted = detected and missileId == nil
+  local detectionLower = bounds and bounds.lower or nil
+  local detectionUpper = accepted and self.maxDetectionRange or nil
+  local reacquired = false
+  if accepted and previous and not previous.detected and not previous.excluded
+      and previous.range and bounds then
+    -- The threshold lies between the last absent and first present sensor
+    -- distances.  The union of the CoM/bounding-box intervals is conservative.
+    detectionLower = math.min(previous.range.lower, bounds.lower)
+    detectionUpper = math.min(self.maxDetectionRange,
+      math.max(previous.range.upper, bounds.upper))
+    reacquired = true
+  end
+
+  local product = CounterbatteryTypes.product(
+    "target/track-cluster/projectile-observation", nil, stamp, {
+      streamId = streamId,
+      detected = detected,
+      accepted = accepted,
+      excludedByMissileId = missileId,
+      excluded = missileId ~= nil,
+      position = observation.position,
+      centerOfMass = observation.centerOfMass,
+      observedRange = bounds,
+      reportedRange = observation.reportedRange,
+      detectionRangeLower = detectionLower,
+      detectionRangeUpper = detectionUpper,
+      reacquired = reacquired,
+    })
+  self.observations[streamId] = {
+    detected = accepted,
+    position = observation.position,
+    range = bounds,
+    stamp = stamp,
+    detectionLower = detectionLower,
+    detectionUpper = detectionUpper,
+    excluded = missileId ~= nil,
+  }
+  return product
+end
+
+function TargetProjectileEstimation:estimateOrigin(I, origin, velocity, stamp)
+  local streamId = originStreamId(origin)
+  local observation = self.observations[streamId]
+  local range = origin.detectPos and self:rangeBounds(I, origin.detectPos,
+    origin.detectCenterOfMass)
+  local detectionLower = origin.detectionRangeLower or (range and range.lower)
+  local detectionUpper = origin.detectionRangeUpper
+  if observation and observation.detected and observation.stamp == origin.detectTime then
+    detectionLower = observation.detectionLower or detectionLower
+    detectionUpper = observation.detectionUpper or detectionUpper
+  end
+  if detectionUpper == nil and detectionLower ~= nil then
+    detectionUpper = self.maxDetectionRange
+  end
+
+  local muzzleVelocity = origin.muzzleVelocity
+  if not muzzleVelocity and origin.projectileVelocity then
+    muzzleVelocity = magnitude(origin.projectileVelocity)
+  end
+  if not muzzleVelocity and velocity then muzzleVelocity = magnitude(velocity) end
+  local size, sizeSource = sizeFrom(origin, self.config, {
+    lowerBound = detectionLower,
+    upperBound = detectionUpper,
+    observed = range,
+  })
+  return CounterbatteryTypes.product("target/track-cluster/projectile", nil, stamp, {
+    streamId = streamId,
+    detectionRange = {
+      lowerBound = detectionLower,
+      upperBound = detectionUpper,
+      observed = range,
+    },
+    muzzleVelocity = {
+      estimate = muzzleVelocity,
+      lowerBound = muzzleVelocity,
+      upperBound = muzzleVelocity,
+      range = range,
+    },
+    size = {
+      available = size ~= nil,
+      estimate = size,
+      lowerBound = size,
+      upperBound = size,
+      source = sizeSource,
+      -- Preserve the range observable even when no physical-size calibration
+      -- has been configured yet.
+      detectionRangeProxy = detectionLower,
+    },
+  })
+end
+
+TargetProjectileEstimation.magnitude = magnitude
+TargetProjectileEstimation.originStreamId = originStreamId
+TargetProjectileEstimation.distance = distance
+
+_G.TargetProjectileEstimation = TargetProjectileEstimation
+-- END Full/Counterbattery/Pipeline/ProjectileEstimation.lua
+
+-- BEGIN Full/Counterbattery/Pipeline/WeaponRateOfFire.lua
+-- target/track-cluster/rate-of-fire
+-- Persistent timing estimates for inferred cannon/weapon trajectory clusters.
+local TargetWeaponRateOfFire = {}
+
+local function median(values)
+  if #values == 0 then return nil end
+  table.sort(values)
+  local middle = math.floor((#values + 1) / 2)
+  if #values % 2 == 1 then return values[middle] end
+  return 0.5 * (values[middle] + values[middle + 1])
+end
+
+local function copySortedUnique(values)
+  local copy = {}
+  for _, value in ipairs(values) do copy[#copy + 1] = value end
+  table.sort(copy)
+  local unique = {}
+  for _, value in ipairs(copy) do
+    if #unique == 0 or value ~= unique[#unique] then unique[#unique + 1] = value end
+  end
+  return unique
+end
+
+local function lineMatchDistance(lineDistance, first, second)
+  if not first or not second then return math.huge end
+  return lineDistance(first, second)
+end
+
+function TargetWeaponRateOfFire.new(config)
+  config = config or {}
+  return setmetatable({
+    -- A weapon id is only meaningful for one target.  Keeping records per
+    -- target prevents two enemies with parallel firing lines from sharing a
+    -- shot history.
+    recordsByTarget = {},
+    nextId = 1,
+    historySeconds = config.rateOfFireHistorySeconds or 30,
+    matchDistance = config.rateOfFireMatchDistance or (config.trackClusterDistance or 5) * 2,
+  }, {__index = TargetWeaponRateOfFire})
+end
+
+function TargetWeaponRateOfFire:findRecord(records, line, lineDistance, assigned)
+  local best
+  local bestDistance = self.matchDistance
+  for _, record in ipairs(records) do
+    if not assigned[record] then
+      local distance = lineMatchDistance(lineDistance, record.line, line)
+      if distance <= bestDistance then
+        best = record
+        bestDistance = distance
+      end
+    end
+  end
+  return best
+end
+
+function TargetWeaponRateOfFire:update(targetId, clusters, stamp, lineDistance)
+  local records = self.recordsByTarget[targetId]
+  if not records then
+    records = {}
+    self.recordsByTarget[targetId] = records
+  end
+  local assigned = {}
+  local products = {}
+  for _, cluster in ipairs(clusters) do
+    local record = self:findRecord(records, cluster.line, lineDistance, assigned)
+    if not record then
+      record = {id = self.nextId, line = cluster.line, times = {}}
+      self.nextId = self.nextId + 1
+      records[#records + 1] = record
+    end
+    assigned[record] = true
+    record.line = cluster.line
+    for _, member in ipairs(cluster.members or {}) do
+      if member.originTime ~= nil then record.times[#record.times + 1] = member.originTime end
+    end
+
+    local times = copySortedUnique(record.times)
+    local oldest = stamp - self.historySeconds
+    local retained = {}
+    for _, time in ipairs(times) do
+      if time >= oldest then retained[#retained + 1] = time end
+    end
+    record.times = retained
+    local intervals = {}
+    for index = 2, #retained do
+      local interval = retained[index] - retained[index - 1]
+      if interval > 0 then intervals[#intervals + 1] = interval end
+    end
+    local intervalEstimate = median(intervals)
+    local rate = intervalEstimate and 1 / intervalEstimate or nil
+    products[#products + 1] = CounterbatteryTypes.product(
+      "target/track-cluster/rate-of-fire", targetId, stamp, {
+        weaponId = record.id,
+        shotCount = #retained,
+        interval = intervalEstimate,
+        rate = rate,
+        confidence = math.min(1, #intervals / 3),
+        firstShotTime = retained[1],
+        lastShotTime = retained[#retained],
+      })
+  end
+  return products
+end
+
+_G.TargetWeaponRateOfFire = TargetWeaponRateOfFire
+-- END Full/Counterbattery/Pipeline/WeaponRateOfFire.lua
+
 -- BEGIN Full/Counterbattery/Pipeline/TrackDeduplication.lua
 -- target/track-cluster
 -- Reconstructed projectile trajectories, deduplicated by shortest distance
@@ -3912,6 +4365,14 @@ end
 local TargetTrackDeduplication = {}
 
 local LINE_EPSILON = 1e-9
+
+local function median(values)
+  if #values == 0 then return nil end
+  table.sort(values)
+  local middle = math.floor((#values + 1) / 2)
+  if #values % 2 == 1 then return values[middle] end
+  return 0.5 * (values[middle] + values[middle + 1])
+end
 
 local function vectorMagnitude(vector)
   return math.sqrt(vector.sqrMagnitude)
@@ -3971,7 +4432,7 @@ local function targetStateAtOrigin(state, origin, now, ticksPerSecond)
   return position, velocity, index
 end
 
-local function makeLine(state, origin, now, ticksPerSecond, memberIndex)
+local function makeLine(state, origin, now, ticksPerSecond, memberIndex, projectileEstimator, I)
   if not origin or not origin.position or not origin.relVel then return nil end
   local targetPosition, targetVelocity, sampleIndex = targetStateAtOrigin(
     state, origin, now, ticksPerSecond)
@@ -3982,7 +4443,7 @@ local function makeLine(state, origin, now, ticksPerSecond, memberIndex)
   local direction = normalize(worldVelocity)
   if not direction then return nil end
 
-  return {
+  local line = {
     type = "target/trajectory-line",
     memberIndex = memberIndex,
     point = targetPosition + rotation * origin.position,
@@ -3994,6 +4455,10 @@ local function makeLine(state, origin, now, ticksPerSecond, memberIndex)
     origin = origin,
     sampleIndex = sampleIndex,
   }
+  if projectileEstimator then
+    line.projectile = projectileEstimator:estimateOrigin(I, origin, worldVelocity, now)
+  end
+  return line
 end
 
 local function shortestLineDistance(first, second)
@@ -4043,6 +4508,9 @@ function TargetTrackDeduplication.new(config)
   return setmetatable({
     distanceThreshold = config.trackClusterDistance or 5,
     TICKS_PER_S = config.TICKS_PER_S or 1,
+    projectileEstimation = TargetProjectileEstimation.new(config),
+    rateOfFire = TargetWeaponRateOfFire.new(config),
+    lastRateProduct = nil,
   }, {__index = TargetTrackDeduplication})
 end
 
@@ -4050,13 +4518,24 @@ function TargetTrackDeduplication.lineDistance(first, second)
   return shortestLineDistance(first, second)
 end
 
-function TargetTrackDeduplication:cluster(state, now)
+function TargetTrackDeduplication:cluster(first, second, third)
+  local I, state, now
+  if third == nil then
+    state, now = first, second
+  else
+    I, state, now = first, second, third
+  end
   local lines = {}
   local origins = state.origins
   if not origins then return lines end
   for index = 1, origins.size do
-    local line = makeLine(state, origins[index], now, self.TICKS_PER_S, index)
-    if line then lines[#lines + 1] = line end
+    -- Missile warnings have their own typed product and must never enter the
+    -- ballistic cannon clustering stream.
+    if origins[index].type ~= 2 then
+      local line = makeLine(state, origins[index], now, self.TICKS_PER, index,
+        self.projectileEstimation, I)
+      if line then lines[#lines + 1] = line end
+    end
   end
 
   local find, union = disjointSet(#lines)
@@ -4090,24 +4569,122 @@ function TargetTrackDeduplication:cluster(state, now)
     cluster.count = cluster.count + 1
     cluster.members[#cluster.members + 1] = line
   end
+  for _, cluster in ipairs(clusters) do
+    local lower
+    local upper
+    local speeds = {}
+    local sizes = {}
+    local minSize
+    local maxSize
+    local sizeSource
+    local sizeProxy
+    for _, member in ipairs(cluster.members) do
+      local projectile = member.projectile
+      if projectile then
+        local detectionRange = projectile.detectionRange
+        if detectionRange and detectionRange.lowerBound ~= nil then
+          lower = lower and math.max(lower, detectionRange.lowerBound) or detectionRange.lowerBound
+        end
+        if detectionRange and detectionRange.upperBound ~= nil and detectionRange.upperBound < math.huge then
+          upper = upper and math.min(upper, detectionRange.upperBound) or detectionRange.upperBound
+        end
+        local speed = projectile.muzzleVelocity and projectile.muzzleVelocity.estimate
+        if speed then speeds[#speeds + 1] = speed end
+        local size = projectile.size and projectile.size.estimate
+        if size then
+          sizes[#sizes + 1] = size
+          minSize = minSize and math.min(minSize, size) or size
+          maxSize = maxSize and math.max(maxSize, size) or size
+        end
+        if projectile.size then
+          sizeSource = sizeSource or projectile.size.source
+          local proxy = projectile.size.detectionRangeProxy
+          if proxy ~= nil then
+            sizeProxy = sizeProxy and math.max(sizeProxy, proxy) or proxy
+          end
+        end
+      end
+    end
+    local muzzleVelocity = median(speeds)
+    local sizeEstimate = median(sizes)
+    cluster.detectionRange = {
+      lowerBound = lower,
+      upperBound = upper,
+    }
+    cluster.muzzleVelocity = {
+      estimate = muzzleVelocity,
+      lowerBound = muzzleVelocity,
+      upperBound = muzzleVelocity,
+      sampleCount = #speeds,
+    }
+    cluster.projectileSize = {
+      available = sizeEstimate ~= nil,
+      estimate = sizeEstimate,
+      lowerBound = minSize,
+      upperBound = maxSize,
+      sampleCount = #sizes,
+      source = sizeSource or "detection-range",
+      detectionRangeProxy = sizeProxy,
+      reason = sizeEstimate and "calibrated" or "requires-detection-range-calibration",
+    }
+    cluster.projectile = CounterbatteryTypes.product("target/track-cluster/projectile",
+      nil, now, {
+        detectionRange = cluster.detectionRange,
+        muzzleVelocity = cluster.muzzleVelocity,
+        size = cluster.projectileSize,
+      })
+  end
   return clusters
+end
+
+function TargetTrackDeduplication:observeProjectile(I, observation, stamp)
+  return self.projectileEstimation:observe(I, observation, stamp)
+end
+
+function TargetTrackDeduplication:observeMissiles(I, observations, stamp)
+  return self.projectileEstimation:observeMissiles(I, observations, stamp)
 end
 
 function TargetTrackDeduplication:update(I, tracks, stamp)
   local byId = {}
+  local rateById = {}
   for id, track in pairs(tracks.byId) do
-    local clusters = self:cluster(track.state, stamp)
+    local clusters = self:cluster(I, track.state, stamp)
+    local rates = self.rateOfFire:update(id, clusters, stamp,
+      TargetTrackDeduplication.lineDistance)
+    local enrichedClusters = {}
+    for index, cluster in ipairs(clusters) do
+      enrichedClusters[index] = CounterbatteryTypes.product("target/track-cluster", id,
+        stamp, {
+          count = cluster.count,
+          members = cluster.members,
+          line = cluster.line,
+          representative = cluster.representative,
+          detectionRange = cluster.detectionRange,
+          muzzleVelocity = cluster.muzzleVelocity,
+          projectileSize = cluster.projectileSize,
+          projectile = cluster.projectile,
+          weaponId = rates[index] and rates[index].weaponId,
+          rateOfFire = rates[index],
+        })
+    end
     byId[id] = CounterbatteryTypes.product("target/track-cluster", id, stamp, {
       frame = "world",
       distanceThreshold = self.distanceThreshold,
-      clusters = clusters,
+      clusters = enrichedClusters,
       source = track,
       state = track.state,
     })
+    rateById[id] = CounterbatteryTypes.collection("target/track-cluster/rate-of-fire",
+      stamp, {[id] = CounterbatteryTypes.product("target/track-cluster/rate-of-fire", id,
+        stamp, {weapons = rates, source = byId[id]})}, {frame = "world"})
   end
+  self.lastRateProduct = CounterbatteryTypes.collection("target/track-cluster/rate-of-fire",
+    stamp, rateById, {frame = "world"})
   return CounterbatteryTypes.collection("target/track-cluster", stamp, byId, {
     frame = "world",
     distanceThreshold = self.distanceThreshold,
+    rateOfFire = self.lastRateProduct,
   })
 end
 
@@ -4146,6 +4723,14 @@ function CounterbatteryPipeline:update(I, stamp)
     ["target/track-cluster"] = trackClusters,
   }
   return self.outputs
+end
+
+function CounterbatteryPipeline:observeProjectile(I, observation, stamp)
+  return self.trackDeduplication:observeProjectile(I, observation, stamp)
+end
+
+function CounterbatteryPipeline:observeMissiles(I, observations, stamp)
+  return self.trackDeduplication:observeMissiles(I, observations, stamp)
 end
 -- END Full/Counterbattery/Pipeline/TargetPipeline.lua
 
@@ -4437,7 +5022,7 @@ end
 -- CounterBatteryPipeline.lua artifact.
 local counterbatteryPipeline
 
-local function getCounterbatteryPipeline()
+function GetCounterbatteryPipeline()
   if not counterbatteryPipeline then
     counterbatteryPipeline = CounterbatteryPipeline.new({
       enemies = enemies,
@@ -4445,6 +5030,7 @@ local function getCounterbatteryPipeline()
       TICKS_PER_S = TICKS_PER_S,
       numOrigins = numOrigins,
       trackClusterDistance = trackClusterDistance,
+      missileOverlapDistance = missileOverlapDistance,
       aimPointTrackers = aimPointTrackers,
       maxTurnRateTracking = maxTurnRateTracking,
       onTargetLost = function(id)
@@ -4460,6 +5046,14 @@ local function getCounterbatteryPipeline()
 end
 
 function UpdateEnemyData(I)
-  return getCounterbatteryPipeline():update(I, t)
+  return GetCounterbatteryPipeline():update(I, t)
+end
+
+function ObserveCounterbatteryProjectile(I, observation)
+  return GetCounterbatteryPipeline():observeProjectile(I, observation, t)
+end
+
+function ObserveCounterbatteryMissiles(I, observations)
+  return GetCounterbatteryPipeline():observeMissiles(I, observations, t)
 end
 -- END Full/Counterbattery/Pipeline/Entry.lua

@@ -25,6 +25,14 @@ product.
 world-space tangent line and publishes deterministic clusters using shortest
 line distance.  It is observational only: the legacy origin ring and firing
 selection are unchanged until a later stage explicitly consumes this product.
+Each cluster also carries projectile detection-range bounds, an observed muzzle
+velocity estimate, optional size metadata, and a persistent per-weapon
+rate-of-fire estimate. Sensor reacquisition intervals are represented as
+conservative bounds rather than as a fabricated exact detection distance.
+
+`Pipeline/ProjectileEstimation.lua` records the sensor projectile stream,
+including missed ticks and reacquisition intervals. `Pipeline/WeaponRateOfFire.lua`
+associates reconstructed lines over time and estimates firing cadence.
 
 The generated artifact bundles `Low/NdArray.lua` and the NdArray-backed
 `Low/Stats.lua`, so density covariance is an NdArray.  Legacy Matrix3-only

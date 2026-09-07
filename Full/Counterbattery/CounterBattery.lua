@@ -45,6 +45,8 @@ local numOrigins = 3
 -- maximum shortest distance between reconstructed trajectory lines in one
 -- deduplicated target/track-cluster product
 local trackClusterDistance = 5
+-- Ballistic detections this close to a missile warning are not ballistic.
+local missileOverlapDistance = 5
 -- time between switching targets
 local originSwitchTime = 2
 -- maximum time to remember origin points
@@ -344,8 +346,30 @@ function CoreUpdate(I)
   local alt = altScale * I:GetPropulsionRequest(9) -- A axis, set in projectile avoidance routine
   local relBear = bearScale * I:GetPropulsionRequest(10) -- B axis (is this guaranteed to be -180 to 180?)
   local dist = distScale * I:GetPropulsionRequest(12) -- D axis (maybe increase to account for large/huge missiles)
+  local missileObservations = {}
+  if missileCounter then
+    for widx = 0, I:GetNumberOfWarnings(mainframeIdx) - 1 do
+      local warn = I:GetMissileWarning(mainframeIdx, widx)
+      if warn.Valid and warn.Position then
+        missileObservations[#missileObservations + 1] = {
+          id = warn.Id,
+          position = warn.Position,
+        }
+      end
+    end
+  end
+  ObserveCounterbatteryMissiles(I, missileObservations)
   local projectile = GetProjectile(I, alt, relBear, dist)
-
+  local projectileObservation = ObserveCounterbatteryProjectile(I, {
+    streamId = "sensor-projectile",
+    detected = projectile ~= nil,
+    position = projectile or lastProjectilePos,
+    centerOfMass = I:GetConstructCenterOfMass(),
+    reportedRange = dist,
+  })
+  if projectileObservation and not projectileObservation.accepted then
+    projectile = nil
+  end
   if not projectile then
     currentLine = {}
     lastProjectilePos = nil
@@ -594,6 +618,7 @@ function GetOrigin(I, line, enemy)
           rot = enemyRotAtTime,
           detectTime = t,
           detectPos = line.ed,
+          detectCenterOfMass = I:GetConstructCenterOfMass(),
           type = 1,
         }
         I:Log("CRAM origin found")
@@ -612,6 +637,7 @@ function GetOrigin(I, line, enemy)
           rot = eRot,
           detectTime = t,
           detectPos = line.ed,
+          detectCenterOfMass = I:GetConstructCenterOfMass(),
           type = 0,
         }
         I:Log("Origin found")
@@ -649,6 +675,7 @@ function GetMissileOrigin(I, enemy)
             rot = enemy.rotation[tIdx],
             detectTime = t,
             detectPos = warn.Position,
+            detectCenterOfMass = I:GetConstructCenterOfMass(),
             type = 2,
           }
           table.insert(origins, origin)

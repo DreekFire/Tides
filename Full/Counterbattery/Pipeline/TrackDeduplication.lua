@@ -13,6 +13,14 @@ local TargetTrackDeduplication = {}
 
 local LINE_EPSILON = 1e-9
 
+local function median(values)
+  if #values == 0 then return nil end
+  table.sort(values)
+  local middle = math.floor((#values + 1) / 2)
+  if #values % 2 == 1 then return values[middle] end
+  return 0.5 * (values[middle] + values[middle + 1])
+end
+
 local function vectorMagnitude(vector)
   return math.sqrt(vector.sqrMagnitude)
 end
@@ -71,7 +79,7 @@ local function targetStateAtOrigin(state, origin, now, ticksPerSecond)
   return position, velocity, index
 end
 
-local function makeLine(state, origin, now, ticksPerSecond, memberIndex)
+local function makeLine(state, origin, now, ticksPerSecond, memberIndex, projectileEstimator, I)
   if not origin or not origin.position or not origin.relVel then return nil end
   local targetPosition, targetVelocity, sampleIndex = targetStateAtOrigin(
     state, origin, now, ticksPerSecond)
@@ -82,7 +90,7 @@ local function makeLine(state, origin, now, ticksPerSecond, memberIndex)
   local direction = normalize(worldVelocity)
   if not direction then return nil end
 
-  return {
+  local line = {
     type = "target/trajectory-line",
     memberIndex = memberIndex,
     point = targetPosition + rotation * origin.position,
@@ -94,6 +102,10 @@ local function makeLine(state, origin, now, ticksPerSecond, memberIndex)
     origin = origin,
     sampleIndex = sampleIndex,
   }
+  if projectileEstimator then
+    line.projectile = projectileEstimator:estimateOrigin(I, origin, worldVelocity, now)
+  end
+  return line
 end
 
 local function shortestLineDistance(first, second)
@@ -143,6 +155,9 @@ function TargetTrackDeduplication.new(config)
   return setmetatable({
     distanceThreshold = config.trackClusterDistance or 5,
     TICKS_PER_S = config.TICKS_PER_S or 1,
+    projectileEstimation = TargetProjectileEstimation.new(config),
+    rateOfFire = TargetWeaponRateOfFire.new(config),
+    lastRateProduct = nil,
   }, {__index = TargetTrackDeduplication})
 end
 
@@ -150,13 +165,24 @@ function TargetTrackDeduplication.lineDistance(first, second)
   return shortestLineDistance(first, second)
 end
 
-function TargetTrackDeduplication:cluster(state, now)
+function TargetTrackDeduplication:cluster(first, second, third)
+  local I, state, now
+  if third == nil then
+    state, now = first, second
+  else
+    I, state, now = first, second, third
+  end
   local lines = {}
   local origins = state.origins
   if not origins then return lines end
   for index = 1, origins.size do
-    local line = makeLine(state, origins[index], now, self.TICKS_PER_S, index)
-    if line then lines[#lines + 1] = line end
+    -- Missile warnings have their own typed product and must never enter the
+    -- ballistic cannon clustering stream.
+    if origins[index].type ~= 2 then
+      local line = makeLine(state, origins[index], now, self.TICKS_PER, index,
+        self.projectileEstimation, I)
+      if line then lines[#lines + 1] = line end
+    end
   end
 
   local find, union = disjointSet(#lines)
@@ -190,24 +216,122 @@ function TargetTrackDeduplication:cluster(state, now)
     cluster.count = cluster.count + 1
     cluster.members[#cluster.members + 1] = line
   end
+  for _, cluster in ipairs(clusters) do
+    local lower
+    local upper
+    local speeds = {}
+    local sizes = {}
+    local minSize
+    local maxSize
+    local sizeSource
+    local sizeProxy
+    for _, member in ipairs(cluster.members) do
+      local projectile = member.projectile
+      if projectile then
+        local detectionRange = projectile.detectionRange
+        if detectionRange and detectionRange.lowerBound ~= nil then
+          lower = lower and math.max(lower, detectionRange.lowerBound) or detectionRange.lowerBound
+        end
+        if detectionRange and detectionRange.upperBound ~= nil and detectionRange.upperBound < math.huge then
+          upper = upper and math.min(upper, detectionRange.upperBound) or detectionRange.upperBound
+        end
+        local speed = projectile.muzzleVelocity and projectile.muzzleVelocity.estimate
+        if speed then speeds[#speeds + 1] = speed end
+        local size = projectile.size and projectile.size.estimate
+        if size then
+          sizes[#sizes + 1] = size
+          minSize = minSize and math.min(minSize, size) or size
+          maxSize = maxSize and math.max(maxSize, size) or size
+        end
+        if projectile.size then
+          sizeSource = sizeSource or projectile.size.source
+          local proxy = projectile.size.detectionRangeProxy
+          if proxy ~= nil then
+            sizeProxy = sizeProxy and math.max(sizeProxy, proxy) or proxy
+          end
+        end
+      end
+    end
+    local muzzleVelocity = median(speeds)
+    local sizeEstimate = median(sizes)
+    cluster.detectionRange = {
+      lowerBound = lower,
+      upperBound = upper,
+    }
+    cluster.muzzleVelocity = {
+      estimate = muzzleVelocity,
+      lowerBound = muzzleVelocity,
+      upperBound = muzzleVelocity,
+      sampleCount = #speeds,
+    }
+    cluster.projectileSize = {
+      available = sizeEstimate ~= nil,
+      estimate = sizeEstimate,
+      lowerBound = minSize,
+      upperBound = maxSize,
+      sampleCount = #sizes,
+      source = sizeSource or "detection-range",
+      detectionRangeProxy = sizeProxy,
+      reason = sizeEstimate and "calibrated" or "requires-detection-range-calibration",
+    }
+    cluster.projectile = CounterbatteryTypes.product("target/track-cluster/projectile",
+      nil, now, {
+        detectionRange = cluster.detectionRange,
+        muzzleVelocity = cluster.muzzleVelocity,
+        size = cluster.projectileSize,
+      })
+  end
   return clusters
+end
+
+function TargetTrackDeduplication:observeProjectile(I, observation, stamp)
+  return self.projectileEstimation:observe(I, observation, stamp)
+end
+
+function TargetTrackDeduplication:observeMissiles(I, observations, stamp)
+  return self.projectileEstimation:observeMissiles(I, observations, stamp)
 end
 
 function TargetTrackDeduplication:update(I, tracks, stamp)
   local byId = {}
+  local rateById = {}
   for id, track in pairs(tracks.byId) do
-    local clusters = self:cluster(track.state, stamp)
+    local clusters = self:cluster(I, track.state, stamp)
+    local rates = self.rateOfFire:update(id, clusters, stamp,
+      TargetTrackDeduplication.lineDistance)
+    local enrichedClusters = {}
+    for index, cluster in ipairs(clusters) do
+      enrichedClusters[index] = CounterbatteryTypes.product("target/track-cluster", id,
+        stamp, {
+          count = cluster.count,
+          members = cluster.members,
+          line = cluster.line,
+          representative = cluster.representative,
+          detectionRange = cluster.detectionRange,
+          muzzleVelocity = cluster.muzzleVelocity,
+          projectileSize = cluster.projectileSize,
+          projectile = cluster.projectile,
+          weaponId = rates[index] and rates[index].weaponId,
+          rateOfFire = rates[index],
+        })
+    end
     byId[id] = CounterbatteryTypes.product("target/track-cluster", id, stamp, {
       frame = "world",
       distanceThreshold = self.distanceThreshold,
-      clusters = clusters,
+      clusters = enrichedClusters,
       source = track,
       state = track.state,
     })
+    rateById[id] = CounterbatteryTypes.collection("target/track-cluster/rate-of-fire",
+      stamp, {[id] = CounterbatteryTypes.product("target/track-cluster/rate-of-fire", id,
+        stamp, {weapons = rates, source = byId[id]})}, {frame = "world"})
   end
+  self.lastRateProduct = CounterbatteryTypes.collection("target/track-cluster/rate-of-fire",
+    stamp, rateById, {frame = "world"})
   return CounterbatteryTypes.collection("target/track-cluster", stamp, byId, {
     frame = "world",
     distanceThreshold = self.distanceThreshold,
+    rateOfFire = self.lastRateProduct,
   })
 end
 

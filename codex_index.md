@@ -20,7 +20,13 @@
   copied aimpoint-derived distribution update.
 - `Full/Counterbattery/Pipeline/TrackDeduplication.lua` — read-only
   `target/track-cluster` product; reconstructs world-space tangent lines at
-  Mahalanobis origin points and clusters them by shortest line distance.
+  Mahalanobis origin points and clusters them by shortest line distance; carries
+  projectile metadata and rate-of-fire enrichment.
+- `Full/Counterbattery/Pipeline/ProjectileEstimation.lua` — records detected
+  and missed sensor-projectile observations, derives CoM/bounding-box range
+  bounds, and attaches muzzle-velocity/size estimates.
+- `Full/Counterbattery/Pipeline/WeaponRateOfFire.lua` — associates persistent
+  reconstructed line clusters and estimates per-weapon shot intervals/rates.
 - `Full/Counterbattery/Pipeline/ClosestPointSolver.lua` — Mahalanobis
   closest-point solver with constant-rotation analytic coefficients,
   timestamp-based interval/index handling, changing-rotation linear scan, and
@@ -41,7 +47,8 @@
   for detected-velocity bootstrap and discrete velocity derivation with
   jittered and repeated timestamps.
 - `tests/counterbattery_track_deduplication_test.py` — deterministic parallel,
-  skew, clustering, invalid-line, and path-product regression test.
+  skew, clustering, invalid-line, path-product, and projectile reacquisition
+  range-bound regression test.
 - `tests/rotation/target_rotation_ransac_test.lua` and
   `tests/run_target_rotation_ransac_tests.py` — deterministic RANSAC,
   degeneracy, outlier, scale, and quaternion-sign tests.

@@ -8,6 +8,8 @@ from lupa import LuaRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "Full" / "Counterbattery" / "Pipeline" / "TrackDeduplication.lua"
+PROJECTILE_SOURCE = ROOT / "Full" / "Counterbattery" / "Pipeline" / "ProjectileEstimation.lua"
+RATE_SOURCE = ROOT / "Full" / "Counterbattery" / "Pipeline" / "WeaponRateOfFire.lua"
 
 
 def main() -> int:
@@ -60,6 +62,8 @@ def main() -> int:
         end
         """
     )
+    lua.execute(PROJECTILE_SOURCE.read_text(encoding="utf-8"))
+    lua.execute(RATE_SOURCE.read_text(encoding="utf-8"))
     module = lua.execute(SOURCE.read_text(encoding="utf-8") + "\nreturn TargetTrackDeduplication")
     lua.globals().Dedup = module
     result = lua.execute(
@@ -89,9 +93,33 @@ def main() -> int:
             [3] = {position = Vec(0, 10, 10), relVel = Vec(100, 0, 0), rot = Quaternion.rotY90, time = 0},
             -- Invalid zero-velocity origins do not become false clusters.
             [4] = {position = Vec(0, 0, 20), relVel = Vec(0, 0, 0), rot = Quaternion.identity, time = 0},
+            -- Missile-warning origins are not ballistic clusters.
+            [5] = {type = 2, position = Vec(0, 0, 0), relVel = Vec(100, 0, 0), rot = Quaternion.identity, time = 0},
           },
         }
-        local dedup = Dedup.new({trackClusterDistance = 1, TICKS_PER_S = 40})
+        local dedup = Dedup.new({trackClusterDistance = 1, TICKS_PER_S = 40,
+          maxDetectionRange = 1000,
+          vehicleBounds = {center = Vec(0, 0, 0), minimum = Vec(-2, -1, -3), maximum = Vec(2, 1, 3)}})
+        local miss = dedup:observeProjectile({GetConstructCenterOfMass = function() return Vec(0, 0, 0) end},
+          {streamId = 'sensor-projectile', detected = false, position = Vec(0, 0, 20)}, 1)
+        assert(miss.detected == false)
+        local reacquired = dedup:observeProjectile({GetConstructCenterOfMass = function() return Vec(0, 0, 0) end},
+          {streamId = 'sensor-projectile', detected = true, position = Vec(0, 0, 10), reportedRange = 10}, 2)
+        assert(reacquired.reacquired == true)
+        assert(reacquired.detectionRangeLower >= 7)
+        assert(reacquired.detectionRangeUpper >= 10)
+        -- A missile warning is a separate stream.  A coincident ballistic
+        -- reading is excluded before it can create a cannon trajectory.
+        dedup:observeMissiles(nil, {{id = 42, position = Vec(0, 0, 10)}}, 3)
+        local missileOverlap = dedup:observeProjectile(nil, {
+          streamId = 'sensor-projectile', detected = true, position = Vec(0, 0, 10)}, 3)
+        assert(missileOverlap.accepted == false)
+        assert(missileOverlap.excludedByMissileId == 42)
+        -- Reacquisition after a missile exclusion must not manufacture a
+        -- detection threshold interval.
+        local postMissile = dedup:observeProjectile(nil, {
+          streamId = 'sensor-projectile', detected = true, position = Vec(0, 0, 9)}, 4)
+        assert(postMissile.reacquired == false)
         local clusters = dedup:cluster(state, 0)
         assert(#clusters == 2)
         assert(clusters[1].type == "target/track-cluster")
@@ -117,6 +145,7 @@ def main() -> int:
         assert(published.type == "target/track-cluster")
         assert(published.byId[7].source == trackProduct)
         assert(#published.byId[7].clusters == 2)
+        assert(published.rateOfFire ~= nil)
         return true
         """
     )

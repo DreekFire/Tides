@@ -30,3 +30,11 @@ function CounterbatteryPipeline:update(I, stamp)
   }
   return self.outputs
 end
+
+function CounterbatteryPipeline:observeProjectile(I, observation, stamp)
+  return self.trackDeduplication:observeProjectile(I, observation, stamp)
+end
+
+function CounterbatteryPipeline:observeMissiles(I, observations, stamp)
+  return self.trackDeduplication:observeMissiles(I, observations, stamp)
+end
