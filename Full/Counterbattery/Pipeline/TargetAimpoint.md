@@ -3,7 +3,6 @@
 The FtD target API fields used by this stage provide world-space vectors:
 
 - `TargetInfo.Position`: the authoritative target center of mass;
-- `TargetInfo.Velocity`: the authoritative target velocity;
 - `TargetInfo.AimPointPosition`: the world position of the currently selected
   target aimpoint;
 
@@ -19,8 +18,16 @@ relativePosition = aimpointWorld - TargetInfo.Position
 
 `aimpointWorld` remains absolute/world-space for the rotation estimator, while
 `relativePosition` is the same observation relative to the true COM for
-geometry stages. The target tracking history also records
-`TargetInfo.Position` and `TargetInfo.Velocity` directly.
+geometry stages. The target tracking history records `TargetInfo.Position`
+directly and stores the position-derived velocity alongside it. For samples
+with increasing timestamps, that velocity is:
+
+```text
+velocity[k] = (position[k] - position[k - 1])
+              / (stamp[k] - stamp[k - 1])
+```
+
+The first sample and non-increasing timestamps produce zero velocity.
 
 The aimpoint stage also intentionally does not apply a rotation. The next
 stage estimates the target rotation from differences between these world-space

@@ -230,6 +230,20 @@ local function CounterbatterySampleTime(enemy, index)
   return t - (enemy.pos.size - index) / TICKS_PER_S
 end
 
+local function CounterbatteryDerivedVelocity(enemy, position, stamp)
+  local previousPosition = enemy.pos[enemy.pos.size]
+  local previousStamp = enemy.sampleTimes[enemy.sampleTimes.size]
+  if previousPosition and previousStamp then
+    local deltaTime = stamp - previousStamp
+    if deltaTime > 0 then
+      return (position - previousPosition) / deltaTime
+    end
+  end
+  -- The first sample, or a non-increasing timestamp, has no finite
+  -- position-derived velocity yet.
+  return Vector3.zero
+end
+
 -- Tides header
 local BlockUtil = {}
 local Combat = {}
@@ -390,9 +404,10 @@ function CoreUpdate(I)
 
   local fp
   local eRot = enemy.rotation[enemy.rotation.size] or Quaternion.identity
+  local targetVelocity = enemy.vel[enemy.vel.size]
   if origin then
     I:Log("Aiming at origin, type "..origin.type)
-    fp = eRot * origin.position + aimOffset(origin, target.Position, target.Velocity, eRot, true)
+    fp = eRot * origin.position + aimOffset(origin, target.Position, targetVelocity, eRot, true)
     local acbPass = PerformACBCheck(I, fp, target)
     if not acbPass then
       origin = nil
@@ -403,11 +418,11 @@ function CoreUpdate(I)
     I:Log("Aiming at AI aimpoint")
     -- AimPointPosition is world-space; express it relative to the true COM.
     fp = target.AimPointPosition - target.Position
-    fp = fp + aimOffset(fp, target.Position, target.Velocity, eRot, false)
+    fp = fp + aimOffset(fp, target.Position, targetVelocity, eRot, false)
   end
 
   local ready = origin ~= nil
-  FireAtFirepoint(I, fp, target, ready)
+  FireAtFirepoint(I, fp, target, targetVelocity, ready)
 end
 
 function UpdateEnemyData(I)
@@ -437,8 +452,9 @@ function UpdateEnemyData(I)
       end
       local e = enemies[target.Id]
       e.valid = true
+      local velocity = CounterbatteryDerivedVelocity(e, target.Position, t)
       RingBuffer.push(e.pos, target.Position)
-      RingBuffer.push(e.vel, target.Velocity)
+      RingBuffer.push(e.vel, velocity)
       RingBuffer.push(e.sampleTimes, t)
     end
   end
@@ -814,7 +830,7 @@ function PerformACBCheck(I, fp, target)
   end
 end
 
-function FireAtFirepoint(I, fp, target, ready)
+function FireAtFirepoint(I, fp, target, targetVelocity, ready)
   if not ready and idleAim == "none" then return end
   local fpAlt = fp.y + target.Position.y
   for i, turret in ipairs(turrets) do
@@ -837,7 +853,7 @@ function FireAtFirepoint(I, fp, target, ready)
           else
             local g = 0.5 * (I:GetGravityForAltitude(I:GetConstructPosition().y) + I:GetGravityForAltitude(target.Position.y))
             aim, interceptTime = Targeting.secondOrderTargeting(fp + target.Position - wInfo.GlobalFirePoint,
-                        target.Velocity - I:GetVelocityVector(),
+                        targetVelocity - I:GetVelocityVector(),
                         -g,
                         mv, weaponDef[i].minRange, weaponDef[i].maxRange, weapon.lastT or nil)
             if aim then fire = ready end

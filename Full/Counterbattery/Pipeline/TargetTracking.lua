@@ -16,6 +16,20 @@ local function initialDensityCovariance()
   return Matrix3.scalarmul(Matrix3.Identity(), 2500)
 end
 
+local function derivedVelocity(enemy, position, stamp)
+  local previousPosition = enemy.pos[enemy.pos.size]
+  local previousStamp = enemy.sampleTimes[enemy.sampleTimes.size]
+  if previousPosition and previousStamp then
+    local deltaTime = stamp - previousStamp
+    if deltaTime > 0 then
+      return (position - previousPosition) / deltaTime
+    end
+  end
+  -- The first sample, or a non-increasing timestamp, has no finite
+  -- position-derived velocity yet.
+  return Vector3.zero
+end
+
 function TargetTracking.new(config)
   return {
     enemies = config.enemies,
@@ -56,11 +70,12 @@ function TargetTracking:update(I, stamp)
       end
       local e = enemies[target.Id]
       e.valid = true
-      -- TargetInfo is the authoritative state.  Do not replace this with the
-      -- noisy detected-position API when ground truth is available.
+      -- TargetInfo.Position is authoritative. TargetInfo.Velocity is still
+      -- detection-derived, so derive velocity from true COM samples instead.
       e.trueCenterOfMass = target.Position
+      local velocity = derivedVelocity(e, target.Position, stamp)
       RingBuffer.push(e.pos, target.Position)
-      RingBuffer.push(e.vel, target.Velocity)
+      RingBuffer.push(e.vel, velocity)
       -- Keep the actual sample time beside the position and velocity.  The
       -- old solver reconstructed time from the ring index, which is only
       -- exact when UpdateEnemyData runs at a perfectly uniform cadence.

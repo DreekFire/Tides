@@ -6,8 +6,9 @@
   records and collections; products use names such as `target/track` and
   `target/density` without mutating earlier products.
 - `Full/Counterbattery/Pipeline/TargetTracking.lua` — target history and
-  target-owned state, copied from the original target update path; uses the
-  authoritative `TargetInfo.Position`/`Velocity` state directly.
+  target-owned state, copied from the original target update path; uses
+  authoritative `TargetInfo.Position` and derives velocity from timestamped
+  position differences.
 - `Full/Counterbattery/Pipeline/TargetAimpoint.lua` — aimpoint observation
   enrichment, copied from the original mainframe aimpoint path; uses direct
   world-space aimpoints and true COM-relative offsets without detected-COM
@@ -32,6 +33,8 @@
 - `tests/counterbattery/closest_point_solver_test.lua` and
   `tests/run_counterbattery_solver_tests.py` — focused solver, cubic,
   timestamp-indexing, interval, and interpreter-workaround regression tests.
+- `tests/counterbattery_target_tracking_test.py` — Lua/lupa regression test
+  for discrete velocity derivation with jittered and repeated timestamps.
 - `tests/rotation/target_rotation_ransac_test.lua` and
   `tests/run_target_rotation_ransac_tests.py` — deterministic RANSAC,
   degeneracy, outlier, scale, and quaternion-sign tests.
@@ -40,6 +43,8 @@
 
 ```sh
 .venv/bin/python Util/concat_counterbattery.py
+.venv/bin/python tests/counterbattery_target_tracking_test.py
+.venv/bin/python tests/counterbattery_target_aimpoint_test.py
 ```
 
 ## Multi-script FtD acceptance tests

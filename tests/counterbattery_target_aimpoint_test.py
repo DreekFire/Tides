@@ -114,10 +114,12 @@ def main() -> int:
     tracking_source = TRACKING_SOURCE.read_text(encoding="utf-8")
     assert "GetTargetPositionInfo" not in tracking_source
     assert "RingBuffer.push(e.pos, target.Position)" in tracking_source
-    assert "RingBuffer.push(e.vel, target.Velocity)" in tracking_source
+    assert "RingBuffer.push(e.vel, velocity)" in tracking_source
+    assert "target.Velocity" not in tracking_source
     legacy_source = LEGACY_SOURCE.read_text(encoding="utf-8")
     assert "GetTargetPositionInfo" not in legacy_source
     assert "detectionError" not in legacy_source
+    assert "target.Velocity" not in legacy_source
     print("Counterbattery target/aimpoint semantics: ok")
     return 0
 
