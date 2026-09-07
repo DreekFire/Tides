@@ -13,7 +13,8 @@ The modular source lives in `Pipeline/` and is assembled into the paste-ready
 The pipeline emits typed, path-like products:
 
 ```text
-target/track → target/aimpoint → target/rotation → target/density
+target/track → target/aimpoint → target/rotation → target/subobject-aimpoint
+                                                → target/density
            → target/track-cluster
 ```
 
@@ -33,6 +34,12 @@ conservative bounds rather than as a fabricated exact detection distance.
 `Pipeline/ProjectileEstimation.lua` records the sensor projectile stream,
 including missed ticks and reacquisition intervals. `Pipeline/WeaponRateOfFire.lua`
 associates reconstructed lines over time and estimates firing cadence.
+
+`Pipeline/TargetSubobjectAimpoint.lua` compares true-CoM-relative aimpoints
+with the main-body rotation product. Residual points are published as a
+separate enrichment, with a temporal rotation-axis estimate when three or
+more samples support one. Conflicting axes are marked as potentially stacked
+subobjects; the original aimpoint and rotation products remain unchanged.
 
 The generated artifact bundles `Low/NdArray.lua` and the NdArray-backed
 `Low/Stats.lua`, so density covariance is an NdArray.  Legacy Matrix3-only

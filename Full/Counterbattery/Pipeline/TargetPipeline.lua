@@ -7,6 +7,7 @@ function CounterbatteryPipeline.new(config)
     targetTracking = TargetTracking.new(config),
     targetAimpoint = TargetAimpoint.new(config),
     targetRotation = TargetRotation.new(config),
+    targetSubobjectAimpoint = TargetSubobjectAimpoint.new(config),
     targetDensity = TargetDensity.new(config),
     trackDeduplication = TargetTrackDeduplication.new(config),
   }
@@ -17,6 +18,8 @@ function CounterbatteryPipeline:update(I, stamp)
   local track = self.targetTracking:update(I, stamp)
   local aimpoint = self.targetAimpoint:update(I, track, stamp)
   local rotation = self.targetRotation:update(I, track, aimpoint, stamp)
+  local subobjectAimpoint = self.targetSubobjectAimpoint:update(
+    I, track, aimpoint, rotation, stamp)
   local density = self.targetDensity:update(I, track, aimpoint, rotation, stamp)
   local trackClusters = self.trackDeduplication:update(I, density, stamp)
 
@@ -25,6 +28,7 @@ function CounterbatteryPipeline:update(I, stamp)
     ["target/track"] = track,
     ["target/aimpoint"] = aimpoint,
     ["target/rotation"] = rotation,
+    ["target/subobject-aimpoint"] = subobjectAimpoint,
     ["target/density"] = density,
     ["target/track-cluster"] = trackClusters,
   }

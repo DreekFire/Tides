@@ -64,6 +64,7 @@ function TargetTracking:update(I, stamp)
                             valid = true,
                             oldAimpoints = {},
                             aimpoints = {},
+                            aimpointCenterOfMass = {},
                           }
         newEnemy.density.n = 15
         -- todo: set initial size estimate based on block count

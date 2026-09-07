@@ -16,6 +16,10 @@
   compensation.
 - `Full/Counterbattery/Pipeline/TargetRotation.lua` — rotation product and
   copied rotation estimator.
+- `Full/Counterbattery/Pipeline/TargetSubobjectAimpoint.lua` — detects
+  true-CoM-relative aimpoints whose motion is not explained by the main-body
+  rotation and estimates a subobject axis from temporal chords; publishes the
+  immutable `target/subobject-aimpoint` enrichment.
 - `Full/Counterbattery/Pipeline/TargetDensity.lua` — density product and
   copied aimpoint-derived distribution update.
 - `Full/Counterbattery/Pipeline/TrackDeduplication.lua` — read-only
@@ -52,6 +56,8 @@
 - `tests/rotation/target_rotation_ransac_test.lua` and
   `tests/run_target_rotation_ransac_tests.py` — deterministic RANSAC,
   degeneracy, outlier, scale, and quaternion-sign tests.
+- `tests/counterbattery_subobject_test.py` — deterministic residual detection,
+  temporal-axis estimation, and stacked-axis classification test.
 
 ### Counterbattery modularization workflow
 

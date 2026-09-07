@@ -32,8 +32,13 @@ function TargetAimpoint:update(I, tracks, stamp)
       if target.Valid then
         local e = self.enemies[target.Id]
         local aimpoint = target.AimPointPosition
-        e.oldAimpoints[idx] = e.aimpoints[idx] or aimpoint
+        local previousAimpoint = e.aimpoints[idx] or aimpoint
+        local previousCenterOfMass = e.aimpointCenterOfMass
+          and e.aimpointCenterOfMass[idx] or target.Position
+        e.oldAimpoints[idx] = previousAimpoint
         e.aimpoints[idx] = aimpoint
+        e.aimpointCenterOfMass = e.aimpointCenterOfMass or {}
+        e.aimpointCenterOfMass[idx] = target.Position
 
         observations[target.Id] = observations[target.Id] or {}
         observations[target.Id][idx] = CounterbatteryTypes.product(
@@ -43,7 +48,9 @@ function TargetAimpoint:update(I, tracks, stamp)
             position = e.aimpoints[idx],
             previousPosition = e.oldAimpoints[idx],
             trueCenterOfMass = target.Position,
+            previousTrueCenterOfMass = previousCenterOfMass,
             relativePosition = aimpoint - target.Position,
+            previousRelativePosition = previousAimpoint - previousCenterOfMass,
             state = e,
           })
       end
@@ -58,6 +65,7 @@ function TargetAimpoint:update(I, tracks, stamp)
       trueCenterOfMass = track.trueCenterOfMass,
       oldAimpoints = track.state.oldAimpoints,
       aimpoints = track.state.aimpoints,
+      aimpointCenterOfMass = track.state.aimpointCenterOfMass,
       state = track.state,
     })
   end
