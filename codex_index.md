@@ -1,5 +1,31 @@
 # Codex index
 
+## Counterbattery typed pipeline
+
+- `Full/Counterbattery/Pipeline/Types.lua` — runtime-tagged path-like product
+  records and collections; products use names such as `target/track` and
+  `target/density` without mutating earlier products.
+- `Full/Counterbattery/Pipeline/TargetTracking.lua` — target history and
+  target-owned state, copied from the original target update path.
+- `Full/Counterbattery/Pipeline/TargetAimpoint.lua` — aimpoint observation
+  enrichment, copied from the original mainframe aimpoint path.
+- `Full/Counterbattery/Pipeline/TargetRotation.lua` — rotation product and
+  copied rotation estimator.
+- `Full/Counterbattery/Pipeline/TargetDensity.lua` — density product and
+  copied aimpoint-derived distribution update.
+- `Full/Counterbattery/Pipeline/TargetPipeline.lua` — fixed-tick composition
+  of the typed products.
+- `Full/Counterbattery/Pipeline/Entry.lua` — dispatch adapter that preserves
+  the legacy `UpdateEnemyData` call site.
+- `Full/Counterbattery/CounterBatteryPipeline.lua` — generated paste-ready
+  artifact; rebuild with `Util/concat_counterbattery.py`.
+
+### Counterbattery modularization workflow
+
+```sh
+.venv/bin/python Util/concat_counterbattery.py
+```
+
 ## Multi-script FtD acceptance tests
 
 - `tests/build_tests.py` — concatenates the child scripts into the paste-ready `tests/combined.lua`.

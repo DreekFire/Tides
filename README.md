@@ -11,6 +11,10 @@ If you have any questions on how to use it, how it works, or how to program in g
 
 Unfortunately, FtD does not provide a nice way to import libraries. The easiest way to do it is to replace the default Lua box contents with the contents of `Wrapper.lua`. Alternatively, copy the content of `Header.lua` to the beginning of your lua script (outside of the Update function) and the content of `Tides.lua` or `Tides.min.lua` anywhere else in your script, such as the very end (again, outside of any functions).
 
+For the counterbattery example, the modular paste-ready artifact is
+`Full/Counterbattery/CounterBatteryPipeline.lua`. Regenerate it after source
+changes with `.venv/bin/python Util/concat_counterbattery.py`.
+
 If you wish to reduce the size of your code, you can remove any classes that you don't need.
 
 ## Full, High, Medium, Low
