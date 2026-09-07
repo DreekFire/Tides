@@ -26,7 +26,9 @@ callers convert at that boundary rather than changing the distribution.
 
 `Pipeline/ClosestPointSolver.lua` is the active closest-point implementation.
 It stores an explicit timestamp beside each authoritative target position and
-its position-derived velocity sample,
+its velocity sample. The first sample bootstraps velocity from the API's
+detection-derived value; later samples use position differences, while
+non-increasing timestamps retain the previous velocity estimate.
 uses `Search.interpolatedSearch` to map absolute times back to ring indices,
 freezes rotation only for the analytic Mahalanobis cubic, and uses each
 sample's rotation during the final scan.  `CounterBattery.lua` samples target

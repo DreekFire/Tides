@@ -233,7 +233,7 @@ local function CounterbatterySampleTime(enemy, index)
   return t - (enemy.pos.size - index) / TICKS_PER_S
 end
 
-local function CounterbatteryDerivedVelocity(enemy, position, stamp)
+local function CounterbatteryDerivedVelocity(enemy, position, stamp, observedVelocity)
   local previousPosition = enemy.pos[enemy.pos.size]
   local previousStamp = enemy.sampleTimes[enemy.sampleTimes.size]
   if previousPosition and previousStamp then
@@ -241,10 +241,12 @@ local function CounterbatteryDerivedVelocity(enemy, position, stamp)
     if deltaTime > 0 then
       return (position - previousPosition) / deltaTime
     end
+    -- Preserve the last usable estimate when the clock does not advance.
+    return enemy.vel[enemy.vel.size] or observedVelocity
   end
-  -- The first sample, or a non-increasing timestamp, has no finite
-  -- position-derived velocity yet.
-  return Vector3.zero
+  -- The API velocity is detection-derived, but is the best bootstrap value
+  -- until a second authoritative position sample is available.
+  return observedVelocity
 end
 
 -- Tides header
@@ -455,7 +457,7 @@ function UpdateEnemyData(I)
       end
       local e = enemies[target.Id]
       e.valid = true
-      local velocity = CounterbatteryDerivedVelocity(e, target.Position, t)
+      local velocity = CounterbatteryDerivedVelocity(e, target.Position, t, target.Velocity)
       RingBuffer.push(e.pos, target.Position)
       RingBuffer.push(e.vel, velocity)
       RingBuffer.push(e.sampleTimes, t)
@@ -3412,7 +3414,7 @@ local function initialDensityCovariance()
   return Matrix3.scalarmul(Matrix3.Identity(), 2500)
 end
 
-local function derivedVelocity(enemy, position, stamp)
+local function derivedVelocity(enemy, position, stamp, observedVelocity)
   local previousPosition = enemy.pos[enemy.pos.size]
   local previousStamp = enemy.sampleTimes[enemy.sampleTimes.size]
   if previousPosition and previousStamp then
@@ -3420,10 +3422,12 @@ local function derivedVelocity(enemy, position, stamp)
     if deltaTime > 0 then
       return (position - previousPosition) / deltaTime
     end
+    -- Preserve the last usable estimate when the clock does not advance.
+    return enemy.vel[enemy.vel.size] or observedVelocity
   end
-  -- The first sample, or a non-increasing timestamp, has no finite
-  -- position-derived velocity yet.
-  return Vector3.zero
+  -- The API velocity is detection-derived, but is the best bootstrap value
+  -- until a second authoritative position sample is available.
+  return observedVelocity
 end
 
 function TargetTracking.new(config)
@@ -3469,7 +3473,7 @@ function TargetTracking:update(I, stamp)
       -- TargetInfo.Position is authoritative. TargetInfo.Velocity is still
       -- detection-derived, so derive velocity from true COM samples instead.
       e.trueCenterOfMass = target.Position
-      local velocity = derivedVelocity(e, target.Position, stamp)
+      local velocity = derivedVelocity(e, target.Position, stamp, target.Velocity)
       RingBuffer.push(e.pos, target.Position)
       RingBuffer.push(e.vel, velocity)
       -- Keep the actual sample time beside the position and velocity.  The

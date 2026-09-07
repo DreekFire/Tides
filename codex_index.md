@@ -8,7 +8,8 @@
 - `Full/Counterbattery/Pipeline/TargetTracking.lua` — target history and
   target-owned state, copied from the original target update path; uses
   authoritative `TargetInfo.Position` and derives velocity from timestamped
-  position differences.
+  position differences, with detected velocity used only for the first sample
+  and the previous estimate held for non-increasing timestamps.
 - `Full/Counterbattery/Pipeline/TargetAimpoint.lua` — aimpoint observation
   enrichment, copied from the original mainframe aimpoint path; uses direct
   world-space aimpoints and true COM-relative offsets without detected-COM
@@ -34,7 +35,8 @@
   `tests/run_counterbattery_solver_tests.py` — focused solver, cubic,
   timestamp-indexing, interval, and interpreter-workaround regression tests.
 - `tests/counterbattery_target_tracking_test.py` — Lua/lupa regression test
-  for discrete velocity derivation with jittered and repeated timestamps.
+  for detected-velocity bootstrap and discrete velocity derivation with
+  jittered and repeated timestamps.
 - `tests/rotation/target_rotation_ransac_test.lua` and
   `tests/run_target_rotation_ransac_tests.py` — deterministic RANSAC,
   degeneracy, outlier, scale, and quaternion-sign tests.

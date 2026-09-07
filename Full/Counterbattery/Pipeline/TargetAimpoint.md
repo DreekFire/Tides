@@ -27,7 +27,9 @@ velocity[k] = (position[k] - position[k - 1])
               / (stamp[k] - stamp[k - 1])
 ```
 
-The first sample and non-increasing timestamps produce zero velocity.
+The first sample uses the API's detected velocity as a bootstrap value. A
+non-increasing timestamp preserves the previous velocity estimate; neither
+case changes the position history.
 
 The aimpoint stage also intentionally does not apply a rotation. The next
 stage estimates the target rotation from differences between these world-space

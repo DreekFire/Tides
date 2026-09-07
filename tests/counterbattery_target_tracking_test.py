@@ -79,16 +79,19 @@ def main() -> int:
         })
 
         local first = TargetTrackingModule.update(tracker, interface, 10.0)
-        assert(first.byId[42].velocity.x == 0)
-        assert(first.byId[42].velocity.y == 0)
-        assert(first.byId[42].velocity.z == 0)
+        -- The detected velocity is used only to bootstrap the first sample.
+        assert(first.byId[42].velocity.x == 999)
+        assert(first.byId[42].velocity.y == 999)
+        assert(first.byId[42].velocity.z == 999)
 
         sampleIndex = 2
         TargetTrackingModule.update(tracker, interface, 10.25)
         local second = TargetTrackingModule.update(tracker, interface, 10.25)
         -- The repeated timestamp is guarded and must not overwrite the valid
         -- derivative with an infinite/invalid value.
-        assert(second.byId[42].velocity.x == 0)
+        assert(second.byId[42].velocity.x == 16)
+        assert(second.byId[42].velocity.y == 8)
+        assert(second.byId[42].velocity.z == 16)
 
         sampleIndex = 3
         local third = TargetTrackingModule.update(tracker, interface, 10.40)
@@ -105,6 +108,7 @@ def main() -> int:
     assert result is True
     tracking_source = TRACKING_SOURCE.read_text(encoding="utf-8")
     assert "TargetInfo.Velocity" in tracking_source
+    assert "observedVelocity" in tracking_source
     assert "return (position - previousPosition) / deltaTime" in tracking_source
     assert "RingBuffer.push(e.vel, velocity)" in tracking_source
     print("Counterbattery target velocity derivation: ok")
