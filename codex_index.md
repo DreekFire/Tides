@@ -39,6 +39,14 @@
   closest-point solver with constant-rotation analytic coefficients,
   timestamp-based interval/index handling, changing-rotation linear scan, and
   the newer-interpreter warning.
+- `Full/Counterbattery/Pipeline/DebugVisualization.lua` — optional terminal
+  debug product and AtsuLuaEditor `LogToHud` edge renderer; draws true CoM,
+  aimpoints, axes, orientation, subobject axes, density mean, ballistic
+  trajectory clusters, missile warnings, and current projectile observations
+  without mutating upstream products.
+- `docs/AtsuLuaEditor.md` and `docs/vendor/AtsuLuaEditor-LuaDocs.cs` — official
+  downloaded ALE API snapshot, attribution, and visualization command
+  reference; refresh with `Util/download_atsuluaeditor_docs.py`.
 - `Full/Counterbattery/CounterBattery.lua` — legacy origin and missile-origin
   callers now use the same timestamp-to-ring-index adapter when the active
   solver is present; fixed-rate lookup remains only as standalone fallback.
@@ -73,6 +81,7 @@
 .venv/bin/python tests/counterbattery_target_aimpoint_test.py
 .venv/bin/python tests/counterbattery_track_deduplication_test.py
 .venv/bin/python tests/counterbattery_orientation_test.py
+.venv/bin/python tests/counterbattery_debug_visualization_test.py
 ```
 
 ## Multi-script FtD acceptance tests

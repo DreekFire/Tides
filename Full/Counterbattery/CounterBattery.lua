@@ -47,6 +47,10 @@ local numOrigins = 3
 local trackClusterDistance = 5
 -- Ballistic detections this close to a missile warning are not ballistic.
 local missileOverlapDistance = 5
+-- ALE-backed in-world diagnostics are opt-in and harmless in vanilla FtD.
+local counterbatteryDebugVisualization = false
+local counterbatteryDebugVisualizationDuration = 2
+local counterbatteryDebugVisualizationMaxPrimitives = 128
 -- time between switching targets
 local originSwitchTime = 2
 -- maximum time to remember origin points
@@ -410,14 +414,11 @@ function CoreUpdate(I)
     continueLine = false
   end
 
-  for i = 1, enemy.origins.size do
-    I:LogToHud("draw sphere $pos $rad", {
-      pos = enemy.rotation[enemy.rotation.size] * enemy.origins[i].position + enemy.pos[enemy.pos.size],
-      rad = 3,
-    })
-  end
-
   lastProjectilePos = projectile
+  -- Rendering is a pipeline edge concern.  The legacy unconditional ALE
+  -- origin drawing was removed so vanilla FtD never receives draw syntax and
+  -- each typed product is rendered exactly once by the debug stage.
+  VisualizeCounterbattery(I)
 
   -- fire weapon at origins
   if I:GetAIFiringMode(mainframeIdx) == "off" then return end

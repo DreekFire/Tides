@@ -50,6 +50,16 @@ and temporal continuity; mothership-spawned targets can disable the Y-alignment
 assumption in the pipeline configuration. The existing rotation estimate is a
 fallback and is never overwritten.
 
+`Pipeline/DebugVisualization.lua` is an optional terminal stage. It publishes
+`debug/counterbattery-visualization` draw primitives for the true target CoM,
+aimpoints, body/orientation axes, subobject axes, density mean, reconstructed
+trajectory lines, missile warnings, and the current ballistic observation.
+When `counterbatteryDebugVisualization` is enabled, an edge adapter emits the
+primitives through the documented AtsuLuaEditor `I:LogToHud` draw syntax. It
+does not call the draw overload when `_ALE` is unavailable, and logs one
+warning instead. See `docs/AtsuLuaEditor.md` for the downloaded documentation
+snapshot and attribution.
+
 The generated artifact bundles `Low/NdArray.lua` and the NdArray-backed
 `Low/Stats.lua`, so density covariance is an NdArray.  Legacy Matrix3-only
 callers convert at that boundary rather than changing the distribution.

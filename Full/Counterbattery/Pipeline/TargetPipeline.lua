@@ -11,6 +11,9 @@ function CounterbatteryPipeline.new(config)
     targetOrientation = TargetOrientation.new(config),
     targetDensity = TargetDensity.new(config),
     trackDeduplication = TargetTrackDeduplication.new(config),
+    debugVisualization = CounterbatteryDebugVisualization.new(config),
+    lastProjectileObservation = nil,
+    lastMissileObservation = nil,
   }
   return pipeline
 end
@@ -40,9 +43,18 @@ function CounterbatteryPipeline:update(I, stamp)
 end
 
 function CounterbatteryPipeline:observeProjectile(I, observation, stamp)
-  return self.trackDeduplication:observeProjectile(I, observation, stamp)
+  self.lastProjectileObservation = self.trackDeduplication:observeProjectile(
+    I, observation, stamp)
+  return self.lastProjectileObservation
 end
 
 function CounterbatteryPipeline:observeMissiles(I, observations, stamp)
-  return self.trackDeduplication:observeMissiles(I, observations, stamp)
+  self.lastMissileObservation = self.trackDeduplication:observeMissiles(
+    I, observations, stamp)
+  return self.lastMissileObservation
+end
+
+function CounterbatteryPipeline:visualize(I, stamp)
+  return self.debugVisualization:update(I, self.outputs,
+    self.lastMissileObservation, self.lastProjectileObservation, stamp)
 end

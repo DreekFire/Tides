@@ -15,6 +15,9 @@ function GetCounterbatteryPipeline()
       missileOverlapDistance = missileOverlapDistance,
       aimPointTrackers = aimPointTrackers,
       maxTurnRateTracking = maxTurnRateTracking,
+      debugVisualization = counterbatteryDebugVisualization,
+      debugVisualizationDuration = counterbatteryDebugVisualizationDuration,
+      debugVisualizationMaxPrimitives = counterbatteryDebugVisualizationMaxPrimitives,
       onTargetLost = function(id)
         if id == currentTargetId then
           lastOrigin = nil
@@ -37,4 +40,8 @@ end
 
 function ObserveCounterbatteryMissiles(I, observations)
   return GetCounterbatteryPipeline():observeMissiles(I, observations, t)
+end
+
+function VisualizeCounterbattery(I)
+  return GetCounterbatteryPipeline():visualize(I, t)
 end
