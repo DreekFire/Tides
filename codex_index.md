@@ -20,6 +20,10 @@
   true-CoM-relative aimpoints whose motion is not explained by the main-body
   rotation and estimates a subobject axis from temporal chords; publishes the
   immutable `target/subobject-aimpoint` enrichment.
+- `Full/Counterbattery/Pipeline/TargetOrientation.lua` — estimates a separate
+  world-frame orientation from integer-grid aimpoints, evaluating subobject
+  axes first and scoring bounded yaw candidates by grid residual and temporal
+  continuity; local-Y alignment is configurable for mothership-spawned targets.
 - `Full/Counterbattery/Pipeline/TargetDensity.lua` — density product and
   copied aimpoint-derived distribution update.
 - `Full/Counterbattery/Pipeline/TrackDeduplication.lua` — read-only
@@ -58,6 +62,8 @@
   degeneracy, outlier, scale, and quaternion-sign tests.
 - `tests/counterbattery_subobject_test.py` — deterministic residual detection,
   temporal-axis estimation, and stacked-axis classification test.
+- `tests/counterbattery_orientation_test.py` — deterministic grid-candidate,
+  Y-alignment, and orientation-product regression test.
 
 ### Counterbattery modularization workflow
 
@@ -66,6 +72,7 @@
 .venv/bin/python tests/counterbattery_target_tracking_test.py
 .venv/bin/python tests/counterbattery_target_aimpoint_test.py
 .venv/bin/python tests/counterbattery_track_deduplication_test.py
+.venv/bin/python tests/counterbattery_orientation_test.py
 ```
 
 ## Multi-script FtD acceptance tests

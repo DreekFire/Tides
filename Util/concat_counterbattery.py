@@ -22,6 +22,7 @@ parts = [
     COUNTERBATTERY / "Pipeline" / "TargetAimpoint.lua",
     COUNTERBATTERY / "Pipeline" / "TargetRotation.lua",
     COUNTERBATTERY / "Pipeline" / "TargetSubobjectAimpoint.lua",
+    COUNTERBATTERY / "Pipeline" / "TargetOrientation.lua",
     COUNTERBATTERY / "Pipeline" / "TargetDensity.lua",
     COUNTERBATTERY / "Pipeline" / "ProjectileEstimation.lua",
     COUNTERBATTERY / "Pipeline" / "WeaponRateOfFire.lua",

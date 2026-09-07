@@ -14,6 +14,7 @@ The pipeline emits typed, path-like products:
 
 ```text
 target/track → target/aimpoint → target/rotation → target/subobject-aimpoint
+                                  ↘ target/orientation
                                                 → target/density
            → target/track-cluster
 ```
@@ -40,6 +41,14 @@ with the main-body rotation product. Residual points are published as a
 separate enrichment, with a temporal rotation-axis estimate when three or
 more samples support one. Conflicting axes are marked as potentially stacked
 subobjects; the original aimpoint and rotation products remain unchanged.
+
+`Pipeline/TargetOrientation.lua` estimates a separate world-frame orientation
+from exact grid-constrained aimpoints. It evaluates axes inferred from
+subobject motion first, then bounded integer-grid/yaw candidates under the
+normal local-Y/global-Y spawn assumption. Candidate scoring uses grid residual
+and temporal continuity; mothership-spawned targets can disable the Y-alignment
+assumption in the pipeline configuration. The existing rotation estimate is a
+fallback and is never overwritten.
 
 The generated artifact bundles `Low/NdArray.lua` and the NdArray-backed
 `Low/Stats.lua`, so density covariance is an NdArray.  Legacy Matrix3-only
