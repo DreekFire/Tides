@@ -23,6 +23,29 @@ Products are separate values keyed by target ID.  Pipeline stages may retain
 private history, but they do not add fields to or replace the preceding
 product.
 
+The pipeline is driven by an output-based module graph.  Individual stages can
+be enabled with `config.features`, for example:
+
+```lua
+features = {
+  ["target-tracking"] = true,
+  ["target-aimpoint"] = true,
+  ["target-rotation"] = true,
+  ["target-subobject-aimpoint"] = false,
+  ["target-orientation"] = false,
+  ["target-density"] = true,
+  ["projectile-estimation"] = true,
+  ["weapon-rate-of-fire"] = true,
+  ["track-deduplication"] = true,
+  ["debug-visualization"] = false,
+}
+```
+
+An enabled stage whose prerequisite is disabled fails during pipeline
+construction with the missing output name.  The scheduler also rejects cycles
+and reports the complete dependency path.  This keeps a feature switch from
+silently changing the meaning of downstream products.
+
 `target/track-cluster` linearizes each reconstructed projectile origin into a
 world-space tangent line and publishes deterministic clusters using shortest
 line distance.  It is observational only: the legacy origin ring and firing

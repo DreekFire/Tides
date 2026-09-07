@@ -54,6 +54,21 @@ local missileOverlapDistance = 5
 local counterbatteryDebugVisualization = false
 local counterbatteryDebugVisualizationDuration = 2
 local counterbatteryDebugVisualizationMaxPrimitives = 128
+-- Individual modular pipeline stages.  A stage that consumes a disabled
+-- stage's product is rejected during pipeline construction with a useful
+-- prerequisite error.
+local counterbatteryFeatures = {
+  ["target-tracking"] = true,
+  ["target-aimpoint"] = true,
+  ["target-rotation"] = true,
+  ["target-subobject-aimpoint"] = true,
+  ["target-orientation"] = true,
+  ["target-density"] = true,
+  ["projectile-estimation"] = true,
+  ["weapon-rate-of-fire"] = true,
+  ["track-deduplication"] = true,
+  ["debug-visualization"] = false,
+}
 -- time between switching targets
 local originSwitchTime = 2
 -- maximum time to remember origin points
@@ -3400,6 +3415,115 @@ function Stats.boxMuller()
 end
 -- END Low/Stats.lua
 
+-- BEGIN Full/Counterbattery/Pipeline/ModuleSystem.lua
+-- Dependency-aware module scheduler used by the modular Counterbattery.
+--
+-- A module declares the products it provides and the products it consumes.
+-- Enabled modules are topologically sorted once at construction time.  A
+-- missing prerequisite and a dependency cycle are configuration errors, not
+-- runtime ordering accidents.
+local CounterbatteryModuleSystem = {}
+
+local function cycleMessage(stack, name)
+  local start = 1
+  for index, value in ipairs(stack) do
+    if value == name then start = index break end
+  end
+  local path = {}
+  for index = start, #stack do path[#path + 1] = stack[index] end
+  path[#path + 1] = name
+  return "circular module dependency: " .. table.concat(path, " -> ")
+end
+
+local function normalizeDefinition(definition)
+  assert(type(definition) == "table", "module definition must be a table")
+  assert(type(definition.name) == "string" and definition.name ~= "",
+    "module definition requires a name")
+  assert(type(definition.update) == "function",
+    "module " .. definition.name .. " requires an update function")
+  return {
+    name = definition.name,
+    enabled = definition.enabled ~= false,
+    requires = definition.requires or {},
+    provides = definition.provides or {},
+    update = definition.update,
+  }
+end
+
+function CounterbatteryModuleSystem.new(definitions)
+  local system = {
+    definitions = {},
+    modules = {},
+    order = {},
+  }
+  local provider = {}
+
+  for _, raw in ipairs(definitions or {}) do
+    local definition = normalizeDefinition(raw)
+    assert(not system.definitions[definition.name],
+      "duplicate module name: " .. definition.name)
+    system.definitions[definition.name] = definition
+    if definition.enabled then
+      system.modules[#system.modules + 1] = definition
+      for _, output in ipairs(definition.provides) do
+        assert(type(output) == "string" and output ~= "",
+          "module " .. definition.name .. " has an invalid output")
+        assert(not provider[output], "multiple enabled modules provide output: " .. output)
+        provider[output] = definition.name
+      end
+    end
+  end
+
+  local state = {}
+  local stack = {}
+  local function visit(name)
+    if state[name] == 2 then return end
+    if state[name] == 1 then error(cycleMessage(stack, name), 0) end
+    local definition = system.definitions[name]
+    state[name] = 1
+    stack[#stack + 1] = name
+    for _, requirement in ipairs(definition.requires) do
+      local dependency = provider[requirement]
+      assert(dependency,
+        "module " .. name .. " requires unavailable output: " .. requirement)
+      visit(dependency)
+    end
+    stack[#stack] = nil
+    state[name] = 2
+    system.order[#system.order + 1] = definition
+  end
+
+  for _, definition in ipairs(system.modules) do visit(definition.name) end
+  return setmetatable(system, {__index = CounterbatteryModuleSystem})
+end
+
+function CounterbatteryModuleSystem:update(context)
+  context = context or {}
+  context.outputs = context.outputs or {}
+  for _, definition in ipairs(self.order) do
+    local output = definition.update(context)
+    if output ~= nil then
+      assert(#definition.provides == 1,
+        "module " .. definition.name .. " returned an output but provides multiple products")
+      context.outputs[definition.provides[1]] = output
+    end
+  end
+  return context.outputs
+end
+
+function CounterbatteryModuleSystem:isEnabled(name)
+  return self.definitions[name] ~= nil and self.definitions[name].enabled
+end
+
+function CounterbatteryModuleSystem:orderedNames()
+  local names = {}
+  for _, definition in ipairs(self.order) do names[#names + 1] = definition.name end
+  return names
+end
+
+_G.CounterbatteryModuleSystem = CounterbatteryModuleSystem
+-- END Full/Counterbattery/Pipeline/ModuleSystem.lua
+
 -- BEGIN Full/Counterbattery/Pipeline/Types.lua
 -- Runtime tags for the counterbattery data pipeline.
 --
@@ -4963,11 +5087,18 @@ end
 
 function TargetTrackDeduplication.new(config)
   config = config or {}
+  local features = config.features or config.enabledFeatures or {}
+  local projectileEnabled = features["projectile-estimation"]
+  if projectileEnabled == nil then projectileEnabled = features.projectileEstimation end
+  local rateEnabled = features["weapon-rate-of-fire"]
+  if rateEnabled == nil then rateEnabled = features.weaponRateOfFire end
   return setmetatable({
     distanceThreshold = config.trackClusterDistance or 5,
     TICKS_PER_S = config.TICKS_PER_S or 1,
-    projectileEstimation = TargetProjectileEstimation.new(config),
-    rateOfFire = TargetWeaponRateOfFire.new(config),
+    projectileEstimation = projectileEnabled == false and nil
+      or TargetProjectileEstimation.new(config),
+    rateOfFire = rateEnabled == false and nil
+      or TargetWeaponRateOfFire.new(config),
     lastRateProduct = nil,
   }, {__index = TargetTrackDeduplication})
 end
@@ -5096,10 +5227,12 @@ function TargetTrackDeduplication:cluster(first, second, third)
 end
 
 function TargetTrackDeduplication:observeProjectile(I, observation, stamp)
+  if not self.projectileEstimation then return nil end
   return self.projectileEstimation:observe(I, observation, stamp)
 end
 
 function TargetTrackDeduplication:observeMissiles(I, observations, stamp)
+  if not self.projectileEstimation then return nil end
   return self.projectileEstimation:observeMissiles(I, observations, stamp)
 end
 
@@ -5108,8 +5241,8 @@ function TargetTrackDeduplication:update(I, tracks, stamp)
   local rateById = {}
   for id, track in pairs(tracks.byId) do
     local clusters = self:cluster(I, track.state, stamp)
-    local rates = self.rateOfFire:update(id, clusters, stamp,
-      TargetTrackDeduplication.lineDistance)
+    local rates = self.rateOfFire and self.rateOfFire:update(id, clusters, stamp,
+      TargetTrackDeduplication.lineDistance) or {}
     local enrichedClusters = {}
     for index, cluster in ipairs(clusters) do
       enrichedClusters[index] = CounterbatteryTypes.product("target/track-cluster", id,
@@ -5138,7 +5271,7 @@ function TargetTrackDeduplication:update(I, tracks, stamp)
         stamp, {weapons = rates, source = byId[id]})}, {frame = "world"})
   end
   self.lastRateProduct = CounterbatteryTypes.collection("target/track-cluster/rate-of-fire",
-    stamp, rateById, {frame = "world"})
+    stamp, rateById, {frame = "world", enabled = self.rateOfFire ~= nil})
   return CounterbatteryTypes.collection("target/track-cluster", stamp, byId, {
     frame = "world",
     distanceThreshold = self.distanceThreshold,
@@ -5410,7 +5543,36 @@ _G.CounterbatteryDebugVisualization = CounterbatteryDebugVisualization
 -- product; only the stage's private target state owns mutable ring buffers.
 local CounterbatteryPipeline = {}
 
+local FEATURE_ALIASES = {
+  ["target-tracking"] = "targetTracking",
+  ["target-aimpoint"] = "targetAimpoint",
+  ["target-rotation"] = "targetRotation",
+  ["target-subobject-aimpoint"] = "targetSubobjectAimpoint",
+  ["target-orientation"] = "targetOrientation",
+  ["target-density"] = "targetDensity",
+  ["projectile-estimation"] = "projectileEstimation",
+  ["weapon-rate-of-fire"] = "weaponRateOfFire",
+  ["track-deduplication"] = "trackDeduplication",
+  ["debug-visualization"] = "debugVisualization",
+}
+
+local function featureEnabled(config, name, legacyName)
+  local features = config.features or config.enabledFeatures
+  local alias = FEATURE_ALIASES[name]
+  if features and features[name] ~= nil then return features[name] == true end
+  if features and alias and features[alias] ~= nil then return features[alias] == true end
+  if legacyName and config[legacyName] ~= nil then return config[legacyName] == true end
+  return name ~= "debug-visualization"
+end
+
 function CounterbatteryPipeline.new(config)
+  config = config or {}
+  if config.features or config.enabledFeatures then
+    -- The debug stage has its own renderer flag for standalone use.  Keep it
+    -- synchronized with the module flag when the pipeline is configured as a
+    -- feature graph.
+    config.debugVisualization = featureEnabled(config, "debug-visualization", "debugVisualization")
+  end
   local pipeline = {
     targetTracking = TargetTracking.new(config),
     targetAimpoint = TargetAimpoint.new(config),
@@ -5423,30 +5585,116 @@ function CounterbatteryPipeline.new(config)
     lastProjectileObservation = nil,
     lastMissileObservation = nil,
   }
+  pipeline.modules = CounterbatteryModuleSystem.new({
+    {
+      name = "target-tracking",
+      enabled = featureEnabled(config, "target-tracking", "enableTargetTracking"),
+      provides = {"target/track"},
+      update = function(context)
+        return pipeline.targetTracking:update(context.I, context.stamp)
+      end,
+    },
+    {
+      name = "target-aimpoint",
+      enabled = featureEnabled(config, "target-aimpoint", "enableTargetAimpoint"),
+      requires = {"target/track"},
+      provides = {"target/aimpoint"},
+      update = function(context)
+        return pipeline.targetAimpoint:update(context.I,
+          context.outputs["target/track"], context.stamp)
+      end,
+    },
+    {
+      name = "target-rotation",
+      enabled = featureEnabled(config, "target-rotation", "enableTargetRotation"),
+      requires = {"target/track", "target/aimpoint"},
+      provides = {"target/rotation"},
+      update = function(context)
+        return pipeline.targetRotation:update(context.I,
+          context.outputs["target/track"], context.outputs["target/aimpoint"], context.stamp)
+      end,
+    },
+    {
+      name = "target-subobject-aimpoint",
+      enabled = featureEnabled(config, "target-subobject-aimpoint", "enableTargetSubobjectAimpoint"),
+      requires = {"target/track", "target/aimpoint", "target/rotation"},
+      provides = {"target/subobject-aimpoint"},
+      update = function(context)
+        return pipeline.targetSubobjectAimpoint:update(context.I,
+          context.outputs["target/track"], context.outputs["target/aimpoint"],
+          context.outputs["target/rotation"], context.stamp)
+      end,
+    },
+    {
+      name = "target-orientation",
+      enabled = featureEnabled(config, "target-orientation", "enableTargetOrientation"),
+      requires = {"target/track", "target/aimpoint", "target/rotation", "target/subobject-aimpoint"},
+      provides = {"target/orientation"},
+      update = function(context)
+        return pipeline.targetOrientation:update(context.I,
+          context.outputs["target/track"], context.outputs["target/aimpoint"],
+          context.outputs["target/rotation"], context.outputs["target/subobject-aimpoint"],
+          context.stamp)
+      end,
+    },
+    {
+      name = "target-density",
+      enabled = featureEnabled(config, "target-density", "enableTargetDensity"),
+      requires = {"target/track", "target/aimpoint", "target/rotation"},
+      provides = {"target/density"},
+      update = function(context)
+        return pipeline.targetDensity:update(context.I,
+          context.outputs["target/track"], context.outputs["target/aimpoint"],
+          context.outputs["target/rotation"], context.stamp)
+      end,
+    },
+    {
+      name = "projectile-estimation",
+      enabled = featureEnabled(config, "projectile-estimation", "enableProjectileEstimation"),
+      requires = {"target/density"},
+      provides = {"target/projectile-estimation"},
+      update = function(context)
+        return true
+      end,
+    },
+    {
+      name = "weapon-rate-of-fire",
+      enabled = featureEnabled(config, "weapon-rate-of-fire", "enableWeaponRateOfFire"),
+      requires = {"target/projectile-estimation"},
+      provides = {"target/weapon-rate-of-fire"},
+      update = function(context)
+        return true
+      end,
+    },
+    {
+      name = "track-deduplication",
+      enabled = featureEnabled(config, "track-deduplication", "enableTrackDeduplication"),
+      requires = {"target/density", "target/projectile-estimation", "target/weapon-rate-of-fire"},
+      provides = {"target/track-cluster"},
+      update = function(context)
+        return pipeline.trackDeduplication:update(context.I,
+          context.outputs["target/density"], context.stamp)
+      end,
+    },
+    {
+      name = "debug-visualization",
+      enabled = featureEnabled(config, "debug-visualization", "debugVisualization"),
+      requires = {"target/track", "target/aimpoint", "target/rotation",
+        "target/subobject-aimpoint", "target/orientation", "target/density",
+        "target/track-cluster"},
+      provides = {"debug/counterbattery-visualization"},
+      update = function(context)
+        return pipeline.debugVisualization:update(context.I, context.outputs,
+          pipeline.lastMissileObservation, pipeline.lastProjectileObservation,
+          context.stamp)
+      end,
+    },
+  })
   return pipeline
 end
 
 function CounterbatteryPipeline:update(I, stamp)
-  local track = self.targetTracking:update(I, stamp)
-  local aimpoint = self.targetAimpoint:update(I, track, stamp)
-  local rotation = self.targetRotation:update(I, track, aimpoint, stamp)
-  local subobjectAimpoint = self.targetSubobjectAimpoint:update(
-    I, track, aimpoint, rotation, stamp)
-  local orientation = self.targetOrientation:update(
-    I, track, aimpoint, rotation, subobjectAimpoint, stamp)
-  local density = self.targetDensity:update(I, track, aimpoint, rotation, stamp)
-  local trackClusters = self.trackDeduplication:update(I, density, stamp)
-
-  -- Paths identify enrichment products without mutating the previous product.
-  self.outputs = {
-    ["target/track"] = track,
-    ["target/aimpoint"] = aimpoint,
-    ["target/rotation"] = rotation,
-    ["target/subobject-aimpoint"] = subobjectAimpoint,
-    ["target/orientation"] = orientation,
-    ["target/density"] = density,
-    ["target/track-cluster"] = trackClusters,
-  }
+  self.outputs = self.modules:update({I = I, stamp = stamp, outputs = {}})
   return self.outputs
 end
 
@@ -5770,6 +6018,7 @@ function GetCounterbatteryPipeline()
       debugVisualization = counterbatteryDebugVisualization,
       debugVisualizationDuration = counterbatteryDebugVisualizationDuration,
       debugVisualizationMaxPrimitives = counterbatteryDebugVisualizationMaxPrimitives,
+      features = counterbatteryFeatures,
       onTargetLost = function(id)
         if id == currentTargetId then
           lastOrigin = nil

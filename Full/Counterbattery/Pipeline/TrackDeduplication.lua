@@ -152,11 +152,18 @@ end
 
 function TargetTrackDeduplication.new(config)
   config = config or {}
+  local features = config.features or config.enabledFeatures or {}
+  local projectileEnabled = features["projectile-estimation"]
+  if projectileEnabled == nil then projectileEnabled = features.projectileEstimation end
+  local rateEnabled = features["weapon-rate-of-fire"]
+  if rateEnabled == nil then rateEnabled = features.weaponRateOfFire end
   return setmetatable({
     distanceThreshold = config.trackClusterDistance or 5,
     TICKS_PER_S = config.TICKS_PER_S or 1,
-    projectileEstimation = TargetProjectileEstimation.new(config),
-    rateOfFire = TargetWeaponRateOfFire.new(config),
+    projectileEstimation = projectileEnabled == false and nil
+      or TargetProjectileEstimation.new(config),
+    rateOfFire = rateEnabled == false and nil
+      or TargetWeaponRateOfFire.new(config),
     lastRateProduct = nil,
   }, {__index = TargetTrackDeduplication})
 end
@@ -285,10 +292,12 @@ function TargetTrackDeduplication:cluster(first, second, third)
 end
 
 function TargetTrackDeduplication:observeProjectile(I, observation, stamp)
+  if not self.projectileEstimation then return nil end
   return self.projectileEstimation:observe(I, observation, stamp)
 end
 
 function TargetTrackDeduplication:observeMissiles(I, observations, stamp)
+  if not self.projectileEstimation then return nil end
   return self.projectileEstimation:observeMissiles(I, observations, stamp)
 end
 
@@ -297,8 +306,8 @@ function TargetTrackDeduplication:update(I, tracks, stamp)
   local rateById = {}
   for id, track in pairs(tracks.byId) do
     local clusters = self:cluster(I, track.state, stamp)
-    local rates = self.rateOfFire:update(id, clusters, stamp,
-      TargetTrackDeduplication.lineDistance)
+    local rates = self.rateOfFire and self.rateOfFire:update(id, clusters, stamp,
+      TargetTrackDeduplication.lineDistance) or {}
     local enrichedClusters = {}
     for index, cluster in ipairs(clusters) do
       enrichedClusters[index] = CounterbatteryTypes.product("target/track-cluster", id,
@@ -327,7 +336,7 @@ function TargetTrackDeduplication:update(I, tracks, stamp)
         stamp, {weapons = rates, source = byId[id]})}, {frame = "world"})
   end
   self.lastRateProduct = CounterbatteryTypes.collection("target/track-cluster/rate-of-fire",
-    stamp, rateById, {frame = "world"})
+    stamp, rateById, {frame = "world", enabled = self.rateOfFire ~= nil})
   return CounterbatteryTypes.collection("target/track-cluster", stamp, byId, {
     frame = "world",
     distanceThreshold = self.distanceThreshold,

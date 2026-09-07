@@ -18,6 +18,7 @@ function GetCounterbatteryPipeline()
       debugVisualization = counterbatteryDebugVisualization,
       debugVisualizationDuration = counterbatteryDebugVisualizationDuration,
       debugVisualizationMaxPrimitives = counterbatteryDebugVisualizationMaxPrimitives,
+      features = counterbatteryFeatures,
       onTargetLost = function(id)
         if id == currentTargetId then
           lastOrigin = nil

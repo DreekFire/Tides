@@ -51,6 +51,21 @@ local missileOverlapDistance = 5
 local counterbatteryDebugVisualization = false
 local counterbatteryDebugVisualizationDuration = 2
 local counterbatteryDebugVisualizationMaxPrimitives = 128
+-- Individual modular pipeline stages.  A stage that consumes a disabled
+-- stage's product is rejected during pipeline construction with a useful
+-- prerequisite error.
+local counterbatteryFeatures = {
+  ["target-tracking"] = true,
+  ["target-aimpoint"] = true,
+  ["target-rotation"] = true,
+  ["target-subobject-aimpoint"] = true,
+  ["target-orientation"] = true,
+  ["target-density"] = true,
+  ["projectile-estimation"] = true,
+  ["weapon-rate-of-fire"] = true,
+  ["track-deduplication"] = true,
+  ["debug-visualization"] = false,
+}
 -- time between switching targets
 local originSwitchTime = 2
 -- maximum time to remember origin points

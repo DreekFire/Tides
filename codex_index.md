@@ -51,7 +51,11 @@
   callers now use the same timestamp-to-ring-index adapter when the active
   solver is present; fixed-rate lookup remains only as standalone fallback.
 - `Full/Counterbattery/Pipeline/TargetPipeline.lua` — fixed-tick composition
-  of the typed products.
+  of the typed products through the dependency-aware feature module graph;
+  feature flags live under `config.features` (camelCase aliases are accepted).
+- `Full/Counterbattery/Pipeline/ModuleSystem.lua` — generic output-based module
+  scheduler with deterministic topological ordering, missing-prerequisite
+  validation, and readable circular-dependency errors.
 - `Full/Counterbattery/Pipeline/Entry.lua` — dispatch adapter that preserves
   the legacy `UpdateEnemyData` call site.
 - `Full/Counterbattery/CounterBatteryPipeline.lua` — generated paste-ready
@@ -82,6 +86,7 @@
 .venv/bin/python tests/counterbattery_track_deduplication_test.py
 .venv/bin/python tests/counterbattery_orientation_test.py
 .venv/bin/python tests/counterbattery_debug_visualization_test.py
+.venv/bin/python tests/module_system_test.py
 ```
 
 ## Multi-script FtD acceptance tests

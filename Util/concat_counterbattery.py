@@ -17,6 +17,7 @@ parts = [
     COUNTERBATTERY / "CounterBattery.lua",
     ROOT / "Low" / "NdArray.lua",
     ROOT / "Low" / "Stats.lua",
+    COUNTERBATTERY / "Pipeline" / "ModuleSystem.lua",
     COUNTERBATTERY / "Pipeline" / "Types.lua",
     COUNTERBATTERY / "Pipeline" / "TargetTracking.lua",
     COUNTERBATTERY / "Pipeline" / "TargetAimpoint.lua",
