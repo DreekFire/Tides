@@ -11,6 +11,7 @@ local function getCounterbatteryPipeline()
       targetTrackTime = targetTrackTime,
       TICKS_PER_S = TICKS_PER_S,
       numOrigins = numOrigins,
+      trackClusterDistance = trackClusterDistance,
       aimPointTrackers = aimPointTrackers,
       maxTurnRateTracking = maxTurnRateTracking,
       onTargetLost = function(id)

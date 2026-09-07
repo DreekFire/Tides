@@ -22,6 +22,7 @@ parts = [
     COUNTERBATTERY / "Pipeline" / "TargetAimpoint.lua",
     COUNTERBATTERY / "Pipeline" / "TargetRotation.lua",
     COUNTERBATTERY / "Pipeline" / "TargetDensity.lua",
+    COUNTERBATTERY / "Pipeline" / "TrackDeduplication.lua",
     COUNTERBATTERY / "Pipeline" / "TargetPipeline.lua",
     COUNTERBATTERY / "Pipeline" / "ClosestPointSolver.lua",
     COUNTERBATTERY / "Pipeline" / "Entry.lua",

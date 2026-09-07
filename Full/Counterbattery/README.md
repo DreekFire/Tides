@@ -14,11 +14,17 @@ The pipeline emits typed, path-like products:
 
 ```text
 target/track → target/aimpoint → target/rotation → target/density
+           → target/track-cluster
 ```
 
 Products are separate values keyed by target ID.  Pipeline stages may retain
 private history, but they do not add fields to or replace the preceding
 product.
+
+`target/track-cluster` linearizes each reconstructed projectile origin into a
+world-space tangent line and publishes deterministic clusters using shortest
+line distance.  It is observational only: the legacy origin ring and firing
+selection are unchanged until a later stage explicitly consumes this product.
 
 The generated artifact bundles `Low/NdArray.lua` and the NdArray-backed
 `Low/Stats.lua`, so density covariance is an NdArray.  Legacy Matrix3-only

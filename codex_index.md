@@ -18,6 +18,9 @@
   copied rotation estimator.
 - `Full/Counterbattery/Pipeline/TargetDensity.lua` — density product and
   copied aimpoint-derived distribution update.
+- `Full/Counterbattery/Pipeline/TrackDeduplication.lua` — read-only
+  `target/track-cluster` product; reconstructs world-space tangent lines at
+  Mahalanobis origin points and clusters them by shortest line distance.
 - `Full/Counterbattery/Pipeline/ClosestPointSolver.lua` — Mahalanobis
   closest-point solver with constant-rotation analytic coefficients,
   timestamp-based interval/index handling, changing-rotation linear scan, and
@@ -37,6 +40,8 @@
 - `tests/counterbattery_target_tracking_test.py` — Lua/lupa regression test
   for detected-velocity bootstrap and discrete velocity derivation with
   jittered and repeated timestamps.
+- `tests/counterbattery_track_deduplication_test.py` — deterministic parallel,
+  skew, clustering, invalid-line, and path-product regression test.
 - `tests/rotation/target_rotation_ransac_test.lua` and
   `tests/run_target_rotation_ransac_tests.py` — deterministic RANSAC,
   degeneracy, outlier, scale, and quaternion-sign tests.
@@ -47,6 +52,7 @@
 .venv/bin/python Util/concat_counterbattery.py
 .venv/bin/python tests/counterbattery_target_tracking_test.py
 .venv/bin/python tests/counterbattery_target_aimpoint_test.py
+.venv/bin/python tests/counterbattery_track_deduplication_test.py
 ```
 
 ## Multi-script FtD acceptance tests

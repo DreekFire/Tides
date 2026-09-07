@@ -42,6 +42,9 @@ local distScale = 800
 local targetTrackTime = 15
 -- number of locations to track per enemy (todo: support tracking multiple projectiles simultaneously)
 local numOrigins = 3
+-- maximum shortest distance between reconstructed trajectory lines in one
+-- deduplicated target/track-cluster product
+local trackClusterDistance = 5
 -- time between switching targets
 local originSwitchTime = 2
 -- maximum time to remember origin points

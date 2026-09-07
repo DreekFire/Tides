@@ -8,6 +8,7 @@ function CounterbatteryPipeline.new(config)
     targetAimpoint = TargetAimpoint.new(config),
     targetRotation = TargetRotation.new(config),
     targetDensity = TargetDensity.new(config),
+    trackDeduplication = TargetTrackDeduplication.new(config),
   }
   return pipeline
 end
@@ -17,6 +18,7 @@ function CounterbatteryPipeline:update(I, stamp)
   local aimpoint = self.targetAimpoint:update(I, track, stamp)
   local rotation = self.targetRotation:update(I, track, aimpoint, stamp)
   local density = self.targetDensity:update(I, track, aimpoint, rotation, stamp)
+  local trackClusters = self.trackDeduplication:update(I, density, stamp)
 
   -- Paths identify enrichment products without mutating the previous product.
   self.outputs = {
@@ -24,6 +26,7 @@ function CounterbatteryPipeline:update(I, stamp)
     ["target/aimpoint"] = aimpoint,
     ["target/rotation"] = rotation,
     ["target/density"] = density,
+    ["target/track-cluster"] = trackClusters,
   }
   return self.outputs
 end
