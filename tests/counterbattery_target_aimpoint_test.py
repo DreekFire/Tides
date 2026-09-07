@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for target/aimpoint frame normalization."""
+"""Regression tests for true-CoM target/aimpoint semantics."""
 
 from pathlib import Path
 
@@ -8,6 +8,8 @@ from lupa import LuaRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "Full" / "Counterbattery" / "Pipeline" / "TargetAimpoint.lua"
+TRACKING_SOURCE = ROOT / "Full" / "Counterbattery" / "Pipeline" / "TargetTracking.lua"
+LEGACY_SOURCE = ROOT / "Full" / "Counterbattery" / "CounterBattery.lua"
 
 
 def main() -> int:
@@ -52,14 +54,10 @@ def main() -> int:
             Position = Vec(100, 20, 5),
             AimPointPosition = Vec(103, 22, 8),
           },
-          targetPosition = Vec(110, 30, 15),
         }
         local interface = {
           GetNumberOfTargets = function(_, _) return 1 end,
           GetTargetInfo = function(_, _, _) return sample.target end,
-          GetTargetPositionInfo = function(_, _, _)
-            return {Position = sample.targetPosition}
-          end,
         }
         local tracks = {byId = {[42] = {state = state}}}
         local tracker = {idx = 7}
@@ -74,16 +72,22 @@ def main() -> int:
         assert(first.frame == "world")
         assert(firstTarget.frame == "world")
         assert(firstObservation.frame == "world")
-        assert(firstObservation.position.x == 113)
-        assert(firstObservation.position.y == 32)
-        assert(firstObservation.position.z == 18)
-        assert(firstObservation.previousPosition.x == 113)
-        assert(firstObservation.previousPosition.y == 32)
-        assert(firstObservation.previousPosition.z == 18)
+        assert(firstObservation.position.x == 103)
+        assert(firstObservation.position.y == 22)
+        assert(firstObservation.position.z == 8)
+        assert(firstObservation.previousPosition.x == 103)
+        assert(firstObservation.previousPosition.y == 22)
+        assert(firstObservation.previousPosition.z == 8)
+        assert(firstObservation.trueCenterOfMass.x == 100)
+        assert(firstObservation.trueCenterOfMass.y == 20)
+        assert(firstObservation.trueCenterOfMass.z == 5)
+        assert(firstObservation.relativePosition.x == 3)
+        assert(firstObservation.relativePosition.y == 2)
+        assert(firstObservation.relativePosition.z == 3)
         assert(firstTarget.state == state)
-        assert(state.aimpoints[1].x == 113)
-        assert(state.aimpoints[1].y == 32)
-        assert(state.aimpoints[1].z == 18)
+        assert(state.aimpoints[1].x == 103)
+        assert(state.aimpoints[1].y == 22)
+        assert(state.aimpoints[1].z == 8)
 
         sample.target = {
           Valid = true,
@@ -91,15 +95,14 @@ def main() -> int:
           Position = Vec(101, 21, 6),
           AimPointPosition = Vec(104, 23, 9),
         }
-        sample.targetPosition = Vec(111, 31, 16)
         local second = TargetAimpointModule.update(aimpoint, interface, tracks, 13.5)
         local secondObservation = second.byId[42].observations[1]
-        assert(secondObservation.position.x == 114)
-        assert(secondObservation.position.y == 33)
-        assert(secondObservation.position.z == 19)
-        assert(secondObservation.previousPosition.x == 113)
-        assert(secondObservation.previousPosition.y == 32)
-        assert(secondObservation.previousPosition.z == 18)
+        assert(secondObservation.position.x == 104)
+        assert(secondObservation.position.y == 23)
+        assert(secondObservation.position.z == 9)
+        assert(secondObservation.previousPosition.x == 103)
+        assert(secondObservation.previousPosition.y == 22)
+        assert(secondObservation.previousPosition.z == 8)
         assert(second.stamp == 13.5)
         assert(secondObservation.stamp == 13.5)
 
@@ -107,6 +110,14 @@ def main() -> int:
         """
     )
     assert result is True
+    assert "GetTargetPositionInfo" not in SOURCE.read_text(encoding="utf-8")
+    tracking_source = TRACKING_SOURCE.read_text(encoding="utf-8")
+    assert "GetTargetPositionInfo" not in tracking_source
+    assert "RingBuffer.push(e.pos, target.Position)" in tracking_source
+    assert "RingBuffer.push(e.vel, target.Velocity)" in tracking_source
+    legacy_source = LEGACY_SOURCE.read_text(encoding="utf-8")
+    assert "GetTargetPositionInfo" not in legacy_source
+    assert "detectionError" not in legacy_source
     print("Counterbattery target/aimpoint semantics: ok")
     return 0
 

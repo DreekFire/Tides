@@ -317,7 +317,6 @@ function CoreUpdate(I)
   if not target or not target.Valid then
     return
   end
-  local targetPosition = I:GetTargetPositionInfo(mainframeIdx, 0)
   currentTargetId = target.Id
 
   local enemy = enemies[currentTargetId]
@@ -393,7 +392,7 @@ function CoreUpdate(I)
   local eRot = enemy.rotation[enemy.rotation.size] or Quaternion.identity
   if origin then
     I:Log("Aiming at origin, type "..origin.type)
-    fp = eRot * origin.position + aimOffset(origin, targetPosition.Position, targetPosition.Velocity, eRot, true)
+    fp = eRot * origin.position + aimOffset(origin, target.Position, target.Velocity, eRot, true)
     local acbPass = PerformACBCheck(I, fp, target)
     if not acbPass then
       origin = nil
@@ -402,12 +401,13 @@ function CoreUpdate(I)
   end
   if not fp then
     I:Log("Aiming at AI aimpoint")
+    -- AimPointPosition is world-space; express it relative to the true COM.
     fp = target.AimPointPosition - target.Position
-    fp = fp + aimOffset(fp, targetPosition.Position, targetPosition.Velocity, eRot, false)
+    fp = fp + aimOffset(fp, target.Position, target.Velocity, eRot, false)
   end
 
   local ready = origin ~= nil
-  FireAtFirepoint(I, fp, target, targetPosition, ready)
+  FireAtFirepoint(I, fp, target, ready)
 end
 
 function UpdateEnemyData(I)
@@ -416,7 +416,6 @@ function UpdateEnemyData(I)
   end
   for tarIdx = 0, I:GetNumberOfTargets(mainframeIdx) - 1 do
     local target = I:GetTargetInfo(mainframeIdx, tarIdx)
-    local targetPosition = I:GetTargetPositionInfo(mainframeIdx, tarIdx)
     if target.Valid then
       if not enemies[target.Id] then
         local rbsize = targetTrackTime * TICKS_PER_S
@@ -438,8 +437,8 @@ function UpdateEnemyData(I)
       end
       local e = enemies[target.Id]
       e.valid = true
-      RingBuffer.push(e.pos, targetPosition.Position)
-      RingBuffer.push(e.vel, targetPosition.Velocity)
+      RingBuffer.push(e.pos, target.Position)
+      RingBuffer.push(e.vel, target.Velocity)
       RingBuffer.push(e.sampleTimes, t)
     end
   end
@@ -461,9 +460,8 @@ function UpdateEnemyData(I)
       local target = I:GetTargetInfo(tracker.idx, tarIdx)
       if target.Valid then
         local e = enemies[target.Id]
-        local detectionError = target.Position - I:GetTargetPositionInfo(tracker.idx, tarIdx).Position
-        e.oldAimpoints[idx] = e.aimpoints[idx] or (target.AimPointPosition - detectionError)
-        e.aimpoints[idx] = target.AimPointPosition - detectionError
+        e.oldAimpoints[idx] = e.aimpoints[idx] or target.AimPointPosition
+        e.aimpoints[idx] = target.AimPointPosition
       end
     end
   end
@@ -816,10 +814,9 @@ function PerformACBCheck(I, fp, target)
   end
 end
 
-function FireAtFirepoint(I, fp, target, targetPosition, ready)
+function FireAtFirepoint(I, fp, target, ready)
   if not ready and idleAim == "none" then return end
-  local fpAlt = fp.y + targetPosition.Position.y
-  local detectionError = target.Position - targetPosition.Position
+  local fpAlt = fp.y + target.Position.y
   for i, turret in ipairs(turrets) do
     if (fpAlt >= weaponDef[i].minAlt and fpAlt <= weaponDef[i].maxAlt and
       not weaponDef[i].ciwsAxis or I:GetCustomAxis(weaponDef[i].ciwsAxis) == 0) then
@@ -832,15 +829,15 @@ function FireAtFirepoint(I, fp, target, targetPosition, ready)
           aim = lastAim
         elseif not wInfo.PlayerCurrentlyControllingIt then
           if mv == math.huge then
-            local range = (fp + targetPosition.Position - I:GetConstructPosition()).magnitude
+            local range = (fp + target.Position - I:GetConstructPosition()).magnitude
             if range > (weaponDef[i].minRange or 0) and range < (weaponDef[i].maxRange or math.huge) then
-              aim = fp + targetPosition.Position - wInfo.GlobalFirePoint
+              aim = fp + target.Position - wInfo.GlobalFirePoint
               fire = ready
             end
           else
-            local g = 0.5 * (I:GetGravityForAltitude(I:GetConstructPosition().y) + I:GetGravityForAltitude(targetPosition.Position.y))
-            aim, interceptTime = Targeting.secondOrderTargeting(fp + targetPosition.Position - wInfo.GlobalFirePoint,
-                        targetPosition.Velocity - I:GetVelocityVector(),
+            local g = 0.5 * (I:GetGravityForAltitude(I:GetConstructPosition().y) + I:GetGravityForAltitude(target.Position.y))
+            aim, interceptTime = Targeting.secondOrderTargeting(fp + target.Position - wInfo.GlobalFirePoint,
+                        target.Velocity - I:GetVelocityVector(),
                         -g,
                         mv, weaponDef[i].minRange, weaponDef[i].maxRange, weapon.lastT or nil)
             if aim then fire = ready end
@@ -854,7 +851,9 @@ function FireAtFirepoint(I, fp, target, targetPosition, ready)
         end
         if not aim then
           if idleAim == "enemy" or idleAim == "fire" or idleAim == "timer" then
-            aim = target.AimPointPosition - detectionError - wInfo.GlobalFirePoint
+            -- Use the aimpoint offset from the true target COM.  No detected
+            -- COM compensation belongs in this fallback path.
+            aim = target.AimPointPosition - target.Position - wInfo.GlobalFirePoint
           end
         end
         if aim then

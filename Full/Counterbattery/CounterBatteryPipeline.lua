@@ -320,7 +320,6 @@ function CoreUpdate(I)
   if not target or not target.Valid then
     return
   end
-  local targetPosition = I:GetTargetPositionInfo(mainframeIdx, 0)
   currentTargetId = target.Id
 
   local enemy = enemies[currentTargetId]
@@ -396,7 +395,7 @@ function CoreUpdate(I)
   local eRot = enemy.rotation[enemy.rotation.size] or Quaternion.identity
   if origin then
     I:Log("Aiming at origin, type "..origin.type)
-    fp = eRot * origin.position + aimOffset(origin, targetPosition.Position, targetPosition.Velocity, eRot, true)
+    fp = eRot * origin.position + aimOffset(origin, target.Position, target.Velocity, eRot, true)
     local acbPass = PerformACBCheck(I, fp, target)
     if not acbPass then
       origin = nil
@@ -405,12 +404,13 @@ function CoreUpdate(I)
   end
   if not fp then
     I:Log("Aiming at AI aimpoint")
+    -- AimPointPosition is world-space; express it relative to the true COM.
     fp = target.AimPointPosition - target.Position
-    fp = fp + aimOffset(fp, targetPosition.Position, targetPosition.Velocity, eRot, false)
+    fp = fp + aimOffset(fp, target.Position, target.Velocity, eRot, false)
   end
 
   local ready = origin ~= nil
-  FireAtFirepoint(I, fp, target, targetPosition, ready)
+  FireAtFirepoint(I, fp, target, ready)
 end
 
 function UpdateEnemyData(I)
@@ -419,7 +419,6 @@ function UpdateEnemyData(I)
   end
   for tarIdx = 0, I:GetNumberOfTargets(mainframeIdx) - 1 do
     local target = I:GetTargetInfo(mainframeIdx, tarIdx)
-    local targetPosition = I:GetTargetPositionInfo(mainframeIdx, tarIdx)
     if target.Valid then
       if not enemies[target.Id] then
         local rbsize = targetTrackTime * TICKS_PER_S
@@ -441,8 +440,8 @@ function UpdateEnemyData(I)
       end
       local e = enemies[target.Id]
       e.valid = true
-      RingBuffer.push(e.pos, targetPosition.Position)
-      RingBuffer.push(e.vel, targetPosition.Velocity)
+      RingBuffer.push(e.pos, target.Position)
+      RingBuffer.push(e.vel, target.Velocity)
       RingBuffer.push(e.sampleTimes, t)
     end
   end
@@ -464,9 +463,8 @@ function UpdateEnemyData(I)
       local target = I:GetTargetInfo(tracker.idx, tarIdx)
       if target.Valid then
         local e = enemies[target.Id]
-        local detectionError = target.Position - I:GetTargetPositionInfo(tracker.idx, tarIdx).Position
-        e.oldAimpoints[idx] = e.aimpoints[idx] or (target.AimPointPosition - detectionError)
-        e.aimpoints[idx] = target.AimPointPosition - detectionError
+        e.oldAimpoints[idx] = e.aimpoints[idx] or target.AimPointPosition
+        e.aimpoints[idx] = target.AimPointPosition
       end
     end
   end
@@ -819,10 +817,9 @@ function PerformACBCheck(I, fp, target)
   end
 end
 
-function FireAtFirepoint(I, fp, target, targetPosition, ready)
+function FireAtFirepoint(I, fp, target, ready)
   if not ready and idleAim == "none" then return end
-  local fpAlt = fp.y + targetPosition.Position.y
-  local detectionError = target.Position - targetPosition.Position
+  local fpAlt = fp.y + target.Position.y
   for i, turret in ipairs(turrets) do
     if (fpAlt >= weaponDef[i].minAlt and fpAlt <= weaponDef[i].maxAlt and
       not weaponDef[i].ciwsAxis or I:GetCustomAxis(weaponDef[i].ciwsAxis) == 0) then
@@ -835,15 +832,15 @@ function FireAtFirepoint(I, fp, target, targetPosition, ready)
           aim = lastAim
         elseif not wInfo.PlayerCurrentlyControllingIt then
           if mv == math.huge then
-            local range = (fp + targetPosition.Position - I:GetConstructPosition()).magnitude
+            local range = (fp + target.Position - I:GetConstructPosition()).magnitude
             if range > (weaponDef[i].minRange or 0) and range < (weaponDef[i].maxRange or math.huge) then
-              aim = fp + targetPosition.Position - wInfo.GlobalFirePoint
+              aim = fp + target.Position - wInfo.GlobalFirePoint
               fire = ready
             end
           else
-            local g = 0.5 * (I:GetGravityForAltitude(I:GetConstructPosition().y) + I:GetGravityForAltitude(targetPosition.Position.y))
-            aim, interceptTime = Targeting.secondOrderTargeting(fp + targetPosition.Position - wInfo.GlobalFirePoint,
-                        targetPosition.Velocity - I:GetVelocityVector(),
+            local g = 0.5 * (I:GetGravityForAltitude(I:GetConstructPosition().y) + I:GetGravityForAltitude(target.Position.y))
+            aim, interceptTime = Targeting.secondOrderTargeting(fp + target.Position - wInfo.GlobalFirePoint,
+                        target.Velocity - I:GetVelocityVector(),
                         -g,
                         mv, weaponDef[i].minRange, weaponDef[i].maxRange, weapon.lastT or nil)
             if aim then fire = ready end
@@ -857,7 +854,9 @@ function FireAtFirepoint(I, fp, target, targetPosition, ready)
         end
         if not aim then
           if idleAim == "enemy" or idleAim == "fire" or idleAim == "timer" then
-            aim = target.AimPointPosition - detectionError - wInfo.GlobalFirePoint
+            -- Use the aimpoint offset from the true target COM.  No detected
+            -- COM compensation belongs in this fallback path.
+            aim = target.AimPointPosition - target.Position - wInfo.GlobalFirePoint
           end
         end
         if aim then
@@ -3416,7 +3415,6 @@ function TargetTracking:update(I, stamp)
   end
   for tarIdx = 0, I:GetNumberOfTargets(mainframeIdx) - 1 do
     local target = I:GetTargetInfo(mainframeIdx, tarIdx)
-    local targetPosition = I:GetTargetPositionInfo(mainframeIdx, tarIdx)
     if target.Valid then
       if not enemies[target.Id] then
         local rbsize = self.targetTrackTime * self.TICKS_PER_S
@@ -3438,8 +3436,11 @@ function TargetTracking:update(I, stamp)
       end
       local e = enemies[target.Id]
       e.valid = true
-      RingBuffer.push(e.pos, targetPosition.Position)
-      RingBuffer.push(e.vel, targetPosition.Velocity)
+      -- TargetInfo is the authoritative state.  Do not replace this with the
+      -- noisy detected-position API when ground truth is available.
+      e.trueCenterOfMass = target.Position
+      RingBuffer.push(e.pos, target.Position)
+      RingBuffer.push(e.vel, target.Velocity)
       -- Keep the actual sample time beside the position and velocity.  The
       -- old solver reconstructed time from the ring index, which is only
       -- exact when UpdateEnemyData runs at a perfectly uniform cadence.
@@ -3464,6 +3465,7 @@ function TargetTracking:update(I, stamp)
       state = en,
       position = en.pos[en.pos.size],
       velocity = en.vel[en.vel.size],
+      trueCenterOfMass = en.trueCenterOfMass,
       positionHistory = en.pos,
       velocityHistory = en.vel,
       sampleTimeHistory = en.sampleTimes,
@@ -3478,19 +3480,20 @@ end
 
 -- BEGIN Full/Counterbattery/Pipeline/TargetAimpoint.lua
 -- target/aimpoint
--- Mainframe aimpoint observations normalized against each mainframe's target
--- position estimate.  The underlying target/track product is not modified.
+-- Mainframe aimpoint observations.  The underlying target/track product is
+-- not modified.
 --
--- `position` is deliberately world-space.  The normalization is:
+-- `TargetInfo.Position` is the authoritative target center of mass and
+-- `TargetInfo.AimPointPosition` is already a world-space aimpoint.
+-- The counterbattery pipeline deliberately does not consume TargetPositionInfo:
+-- detected COM measurements only add noise when ground truth is available.
 --
---   TargetPositionInfo.Position
---     + (AimPointPosition - TargetInfo.Position)
+-- `position` stays world-space so target/rotation can estimate rotation from
+-- corresponding aimpoints.  `relativePosition` is the same observation
+-- expressed relative to the true target center of mass for geometry stages.
 --
--- This preserves the target-relative offset reported by one mainframe while
--- translating it onto that mainframe's target-position estimate.  It is not a
--- center-of-mass claim and it is not rotation-corrected here.  TargetRotation
--- needs these world-space points, and TargetDensity applies the inverse tracked
--- rotation after subtracting the target track position.
+-- No rotation is applied here; target/rotation needs the world-space points
+-- before it estimates the current rotation.
 local TargetAimpoint = {}
 
 function TargetAimpoint.new(config)
@@ -3509,9 +3512,9 @@ function TargetAimpoint:update(I, tracks, stamp)
       local target = I:GetTargetInfo(tracker.idx, tarIdx)
       if target.Valid then
         local e = self.enemies[target.Id]
-        local detectionError = target.Position - I:GetTargetPositionInfo(tracker.idx, tarIdx).Position
-        e.oldAimpoints[idx] = e.aimpoints[idx] or (target.AimPointPosition - detectionError)
-        e.aimpoints[idx] = target.AimPointPosition - detectionError
+        local aimpoint = target.AimPointPosition
+        e.oldAimpoints[idx] = e.aimpoints[idx] or aimpoint
+        e.aimpoints[idx] = aimpoint
 
         observations[target.Id] = observations[target.Id] or {}
         observations[target.Id][idx] = CounterbatteryTypes.product(
@@ -3520,6 +3523,8 @@ function TargetAimpoint:update(I, tracks, stamp)
             sourceId = tracker.idx,
             position = e.aimpoints[idx],
             previousPosition = e.oldAimpoints[idx],
+            trueCenterOfMass = target.Position,
+            relativePosition = aimpoint - target.Position,
             state = e,
           })
       end
@@ -3531,6 +3536,7 @@ function TargetAimpoint:update(I, tracks, stamp)
     byId[id] = CounterbatteryTypes.product("target/aimpoint", id, stamp, {
       frame = "world",
       observations = observations[id] or {},
+      trueCenterOfMass = track.trueCenterOfMass,
       oldAimpoints = track.state.oldAimpoints,
       aimpoints = track.state.aimpoints,
       state = track.state,
@@ -3828,10 +3834,11 @@ function TargetDensity:update(I, tracks, aimpoints, rotations, stamp)
       local nTrack = #en.aimpoints
       local refIdx = consensusPoints[1]
       local invRot = Quaternion.Inverse(en.rotation[en.rotation.size])
+      local trueCenterOfMass = track.trueCenterOfMass or en.trueCenterOfMass
       for i = 1, nTrack do
         local predicted = dRot * (en.oldAimpoints[i] - en.oldAimpoints[refIdx]) + en.aimpoints[refIdx]
         if (predicted - en.aimpoints[i]).sqrMagnitude > 3 * 3 then
-          table.insert(changedAimpoints, invRot * (en.aimpoints[i] - en.pos[en.pos.size]))
+          table.insert(changedAimpoints, invRot * (en.aimpoints[i] - trueCenterOfMass))
         end
       end
       -- Only update distribution if aimpoint has changed

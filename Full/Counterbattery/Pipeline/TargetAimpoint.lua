@@ -1,17 +1,18 @@
 -- target/aimpoint
--- Mainframe aimpoint observations normalized against each mainframe's target
--- position estimate.  The underlying target/track product is not modified.
+-- Mainframe aimpoint observations.  The underlying target/track product is
+-- not modified.
 --
--- `position` is deliberately world-space.  The normalization is:
+-- `TargetInfo.Position` is the authoritative target center of mass and
+-- `TargetInfo.AimPointPosition` is already a world-space aimpoint.
+-- The counterbattery pipeline deliberately does not consume TargetPositionInfo:
+-- detected COM measurements only add noise when ground truth is available.
 --
---   TargetPositionInfo.Position
---     + (AimPointPosition - TargetInfo.Position)
+-- `position` stays world-space so target/rotation can estimate rotation from
+-- corresponding aimpoints.  `relativePosition` is the same observation
+-- expressed relative to the true target center of mass for geometry stages.
 --
--- This preserves the target-relative offset reported by one mainframe while
--- translating it onto that mainframe's target-position estimate.  It is not a
--- center-of-mass claim and it is not rotation-corrected here.  TargetRotation
--- needs these world-space points, and TargetDensity applies the inverse tracked
--- rotation after subtracting the target track position.
+-- No rotation is applied here; target/rotation needs the world-space points
+-- before it estimates the current rotation.
 local TargetAimpoint = {}
 
 function TargetAimpoint.new(config)
@@ -30,9 +31,9 @@ function TargetAimpoint:update(I, tracks, stamp)
       local target = I:GetTargetInfo(tracker.idx, tarIdx)
       if target.Valid then
         local e = self.enemies[target.Id]
-        local detectionError = target.Position - I:GetTargetPositionInfo(tracker.idx, tarIdx).Position
-        e.oldAimpoints[idx] = e.aimpoints[idx] or (target.AimPointPosition - detectionError)
-        e.aimpoints[idx] = target.AimPointPosition - detectionError
+        local aimpoint = target.AimPointPosition
+        e.oldAimpoints[idx] = e.aimpoints[idx] or aimpoint
+        e.aimpoints[idx] = aimpoint
 
         observations[target.Id] = observations[target.Id] or {}
         observations[target.Id][idx] = CounterbatteryTypes.product(
@@ -41,6 +42,8 @@ function TargetAimpoint:update(I, tracks, stamp)
             sourceId = tracker.idx,
             position = e.aimpoints[idx],
             previousPosition = e.oldAimpoints[idx],
+            trueCenterOfMass = target.Position,
+            relativePosition = aimpoint - target.Position,
             state = e,
           })
       end
@@ -52,6 +55,7 @@ function TargetAimpoint:update(I, tracks, stamp)
     byId[id] = CounterbatteryTypes.product("target/aimpoint", id, stamp, {
       frame = "world",
       observations = observations[id] or {},
+      trueCenterOfMass = track.trueCenterOfMass,
       oldAimpoints = track.state.oldAimpoints,
       aimpoints = track.state.aimpoints,
       state = track.state,

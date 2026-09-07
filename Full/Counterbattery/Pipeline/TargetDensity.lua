@@ -23,10 +23,11 @@ function TargetDensity:update(I, tracks, aimpoints, rotations, stamp)
       local nTrack = #en.aimpoints
       local refIdx = consensusPoints[1]
       local invRot = Quaternion.Inverse(en.rotation[en.rotation.size])
+      local trueCenterOfMass = track.trueCenterOfMass or en.trueCenterOfMass
       for i = 1, nTrack do
         local predicted = dRot * (en.oldAimpoints[i] - en.oldAimpoints[refIdx]) + en.aimpoints[refIdx]
         if (predicted - en.aimpoints[i]).sqrMagnitude > 3 * 3 then
-          table.insert(changedAimpoints, invRot * (en.aimpoints[i] - en.pos[en.pos.size]))
+          table.insert(changedAimpoints, invRot * (en.aimpoints[i] - trueCenterOfMass))
         end
       end
       -- Only update distribution if aimpoint has changed

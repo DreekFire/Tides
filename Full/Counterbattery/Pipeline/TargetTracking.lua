@@ -35,7 +35,6 @@ function TargetTracking:update(I, stamp)
   end
   for tarIdx = 0, I:GetNumberOfTargets(mainframeIdx) - 1 do
     local target = I:GetTargetInfo(mainframeIdx, tarIdx)
-    local targetPosition = I:GetTargetPositionInfo(mainframeIdx, tarIdx)
     if target.Valid then
       if not enemies[target.Id] then
         local rbsize = self.targetTrackTime * self.TICKS_PER_S
@@ -57,8 +56,11 @@ function TargetTracking:update(I, stamp)
       end
       local e = enemies[target.Id]
       e.valid = true
-      RingBuffer.push(e.pos, targetPosition.Position)
-      RingBuffer.push(e.vel, targetPosition.Velocity)
+      -- TargetInfo is the authoritative state.  Do not replace this with the
+      -- noisy detected-position API when ground truth is available.
+      e.trueCenterOfMass = target.Position
+      RingBuffer.push(e.pos, target.Position)
+      RingBuffer.push(e.vel, target.Velocity)
       -- Keep the actual sample time beside the position and velocity.  The
       -- old solver reconstructed time from the ring index, which is only
       -- exact when UpdateEnemyData runs at a perfectly uniform cadence.
@@ -83,6 +85,7 @@ function TargetTracking:update(I, stamp)
       state = en,
       position = en.pos[en.pos.size],
       velocity = en.vel[en.vel.size],
+      trueCenterOfMass = en.trueCenterOfMass,
       positionHistory = en.pos,
       velocityHistory = en.vel,
       sampleTimeHistory = en.sampleTimes,

@@ -6,9 +6,12 @@
   records and collections; products use names such as `target/track` and
   `target/density` without mutating earlier products.
 - `Full/Counterbattery/Pipeline/TargetTracking.lua` — target history and
-  target-owned state, copied from the original target update path.
+  target-owned state, copied from the original target update path; uses the
+  authoritative `TargetInfo.Position`/`Velocity` state directly.
 - `Full/Counterbattery/Pipeline/TargetAimpoint.lua` — aimpoint observation
-  enrichment, copied from the original mainframe aimpoint path.
+  enrichment, copied from the original mainframe aimpoint path; uses direct
+  world-space aimpoints and true COM-relative offsets without detected-COM
+  compensation.
 - `Full/Counterbattery/Pipeline/TargetRotation.lua` — rotation product and
   copied rotation estimator.
 - `Full/Counterbattery/Pipeline/TargetDensity.lua` — density product and
