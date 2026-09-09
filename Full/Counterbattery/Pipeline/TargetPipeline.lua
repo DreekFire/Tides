@@ -12,6 +12,7 @@ local FEATURE_ALIASES = {
   ["projectile-estimation"] = "projectileEstimation",
   ["weapon-rate-of-fire"] = "weaponRateOfFire",
   ["track-deduplication"] = "trackDeduplication",
+  ["projectile-health"] = "projectileHealth",
   ["debug-visualization"] = "debugVisualization",
 }
 
@@ -21,11 +22,14 @@ local function featureEnabled(config, name, legacyName)
   if features and features[name] ~= nil then return features[name] == true end
   if features and alias and features[alias] ~= nil then return features[alias] == true end
   if legacyName and config[legacyName] ~= nil then return config[legacyName] == true end
-  return name ~= "debug-visualization"
+  return name ~= "debug-visualization" and name ~= "projectile-health"
 end
 
 function CounterbatteryPipeline.new(config)
   config = config or {}
+  if featureEnabled(config, "projectile-health", "projectileHealth") then
+    error("counterbattery projectile health is a placeholder; damage measurement is not implemented", 0)
+  end
   if config.features or config.enabledFeatures then
     -- The debug stage has its own renderer flag for standalone use.  Keep it
     -- synchronized with the module flag when the pipeline is configured as a
@@ -40,6 +44,7 @@ function CounterbatteryPipeline.new(config)
     targetOrientation = TargetOrientation.new(config),
     targetDensity = TargetDensity.new(config),
     trackDeduplication = TargetTrackDeduplication.new(config),
+    projectileHealth = CounterbatteryProjectileHealth.new(config),
     debugVisualization = CounterbatteryDebugVisualization.new(config),
     lastProjectileObservation = nil,
     lastMissileObservation = nil,
@@ -133,6 +138,19 @@ function CounterbatteryPipeline.new(config)
       update = function(context)
         return pipeline.trackDeduplication:update(context.I,
           context.outputs["target/density"], context.stamp)
+      end,
+    },
+    {
+      name = "projectile-health",
+      -- This is an explicit future boundary, not a no-op implementation.
+      -- Enabling it is rejected above until damage observations exist.
+      enabled = false,
+      requires = {"target/track-cluster"},
+      provides = {"target/track-cluster/projectile-health"},
+      update = function(context)
+        return pipeline.projectileHealth:update(
+          context.I, context.outputs["target/track-cluster"],
+          context.damageObservations, context.stamp)
       end,
     },
     {

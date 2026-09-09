@@ -47,6 +47,9 @@ local numOrigins = 3
 local trackClusterDistance = 5
 -- Ballistic detections this close to a missile warning are not ballistic.
 local missileOverlapDistance = 5
+-- Shell-health estimation is a disabled boundary until projectile damage
+-- observations are produced by a separate module.
+local counterbatteryProjectileHealth = false
 -- ALE-backed in-world diagnostics are opt-in and harmless in vanilla FtD.
 local counterbatteryDebugVisualization = false
 local counterbatteryDebugVisualizationDuration = 2
@@ -64,6 +67,7 @@ local counterbatteryFeatures = {
   ["projectile-estimation"] = true,
   ["weapon-rate-of-fire"] = true,
   ["track-deduplication"] = true,
+  ["projectile-health"] = counterbatteryProjectileHealth,
   ["debug-visualization"] = false,
 }
 -- time between switching targets

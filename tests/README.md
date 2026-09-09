@@ -25,6 +25,13 @@ plus-stop, and child-exception cases automatically. `warnOnConflict` is the
 default in `ModuleExample.lua`; `silent` still records readers and writers but
 does not warn or stop, while `off` skips tracking and conflict inspection.
 
+The counterbattery-focused regression scripts are run individually with the
+project-local interpreter. The shell-health contract is checked with:
+
+```sh
+.venv/bin/python tests/counterbattery_projectile_health_test.py
+```
+
 The manager keeps one endpoint tree for writers (`out`) and an equivalent tree
 for readers (`readers`). Both are per-tick registries and are cleared after
 conflict inspection. Child assertions inspect them before that clear.

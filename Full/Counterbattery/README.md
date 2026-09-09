@@ -23,8 +23,10 @@ Products are separate values keyed by target ID.  Pipeline stages may retain
 private history, but they do not add fields to or replace the preceding
 product.
 
-The pipeline is driven by an output-based module graph.  Individual stages can
-be enabled with `config.features`, for example:
+The pipeline is driven by a synchronous, output-based module graph. It is not
+yet wired to the coroutine-based manager used by `ModuleExample.lua`; that
+manager remains a separate reference implementation and integration test.
+Individual stages can be enabled with `config.features`, for example:
 
 ```lua
 features = {
@@ -37,6 +39,7 @@ features = {
   ["projectile-estimation"] = true,
   ["weapon-rate-of-fire"] = true,
   ["track-deduplication"] = true,
+  ["projectile-health"] = false,
   ["debug-visualization"] = false,
 }
 ```
@@ -58,6 +61,12 @@ conservative bounds rather than as a fabricated exact detection distance.
 `Pipeline/ProjectileEstimation.lua` records the sensor projectile stream,
 including missed ticks and reacquisition intervals. `Pipeline/WeaponRateOfFire.lua`
 associates reconstructed lines over time and estimates firing cadence.
+
+`Pipeline/ProjectileHealth.lua` reserves the typed
+`target/track-cluster/projectile-health` boundary for a future module that
+measures per-projectile damage. It is disabled in the canonical launcher and
+rejects explicit enablement until that producer exists; no shell-health value
+is inferred from the existing range, velocity, or rate-of-fire observations.
 
 `Pipeline/TargetSubobjectAimpoint.lua` compares true-CoM-relative aimpoints
 with the main-body rotation product. Residual points are published as a

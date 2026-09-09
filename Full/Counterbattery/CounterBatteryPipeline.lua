@@ -50,6 +50,9 @@ local numOrigins = 3
 local trackClusterDistance = 5
 -- Ballistic detections this close to a missile warning are not ballistic.
 local missileOverlapDistance = 5
+-- Shell-health estimation is a disabled boundary until projectile damage
+-- observations are produced by a separate module.
+local counterbatteryProjectileHealth = false
 -- ALE-backed in-world diagnostics are opt-in and harmless in vanilla FtD.
 local counterbatteryDebugVisualization = false
 local counterbatteryDebugVisualizationDuration = 2
@@ -67,6 +70,7 @@ local counterbatteryFeatures = {
   ["projectile-estimation"] = true,
   ["weapon-rate-of-fire"] = true,
   ["track-deduplication"] = true,
+  ["projectile-health"] = counterbatteryProjectileHealth,
   ["debug-visualization"] = false,
 }
 -- time between switching targets
@@ -5282,6 +5286,52 @@ end
 _G.TargetTrackDeduplication = TargetTrackDeduplication
 -- END Full/Counterbattery/Pipeline/TrackDeduplication.lua
 
+-- BEGIN Full/Counterbattery/Pipeline/ProjectileHealth.lua
+-- target/track-cluster/projectile-health
+-- Placeholder boundary for the future projectile-damage measurement module.
+--
+-- FtD does not currently provide the per-projectile damage observations this
+-- product needs.  Do not infer shell health from detection range, muzzle
+-- velocity, or rate of fire: those are different observables.  The boundary
+-- stays disabled until a producer can supply damage deltas for a tracked
+-- projectile.
+local CounterbatteryProjectileHealth = {}
+
+local PATH = "target/track-cluster/projectile-health"
+
+function CounterbatteryProjectileHealth.new(config)
+  return setmetatable({config = config or {}, enabled = false},
+    {__index = CounterbatteryProjectileHealth})
+end
+
+function CounterbatteryProjectileHealth.placeholder(targetId, stamp)
+  return CounterbatteryTypes.product(PATH, targetId, stamp, {
+    enabled = false,
+    available = false,
+    estimate = nil,
+    lowerBound = nil,
+    upperBound = nil,
+    sampleCount = 0,
+    source = "projectile-damage-measurement",
+    reason = "damage-measurement-producer-not-implemented",
+  })
+end
+
+function CounterbatteryProjectileHealth:isAvailable()
+  return false
+end
+
+function CounterbatteryProjectileHealth:update()
+  error("counterbattery projectile health requires the unimplemented damage-measurement producer", 0)
+end
+
+function CounterbatteryProjectileHealth:observeDamage()
+  error("counterbattery projectile health cannot observe damage until its producer is implemented", 0)
+end
+
+_G.CounterbatteryProjectileHealth = CounterbatteryProjectileHealth
+-- END Full/Counterbattery/Pipeline/ProjectileHealth.lua
+
 -- BEGIN Full/Counterbattery/Pipeline/DebugVisualization.lua
 -- debug/counterbattery-visualization
 --
@@ -5553,6 +5603,7 @@ local FEATURE_ALIASES = {
   ["projectile-estimation"] = "projectileEstimation",
   ["weapon-rate-of-fire"] = "weaponRateOfFire",
   ["track-deduplication"] = "trackDeduplication",
+  ["projectile-health"] = "projectileHealth",
   ["debug-visualization"] = "debugVisualization",
 }
 
@@ -5562,11 +5613,14 @@ local function featureEnabled(config, name, legacyName)
   if features and features[name] ~= nil then return features[name] == true end
   if features and alias and features[alias] ~= nil then return features[alias] == true end
   if legacyName and config[legacyName] ~= nil then return config[legacyName] == true end
-  return name ~= "debug-visualization"
+  return name ~= "debug-visualization" and name ~= "projectile-health"
 end
 
 function CounterbatteryPipeline.new(config)
   config = config or {}
+  if featureEnabled(config, "projectile-health", "projectileHealth") then
+    error("counterbattery projectile health is a placeholder; damage measurement is not implemented", 0)
+  end
   if config.features or config.enabledFeatures then
     -- The debug stage has its own renderer flag for standalone use.  Keep it
     -- synchronized with the module flag when the pipeline is configured as a
@@ -5581,6 +5635,7 @@ function CounterbatteryPipeline.new(config)
     targetOrientation = TargetOrientation.new(config),
     targetDensity = TargetDensity.new(config),
     trackDeduplication = TargetTrackDeduplication.new(config),
+    projectileHealth = CounterbatteryProjectileHealth.new(config),
     debugVisualization = CounterbatteryDebugVisualization.new(config),
     lastProjectileObservation = nil,
     lastMissileObservation = nil,
@@ -5674,6 +5729,19 @@ function CounterbatteryPipeline.new(config)
       update = function(context)
         return pipeline.trackDeduplication:update(context.I,
           context.outputs["target/density"], context.stamp)
+      end,
+    },
+    {
+      name = "projectile-health",
+      -- This is an explicit future boundary, not a no-op implementation.
+      -- Enabling it is rejected above until damage observations exist.
+      enabled = false,
+      requires = {"target/track-cluster"},
+      provides = {"target/track-cluster/projectile-health"},
+      update = function(context)
+        return pipeline.projectileHealth:update(
+          context.I, context.outputs["target/track-cluster"],
+          context.damageObservations, context.stamp)
       end,
     },
     {
