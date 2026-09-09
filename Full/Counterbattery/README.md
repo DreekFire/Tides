@@ -23,9 +23,11 @@ Products are separate values keyed by target ID.  Pipeline stages may retain
 private history, but they do not add fields to or replace the preceding
 product.
 
-The pipeline is driven by a synchronous, output-based module graph. It is not
-yet wired to the coroutine-based manager used by `ModuleExample.lua`; that
-manager remains a separate reference implementation and integration test.
+The pipeline uses the coroutine lifecycle model from `ModuleExample.lua`:
+each enabled feature has a private coroutine, and the manager resumes those
+coroutines in dependency order. Module failures are logged, retried according
+to their policy, and optionally stop the manager. A failed prerequisite blocks
+its dependents for that tick.
 Individual stages can be enabled with `config.features`, for example:
 
 ```lua

@@ -1,9 +1,9 @@
--- Dependency-aware module scheduler used by the modular Counterbattery.
+-- Dependency-aware coroutine module manager used by the modular Counterbattery.
 --
 -- A module declares the products it provides and the products it consumes.
--- Enabled modules are topologically sorted once at construction time.  A
--- missing prerequisite and a dependency cycle are configuration errors, not
--- runtime ordering accidents.
+-- Enabled modules are topologically sorted once at construction time, then
+-- resumed in that order once per tick. Each module has its own coroutine, and
+-- the manager owns initialization, retries, failures, and stop-on-error.
 local CounterbatteryModuleSystem = {}
 
 local function cycleMessage(stack, name)
@@ -29,16 +29,37 @@ local function normalizeDefinition(definition)
     requires = definition.requires or {},
     provides = definition.provides or {},
     update = definition.update,
+    retry = definition.retry or 0,
   }
 end
 
-function CounterbatteryModuleSystem.new(definitions)
+local function createCoroutine(definition)
+  return coroutine.create(function(context)
+    while true do
+      local output = definition.update(context)
+      context = coroutine.yield(output)
+    end
+  end)
+end
+
+local function log(context, message)
+  if context and context.I and context.I.Log then
+    context.I:Log(message)
+  end
+end
+
+function CounterbatteryModuleSystem.new(definitions, config)
   local system = {
     definitions = {},
     modules = {},
     order = {},
+    coroutines = {},
+    tries = {},
+    stopped = false,
+    stopOnError = not config or config.stopOnError ~= false,
   }
   local provider = {}
+  system.provider = provider
 
   for _, raw in ipairs(definitions or {}) do
     local definition = normalizeDefinition(raw)
@@ -76,18 +97,55 @@ function CounterbatteryModuleSystem.new(definitions)
   end
 
   for _, definition in ipairs(system.modules) do visit(definition.name) end
+  for _, definition in ipairs(system.order) do
+    system.coroutines[definition.name] = createCoroutine(definition)
+    system.tries[definition.name] = definition.retry + 1
+  end
   return setmetatable(system, {__index = CounterbatteryModuleSystem})
 end
 
 function CounterbatteryModuleSystem:update(context)
+  if self.stopped then return self.outputs or {} end
   context = context or {}
   context.outputs = context.outputs or {}
+  self.outputs = context.outputs
+  local failed = {}
   for _, definition in ipairs(self.order) do
-    local output = definition.update(context)
-    if output ~= nil then
-      assert(#definition.provides == 1,
-        "module " .. definition.name .. " returned an output but provides multiple products")
-      context.outputs[definition.provides[1]] = output
+    local blocked = false
+    for _, requirement in ipairs(definition.requires) do
+      local provider = self.provider[requirement]
+      if failed[provider] then
+        blocked = true
+        break
+      end
+    end
+    if blocked then
+      failed[definition.name] = true
+      log(context, "skipping module: " .. definition.name .. " (failed prerequisite)")
+    elseif self.tries[definition.name] <= 0 then
+      failed[definition.name] = true
+      log(context, "skipping module: " .. definition.name)
+    else
+      if self.tries[definition.name] <= definition.retry then
+        log(context, "retrying module: " .. definition.name)
+      end
+      local success, output = coroutine.resume(self.coroutines[definition.name], context)
+      if not success then
+        failed[definition.name] = true
+        self.tries[definition.name] = self.tries[definition.name] - 1
+        log(context, definition.name .. " encountered an error: " .. tostring(output))
+        if self.stopOnError then
+          self.stopped = true
+          break
+        end
+        if self.tries[definition.name] > 0 then
+          self.coroutines[definition.name] = createCoroutine(definition)
+        end
+      elseif output ~= nil then
+        assert(#definition.provides == 1,
+          "module " .. definition.name .. " returned an output but provides multiple products")
+        context.outputs[definition.provides[1]] = output
+      end
     end
   end
   return context.outputs

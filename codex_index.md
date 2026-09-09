@@ -50,12 +50,13 @@
 - `Full/Counterbattery/CounterBattery.lua` — legacy origin and missile-origin
   callers now use the same timestamp-to-ring-index adapter when the active
   solver is present; fixed-rate lookup remains only as standalone fallback.
-- `Full/Counterbattery/Pipeline/TargetPipeline.lua` — fixed-tick composition
-  of the typed products through the dependency-aware feature module graph;
-  feature flags live under `config.features` (camelCase aliases are accepted).
-- `Full/Counterbattery/Pipeline/ModuleSystem.lua` — generic output-based module
-  scheduler with deterministic topological ordering, missing-prerequisite
-  validation, and readable circular-dependency errors.
+- `Full/Counterbattery/Pipeline/TargetPipeline.lua` — composition of the typed
+  products through the dependency-aware coroutine module graph; feature flags
+  live under `config.features` (camelCase aliases are accepted).
+- `Full/Counterbattery/Pipeline/ModuleSystem.lua` — coroutine-backed module
+  manager with deterministic topological ordering, per-module lifecycle and
+  retry handling, missing-prerequisite validation, and readable circular-
+  dependency errors.
 - `Full/Counterbattery/Pipeline/Entry.lua` — dispatch adapter that preserves
   the legacy `UpdateEnemyData` call site.
 - `Full/Counterbattery/CounterBatteryPipeline.lua` — generated paste-ready

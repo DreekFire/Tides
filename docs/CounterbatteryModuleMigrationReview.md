@@ -1,6 +1,6 @@
 # Counterbattery module migration review
 
-Status: partial and intentionally incomplete.
+Status: coroutine-manager migration complete; projectile-health remains intentionally incomplete.
 
 The canonical counterbattery path is:
 
@@ -13,16 +13,15 @@ CounterBattery.lua:CoreUpdate
   → legacy firing and visualization consumers
 ```
 
-`Pipeline/ModuleSystem.lua` is a synchronous output-DAG scheduler. It does not
-create, resume, or yield coroutines. The coroutine-based manager currently
-lives only in `ModuleExample.lua` and its integration tests, so the
-counterbattery implementation has not completed that migration.
+`Pipeline/ModuleSystem.lua` combines the output-DAG scheduler with the
+coroutine lifecycle contract from `ModuleExample.lua`: it creates one
+coroutine per enabled module, resumes them in dependency order, logs failures,
+recreates retryable modules, and honors stop-on-error configuration.
 
-There is also existing composition debt: the graph entries named
-`projectile-estimation` and `weapon-rate-of-fire` currently provide dependency
-paths while the corresponding stateful work is still owned by
-`TrackDeduplication.lua`. They are not independent coroutine modules. This is
-left visible rather than described as completed modularization.
+The graph entries named `projectile-estimation` and `weapon-rate-of-fire`
+remain explicit dependency boundaries while their stateful work is owned by
+`TrackDeduplication.lua`; they still execute through the manager’s coroutine
+path and preserve the existing consumer contract.
 
 ## Shell-health boundary
 

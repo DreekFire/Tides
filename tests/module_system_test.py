@@ -26,6 +26,25 @@ def main() -> None:
     assert [names[index] for index in range(1, 3)] == ["producer", "consumer"]
     outputs = instance.update(instance, lua.table_from())
     assert outputs["b"] == 42
+    outputs = instance.update(instance, lua.table_from())
+    assert outputs["b"] == 42
+
+    lifecycle = lua.table_from({"calls": 0})
+    lifecycle_definitions = lua.table_from([
+        lua.table_from({
+            "name": "isolated",
+            "retry": 1,
+            "provides": lua.table_from(["isolated-output"]),
+            "update": lua.eval("function(c) c.lifecycle.calls = c.lifecycle.calls + 1; return c.lifecycle.calls end"),
+        }),
+    ])
+    lifecycle_system = system.new(lifecycle_definitions, lua.table_from({"stopOnError": False}))
+    first_context = lua.table_from({"lifecycle": lifecycle})
+    first_context = lifecycle_system.update(lifecycle_system, first_context)
+    assert first_context["isolated-output"] == 1
+    second_context = lua.table_from({"lifecycle": lifecycle})
+    second_context = lifecycle_system.update(lifecycle_system, second_context)
+    assert second_context["isolated-output"] == 2
 
     def assert_error(definitions, fragment):
         try:

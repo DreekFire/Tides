@@ -166,6 +166,8 @@ function CounterbatteryPipeline.new(config)
           context.stamp)
       end,
     },
+  }, {
+    stopOnError = config.stopOnModuleError,
   })
   return pipeline
 end
