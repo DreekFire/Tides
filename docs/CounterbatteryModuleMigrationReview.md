@@ -18,6 +18,11 @@ coroutine lifecycle contract from `ModuleExample.lua`: it creates one
 coroutine per enabled module, resumes them in dependency order, logs failures,
 recreates retryable modules, and honors stop-on-error configuration.
 
+The artifact builder applies the same function-scope technique to the
+concatenated pipeline source files. `NdArray.lua` and `Stats.lua` remain
+simple pasted package tables; their private helpers are underscore-prefixed
+members of those tables rather than generated-chunk locals.
+
 The graph entries named `projectile-estimation` and `weapon-rate-of-fire`
 remain explicit dependency boundaries while their stateful work is owned by
 `TrackDeduplication.lua`; they still execute through the manager’s coroutine

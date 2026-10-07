@@ -1,12 +1,12 @@
 Stats = Stats or {}
 
-local function assertFiniteWeight(weight)
+function Stats._statsAssertFiniteWeight(weight)
   assert(type(weight) == "number" and weight == weight and math.abs(weight) ~= math.huge,
     "distribution weights must be finite numbers")
   assert(weight >= 0, "distribution weights must be non-negative")
 end
 
-local function covarianceIndex(cov, row, col)
+function Stats._statsCovarianceIndex(cov, row, col)
   assert(type(cov) == "table" and cov.shape and cov.stride and cov.data,
     "distribution covariance must be an NdArray")
   assert(#cov.shape == 2 and cov.shape[1] == cov.shape[2],
@@ -15,15 +15,15 @@ local function covarianceIndex(cov, row, col)
       + (col - 1) * cov.stride[2] + 1
 end
 
-local function covarianceGet(cov, row, col)
-  return cov.data[covarianceIndex(cov, row, col)]
+function Stats._statsCovarianceGet(cov, row, col)
+  return cov.data[Stats._statsCovarianceIndex(cov, row, col)]
 end
 
-local function covarianceSet(cov, row, col, value)
-  cov.data[covarianceIndex(cov, row, col)] = value
+function Stats._statsCovarianceSet(cov, row, col, value)
+  cov.data[Stats._statsCovarianceIndex(cov, row, col)] = value
 end
 
-local function sampleValue(sample, variable, index)
+function Stats._statsSampleValue(sample, variable, index)
   if type(sample) == "table" and sample.shape and sample.stride and sample.data then
     assert(#sample.shape == 1, "vector samples must be rank-1 NdArrays")
     return sample.data[(sample.offset or 0) + (index - 1) * sample.stride[1] + 1]
@@ -31,7 +31,7 @@ local function sampleValue(sample, variable, index)
   return sample[variable]
 end
 
-local function vectorMean(distr)
+function Stats._statsVectorMean(distr)
   local mean = NdArray.zeros({#distr.vars}, "float")
   for i, variable in ipairs(distr.vars) do
     mean.data[i] = distr.mean[variable]
@@ -39,7 +39,7 @@ local function vectorMean(distr)
   return mean
 end
 
-local function mergeMoments(distr, incomingN, incomingMean, incomingCov)
+function Stats._statsMergeMoments(distr, incomingN, incomingMean, incomingCov)
   local oldN = distr.n
   assert(type(oldN) == "number" and oldN >= 0 and oldN == oldN and math.abs(oldN) ~= math.huge,
     "distribution count must be a finite non-negative number")
@@ -56,7 +56,7 @@ local function mergeMoments(distr, incomingN, incomingMean, incomingCov)
     distr.cov = newCov
   else
     local nVars = #distr.vars
-    local oldMean = vectorMean(distr)
+    local oldMean = Stats._statsVectorMean(distr)
     local delta = NdArray.zeros({nVars}, "float")
     local newMean = NdArray.zeros({nVars}, "float")
     for i = 1, nVars do
@@ -68,10 +68,10 @@ local function mergeMoments(distr, incomingN, incomingMean, incomingCov)
       distr.mean[variable] = newMean.data[i]
       for j = i, nVars do
         local correction = oldN * incomingN / newN * delta.data[i] * delta.data[j]
-        local value = (oldN * covarianceGet(distr.cov, i, j)
-            + incomingN * covarianceGet(incomingCov, i, j) + correction) / newN
-        covarianceSet(distr.cov, i, j, value)
-        covarianceSet(distr.cov, j, i, value)
+        local value = (oldN * Stats._statsCovarianceGet(distr.cov, i, j)
+            + incomingN * Stats._statsCovarianceGet(incomingCov, i, j) + correction) / newN
+        Stats._statsCovarianceSet(distr.cov, i, j, value)
+        Stats._statsCovarianceSet(distr.cov, j, i, value)
       end
     end
   end
@@ -98,18 +98,18 @@ end
 
 function Stats.updateDistribution(distr, sample, weight)
   weight = weight or 1
-  assertFiniteWeight(weight)
+  Stats._statsAssertFiniteWeight(weight)
   if weight == 0 then return end
 
   if distr.vars then
     local mean = NdArray.zeros({#distr.vars}, "float")
     for i, variable in ipairs(distr.vars) do
-      mean.data[i] = sampleValue(sample, variable, i)
+      mean.data[i] = Stats._statsSampleValue(sample, variable, i)
     end
     local cov = NdArray.zeros({#distr.vars, #distr.vars}, "float")
-    mergeMoments(distr, weight, mean, cov)
+    Stats._statsMergeMoments(distr, weight, mean, cov)
   else
-    mergeMoments(distr, weight, sample, 0)
+    Stats._statsMergeMoments(distr, weight, sample, 0)
   end
 end
 
@@ -118,7 +118,7 @@ function Stats.updateDistributionBatched(distr, samples, weights)
   local wSum = 0
   for j=1, #samples do
     local weight = weights and weights[j] or 1
-    assertFiniteWeight(weight)
+    Stats._statsAssertFiniteWeight(weight)
     wSum = wSum + weight
   end
   if wSum == 0 then return end
@@ -129,7 +129,7 @@ function Stats.updateDistributionBatched(distr, samples, weights)
     for sampleIndex, sample in ipairs(samples) do
       local weight = weights and weights[sampleIndex] or 1
       for i, variable in ipairs(distr.vars) do
-        mean.data[i] = mean.data[i] + weight * sampleValue(sample, variable, i)
+        mean.data[i] = mean.data[i] + weight * Stats._statsSampleValue(sample, variable, i)
       end
     end
     for i = 1, nVars do
@@ -140,20 +140,20 @@ function Stats.updateDistributionBatched(distr, samples, weights)
     for sampleIndex, sample in ipairs(samples) do
       local weight = weights and weights[sampleIndex] or 1
       for i, variableI in ipairs(distr.vars) do
-        local centeredI = sampleValue(sample, variableI, i) - mean.data[i]
+        local centeredI = Stats._statsSampleValue(sample, variableI, i) - mean.data[i]
         for j = i, nVars do
-          local centeredJ = sampleValue(sample, distr.vars[j], j) - mean.data[j]
-          covarianceSet(cov, i, j, covarianceGet(cov, i, j)
+          local centeredJ = Stats._statsSampleValue(sample, distr.vars[j], j) - mean.data[j]
+          Stats._statsCovarianceSet(cov, i, j, Stats._statsCovarianceGet(cov, i, j)
               + weight * centeredI * centeredJ / wSum)
         end
       end
     end
     for i = 1, nVars do
       for j = i + 1, nVars do
-        covarianceSet(cov, j, i, covarianceGet(cov, i, j))
+        Stats._statsCovarianceSet(cov, j, i, Stats._statsCovarianceGet(cov, i, j))
       end
     end
-    mergeMoments(distr, wSum, mean, cov)
+    Stats._statsMergeMoments(distr, wSum, mean, cov)
   else
     local mean = 0
     for i, sample in ipairs(samples) do
@@ -165,7 +165,7 @@ function Stats.updateDistributionBatched(distr, samples, weights)
       local centered = sample - mean
       cov = cov + (weights and weights[i] or 1) * centered * centered / wSum
     end
-    mergeMoments(distr, wSum, mean, cov)
+    Stats._statsMergeMoments(distr, wSum, mean, cov)
   end
 end
 
@@ -182,10 +182,10 @@ function Stats.mergeDistribution(distr, other)
       assert(other.vars[i] == variable, "distribution variable order must match")
       mean.data[i] = other.mean[variable]
     end
-    mergeMoments(distr, other.n, mean, other.cov)
+    Stats._statsMergeMoments(distr, other.n, mean, other.cov)
   else
     assert(not other.vars, "distribution dimensions must match")
-    mergeMoments(distr, other.n, other.mean, other.cov)
+    Stats._statsMergeMoments(distr, other.n, other.mean, other.cov)
   end
 end
 
@@ -204,7 +204,7 @@ function Stats.namedCovariance(distr, var1, var2)
     if distr.vars[i] == var1 then
       for j=1,nVars do
         if distr.vars[j] == var2 then
-          return covarianceGet(distr.cov, i, j)
+          return Stats._statsCovarianceGet(distr.cov, i, j)
         end
       end
     end

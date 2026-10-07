@@ -98,6 +98,12 @@ The generated artifact bundles `Low/NdArray.lua` and the NdArray-backed
 `Low/Stats.lua`, so density covariance is an NdArray.  Legacy Matrix3-only
 callers convert at that boundary rather than changing the distribution.
 
+The artifact builder keeps the no-import workflow: `NdArray` and `Stats` are
+pasted package tables, with private helpers stored as underscore-prefixed
+package members. Pipeline modules are pasted into function-scoped loaders so
+their locals do not accumulate in the generated main chunk; the loaders expose
+their module tables to the canonical pipeline without returning tables.
+
 `Pipeline/ClosestPointSolver.lua` is the active closest-point implementation.
 It stores an explicit timestamp beside each authoritative target position and
 its velocity sample. The first sample bootstraps velocity from the API's
