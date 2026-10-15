@@ -514,37 +514,7 @@ end
 
 MathUtil.factorial = MathUtil.cache(MathUtil._factorial)
 
---[[
-function MathUtil.rfft(data, lerp)
-  local cosLerp
-  if lerp == nil then
-    lerp = 0.05
-  elseif type(lerp) == "function" then
-    cosLerp = lerp
-  else
-    cosLerp = MathUtil.lerp(function(x) return math.cos(x * math.pi) end, 0, 2, lerp)
-  end
-  local n = #data
-  if data % 2 == 0 and n > 32 then
-    local ldata = {}
-    local rdata = {}
-    local lres = MathUtil.rfft(ldata, cosLerp)
-    local rres = MathUtil.rfft(rdata, cosLerp)
-    -- WIP
-  else
-    local res = {}
-    for w=1, n do
-      res[w] = 0
-    end
-    for i=1, n do
-      for w=1, n do
-        local theta = (((w - 1) * (i - 1)) / n) % 2
-        res[w] = res[w] + data[i] * cosLerp(theta)
-      end
-    end
-  end
-end
---]]
+
 
 -- code from lua-polynomials by piqey (John Kushmer) on github
 -- modified to fix a missed branch in solveQuartic

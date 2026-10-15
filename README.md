@@ -9,7 +9,7 @@ If you have any questions on how to use it, how it works, or how to program in g
 
 ## Installation
 
-Unfortunately, FtD does not provide a nice way to import libraries. The easiest way to do it is to replace the default Lua box contents with the contents of `Wrapper.lua`. Alternatively, copy the content of `Header.lua` to the beginning of your lua script (outside of the Update function) and the content of `Tides.lua` or `Tides.min.lua` anywhere else in your script, such as the very end (again, outside of any functions).
+Unfortunately, FtD does not provide a nice way to import libraries. Copy the content of `Header.lua` to the beginning of your lua script (outside of the Update function) and the content of `Tides.lua` anywhere else in your script, such as the very end (again, outside of any functions).
 
 For the counterbattery example, the modular paste-ready artifact is
 `Full/Counterbattery/CounterBatteryPipeline.lua`. Regenerate it after source
@@ -55,3 +55,32 @@ The classes in Tides are divided into four categories based on their level of ab
 
 6. Ramp Targeting (WIP):
 * Aims unguided missiles while taking into account initial launch velocity and acceleration time
+
+## Streaming Fourier transform
+
+`Low/StreamingFourier.lua` owns the reusable streaming DFT API. Build the
+canonical paste artifact with `.venv/bin/python Util/concat.py`; paste
+`Header.lua` before your script and `Tides.lua` after it, outside `Update`.
+
+```lua
+local spectrum = StreamingFourier.new(64) -- keep between Update calls
+-- Call once per uniformly spaced real sample:
+local ready = StreamingFourier.update(spectrum, sample)
+if ready then
+    local k = 3
+    local re, im = spectrum.real[k + 1], spectrum.imag[k + 1]
+    local amplitude = 2 * math.sqrt(re * re + im * im) / spectrum.size
+end
+-- StreamingFourier.reset(spectrum) starts an independent stream.
+```
+
+Each update costs O(N) time and retains O(N) storage, with arbitrary positive
+integer window sizes. The rectangular window holds oldest-to-newest samples,
+left-padded with zeros until ready. Coefficients use the unnormalized
+negative-exponent DFT; bin k represents k * sampleRate / N Hz, for
+k=0..floor(N/2). Negative bins follow by conjugate symmetry. For one-sided
+amplitude divide magnitude by N and double interior bins only (exclude DC
+and even-N Nyquist). `real` and `imag` are reused tables; copy values to retain
+a snapshot. Inputs must be finite real numbers. Long-running recursive
+transforms accumulate floating-point error; reset when starting a new stream.
+The obsolete Fourier drafts and stale manually minified artifact were removed.

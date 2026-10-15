@@ -42,6 +42,15 @@ def main() -> int:
             lua.execute("_ALE = 'local-test'")
         lua.execute(combined.read_text(encoding="utf-8"))
 
+    # Verify both the standalone owner and the actual paste-ready entry point.
+    subprocess.run([sys.executable, str(REPO_ROOT / "Util" / "concat.py")],
+                   cwd=REPO_ROOT, check=True)
+    contract = (ROOT / "fourier" / "streaming_fourier_test.lua").read_text(encoding="utf-8")
+    for source in (REPO_ROOT / "Low" / "StreamingFourier.lua", REPO_ROOT / "Tides.lua"):
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        header = (REPO_ROOT / "Header.lua").read_text(encoding="utf-8")
+        lua.execute(header + "\n" + source.read_text(encoding="utf-8") + "\n" + contract)
+
     run_chunk(COMBINED)
 
     scenarios = [

@@ -41,3 +41,9 @@ fresh `local Update` declaration inside each module wrapper before pasting the
 child. This preserves each script's normal top-level `function Update(I)` while
 preventing one child from replacing another child's callback when `_ALE` is
 unavailable.
+
+Streaming Fourier contracts live in `fourier/streaming_fourier_test.lua` and
+run through `tests/run_tests.sh` (also `--ale`). The suite rebuilds `Tides.lua`
+and checks both the standalone owner and `Header.lua` + the complete paste
+artifact against a direct DFT, including warmup, phase, odd sizes, long streams,
+reset, reused outputs, and invalid input rejection.

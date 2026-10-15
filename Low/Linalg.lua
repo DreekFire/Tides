@@ -613,10 +613,6 @@ function Linalg.solvePCG()
     error("solvePCG is not implemented")
 end
 
-function Linalg.fft()
-    error("fft is not implemented")
-end
-
 function Linalg.svd()
     error("svd is not implemented")
 end

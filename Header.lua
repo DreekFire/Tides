@@ -16,3 +16,5 @@ local Stats = {}
 local StringUtil = {}
 local Targeting = {}
 local VectorN = {}
+local StreamingFourier = {}
+local Util = {}
