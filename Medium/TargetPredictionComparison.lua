@@ -60,6 +60,8 @@ function TargetPredictionComparison.new(config)
         windowSize = validated.size, sampleInterval = validated.interval,
         harmonics = validated.harmonics, maxGap = validated.maxGap,
         minRelativePower = validated.minRelativePower,
+        windowCycles = validated.window.cycles, windowMinHalfLife = validated.window.minHalfLife,
+        windowMaxHalfLife = validated.window.maxHalfLife,
     }}, {__index = TargetPredictionComparison})
 end
 

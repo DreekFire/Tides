@@ -54,3 +54,7 @@ in its documented paste order. Run `.venv/bin/python tests/run_target_prediction
 with `--ale` for Lua 5.1 or `--report` for synthetic per-horizon RMSE rows.
 These contracts are also part of `tests/run_tests.sh`. See
 `docs/TargetPrediction.md` for models, matched-origin scoring and limitations.
+
+`prediction/fourier_window_test.lua` verifies frequency-dependent half-lives,
+weighted joint fits, phase, Nyquist, amplitude decay and invalid inputs. Prediction
+contracts verify configuration propagation and window diagnostics through the launcher.

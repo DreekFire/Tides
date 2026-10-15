@@ -102,7 +102,11 @@ complete visible-target map each observation. Results live in
 after the library definitions execute; the standalone launcher initializes on
 its first `Update`.
 
-The default Fourier history is 12.8 seconds. This implementation uses fixed
+The default Fourier history is 12.8 seconds. Selected components use exponential
+age weights: low frequencies retain longer history, while high frequencies
+adapt faster. Configure `windowCycles`, `windowMinHalfLife`, and
+`windowMaxHalfLife` (defaults 1, 1.6 s, 12.8 s). The reusable fitter lives in
+`Low/FourierWindow.lua`. This implementation uses fixed
 DFT bins, so off-bin periods and changing manoeuvres can produce large errors;
 it does not make circle or helical prediction redundant. See
 [the API and model contracts](docs/TargetPrediction.md).

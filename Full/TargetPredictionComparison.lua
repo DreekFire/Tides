@@ -3,6 +3,7 @@
 local comparisonConfig = {
     windowSize = 128, sampleInterval = 0.1, harmonics = 4,
     minRelativePower = 0.01, maxGap = 0.5, horizons = {0.5, 1, 2},
+    windowCycles = 1, windowMinHalfLife = 1.6, windowMaxHalfLife = 12.8,
 }
 local comparisonMainframe = 0
 local comparisonLogInterval = 5

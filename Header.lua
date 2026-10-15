@@ -20,3 +20,4 @@ local StreamingFourier = {}
 local Util = {}
 local TargetPrediction = {}
 local TargetPredictionComparison = {}
+local FourierWindow = {}

@@ -1,4 +1,4 @@
--- Canonical world-space motion models. Dependencies: StreamingFourier, Vector3.
+-- Canonical world-space motion models. Dependencies: StreamingFourier, FourierWindow, Vector3.
 TargetPrediction = {}
 local axes = {"x", "y", "z"}
 local function finite(value)
@@ -19,7 +19,8 @@ function TargetPrediction.new(config)
     local gap = config.maxGap or math.max(0.5, interval * 2)
     assert(finite(gap) and gap >= interval, "prediction maxGap must be >= sampleInterval")
     local state = {size = size, interval = interval, harmonics = harmonics,
-        minRelativePower = fraction, maxGap = gap, epoch = 0, spectra = {}, observations = {}}
+        minRelativePower = fraction, maxGap = gap, epoch = 0, spectra = {}, observations = {},
+        window = FourierWindow.new(size, interval, config)}
     for _, axis in ipairs(axes) do state.spectra[axis] = StreamingFourier.new(size) end
     return state
 end
@@ -35,24 +36,21 @@ end
 -- Integrate Fourier coefficients of position increments, separating DC drift.
 -- Position-domain power ranks frequencies jointly across all three axes.
 local function fitSpectrum(state)
-    local candidates, drift = {}, {}
-    for _, axis in ipairs(axes) do drift[axis] = state.spectra[axis].real[1] / state.size / state.interval end
-    state.drift = Vector3(drift.x, drift.y, drift.z)
+    local candidates = {}
     for k = 1, math.floor(state.size/2) do
         local w = 2 * math.pi * k / state.size
         local c, s = math.cos(w), math.sin(w)
-        local denominator, re, im, power = 2 * (1-c), {}, {}, 0
+        local denominator, power = 2 * (1-c), 0
         local scale = (state.size % 2 == 0 and k == state.size/2) and 1/state.size or 2/state.size
         for _, axis in ipairs(axes) do
             local spectrum = state.spectra[axis]
             local dr, di = spectrum.real[k+1], spectrum.imag[k+1]
             local lr, li = dr*c + di*s, di*c - dr*s
-            re[axis] = scale * (lr*(1-c) + li*s) / denominator
-            im[axis] = scale * (li*(1-c) - lr*s) / denominator
-            power = power + re[axis]^2 + im[axis]^2
+            local re = scale * (lr*(1-c) + li*s) / denominator
+            local im = scale * (li*(1-c) - lr*s) / denominator
+            power = power + re^2 + im^2
         end
-        candidates[#candidates+1] = {bin = k, omega = w/state.interval, power = power,
-            real = Vector3(re.x, re.y, re.z), imag = Vector3(im.x, im.y, im.z)}
+        candidates[#candidates+1] = {bin = k, omega = w/state.interval, power = power}
     end
     table.sort(candidates, function(a, b)
         if a.power == b.power then return a.bin < b.bin end
@@ -64,6 +62,25 @@ local function fitSpectrum(state)
         if candidate.power > 1e-18 and candidate.power >= candidates[1].power * state.minRelativePower then
             state.components[#state.components+1] = candidate
         end
+    end
+    local bins = {}
+    for i, component in ipairs(state.components) do bins[i] = component.bin end
+    local fit = FourierWindow.fit(state.window,
+        {state.spectra.x, state.spectra.y, state.spectra.z}, bins)
+    state.drift = Vector3(fit.dc[1], fit.dc[2], fit.dc[3]) / state.interval
+    for i, component in ipairs(state.components) do
+        local estimate = fit.components[i]
+        local w = component.omega*state.interval
+        local c, sn = math.cos(w), math.sin(w)
+        local denominator, re, im = 2*(1-c), {}, {}
+        for axis = 1, 3 do
+            local a, b = estimate.cosine[axis], -estimate.sine[axis]
+            re[axis] = (a*(1-c)+b*sn)/denominator
+            im[axis] = (b*(1-c)-a*sn)/denominator
+        end
+        component.real = Vector3(re[1], re[2], re[3])
+        component.imag = Vector3(im[1], im[2], im[3])
+        component.halfLife = estimate.halfLife
     end
 end
 
@@ -148,6 +165,13 @@ function TargetPrediction.predict(state, model, horizon)
         end
         result.position, result.componentCount = predicted, #state.components
         result.frequencyResolution = 1 / (state.size * state.interval)
+        result.window = {method = "frequency-exponential", cycles = state.window.cycles,
+            minHalfLife = state.window.minHalfLife, maxHalfLife = state.window.maxHalfLife,
+            dcHalfLife = FourierWindow.halfLife(state.window, 0), components = {}}
+        for i, component in ipairs(state.components) do
+            result.window.components[i] = {bin = component.bin,
+                frequency = component.omega/(2*math.pi), halfLife = component.halfLife}
+        end
     else
         if not state.velocity or (model ~= "linear" and not state.acceleration) then
             result.reason = "derivative-warmup"; return result

@@ -3,6 +3,7 @@
 ## Ownership and execution
 
 - Models: `Medium/TargetPrediction.lua`; transform: `Low/StreamingFourier.lua`.
+- Weighted harmonic fitting: `Low/FourierWindow.lua`; uses `NdArray` and `Linalg`.
 - Comparison and target lifecycle: `Medium/TargetPredictionComparison.lua`.
 - Public declarations: `Header.lua`; library artifact: `Tides.lua` (`Util/concat.py`).
 - FtD launcher: `Full/TargetPredictionComparison.lua`; canonical paste order:
@@ -18,6 +19,7 @@
 -- Run initialization after the pasted library definitions have executed.
 local comparison = TargetPredictionComparison.new({
     windowSize = 128, sampleInterval = 0.1, harmonics = 4,
+    windowCycles = 1, windowMinHalfLife = 1.6, windowMaxHalfLife = 12.8,
     minRelativePower = 0.01, maxGap = 0.5, horizons = {0.5, 1, 2},
 })
 local report = comparison:update({[42] = Vector3(100, 20, 30)}, now)
@@ -78,16 +80,42 @@ Fourier processing:
    `P[k]=D[k]/(1-exp(-i*w[k]))`; retain DC as steady translational drift.
 5. Rank bins jointly by XYZ displacement power; retain at most `harmonics`
    whose power is at least `minRelativePower` times the strongest bin.
-6. Extrapolate phases at `w[k]=2*pi*k/(N*dt)`. Subtract the phase at the current
+6. Refit the selected increment harmonics jointly with exponential age weights.
+   Each bin uses its own half-life; DC uses the maximum. Convert the fitted
+   increment coefficients to position coefficients with the same integration.
+7. Extrapolate phases at `w[k]=2*pi*k/(N*dt)`. Subtract the phase at the current
    observation and anchor displacement to the latest actual position, including
    observations between grid points. Fractional horizons are supported.
 
 Defaults: N=128, dt=0.1 s, 4 bins, relative power cutoff 0.01, gap=0.5 s.
 History duration `N*dt=12.8 s`; frequency resolution `1/(N*dt)` Hz.
 Nyquist is counted once; odd windows retain normal conjugate-pair scaling.
-Per-target storage O(N + numberOfHorizons * maxHorizon/dt). Resampled model
-updates cost O(N log N) with bin ranking; each forecast costs O(retained bins).
+For K selected bins, the weighted basis has P <= 2K+1 columns. Each update
+uses at most K+1 weighted fits, each O(N*P² + P³), plus O(N log N) bin ranking.
+Working storage is O(N*P + P²), plus pending forecasts; each forecast costs O(K).
 Raw kinematic derivatives are unsmoothed. Resampling has no anti-alias filter.
+
+## Frequency-dependent window API
+
+`FourierWindow.new(N, dt, options)` configures the reusable fitter.
+`halfLife(window, bin)` returns seconds; `weight(window, bin, ageSeconds)`
+returns `2^(-ageSeconds/halfLife)`. For positive frequency f:
+
+`halfLife = clamp(windowCycles/f, windowMinHalfLife, windowMaxHalfLife)`
+
+Defaults are one cycle, minimum history duration/8, maximum history duration.
+At N=128 and dt=0.1, bin 1 retains a 12.8 s half-life, bin 2 uses 6.4 s,
+and bins 8 and above use 1.6 s. DC uses 12.8 s. The finite N-sample history
+still imposes a hard cutoff. Minimum half-life must be at least history
+duration/16 to bound conditioning; all options must be positive and max >= min.
+
+`FourierWindow.fit(window, signals, bins)` accepts full aligned StreamingFourier
+states and distinct positive bins. It returns DC per signal and cosine/sine
+coefficients per bin, phased at the newest sample. Every weighting fits the
+entire selected basis to avoid crosstalk from nonorthogonal tapered columns;
+equal half-lives share a solve. Missing history and invalid options fail clearly.
+Frequency selection still uses the rectangular DFT. This improves adaptation
+after selection; it does not refine off-bin frequencies or guarantee lower noise.
 
 ## Comparison result v1
 
@@ -97,6 +125,9 @@ Raw kinematic derivatives are unsmoothed. Resampling has no anti-alias filter.
   `reason`, `status`, `sampleCount`, `windowSize`, `sampleInterval`, `pendingCount`.
 - `forecasts[i]`: `horizon`, `models[model]` with `ready`, `sourceStamp`, `horizon`,
   `model`, and either `position` or an explicit warmup `reason`.
+- Ready Fourier forecasts also expose `window`: method `frequency-exponential`,
+  `cycles`, `minHalfLife`, `maxHalfLife`, `dcHalfLife`, and per-component
+  `bin`, `frequency` (Hz), `halfLife` (seconds).
 - `horizons[i]`: `horizon`, `models[model]` with `count`, and after scoring,
   mean Euclidean error, RMSE, maximum error (all metres).
 - `winners`: all models within 1e-6 m RMSE of the minimum; `winner` only for a

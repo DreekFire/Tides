@@ -12,10 +12,12 @@ FIXTURES = ROOT / "tests" / "prediction"
 def run(runtime, report=False):
     subprocess.run([sys.executable, str(ROOT / "Util" / "concat.py")], cwd=ROOT, check=True)
     mock = (FIXTURES / "vector_mock.lua").read_text()
-    contract = (FIXTURES / "target_prediction_test.lua").read_text()
+    contract = ((FIXTURES / "fourier_window_test.lua").read_text() + "\n"
+                + (FIXTURES / "target_prediction_test.lua").read_text())
     header = (ROOT / "Header.lua").read_text()
     standalone = "\n".join((ROOT / path).read_text() for path in (
-        "Low/StreamingFourier.lua", "Medium/TargetPrediction.lua", "Medium/TargetPredictionComparison.lua"))
+        "Low/NdArray.lua", "Low/Linalg.lua", "Low/StreamingFourier.lua", "Low/FourierWindow.lua",
+        "Medium/TargetPrediction.lua", "Medium/TargetPredictionComparison.lua"))
     for index, source in enumerate((standalone, (ROOT / "Tides.lua").read_text())):
         lua = runtime(unpack_returned_tuples=True)
         lua.globals().PREDICTION_REPORT = report and index == 1

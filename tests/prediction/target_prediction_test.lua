@@ -93,4 +93,31 @@ end
 assert(not pcall(TargetPrediction.update,state,Vector3(0/0,0,0),10))
 assert(not pcall(TargetPrediction.predict,state,'fourier',-1))
 assert(not pcall(TargetPrediction.predict,state,'legacy',1))
+-- The canonical predictor must use the configured windows, not only expose metadata.
+local fast=TargetPrediction.new({windowSize=64,sampleInterval=0.1,harmonics=2,minRelativePower=0})
+local slow=TargetPrediction.new({windowSize=64,sampleInterval=0.1,harmonics=2,minRelativePower=0,
+  windowMinHalfLife=6.4,windowMaxHalfLife=6.4})
+local position=Vector3.zero
+TargetPrediction.update(fast,position,0); TargetPrediction.update(slow,position,0)
+for step=0,63 do
+  local amplitude=step<48 and 1 or 0
+  position=position+Vector3(amplitude*2*math.sin(math.pi/64)*math.cos(2*math.pi*step/64),
+    0,amplitude*2*math.sin(8*math.pi/64)*math.cos(2*math.pi*8*step/64))
+  TargetPrediction.update(fast,position,(step+1)*0.1)
+  TargetPrediction.update(slow,position,(step+1)*0.1)
+end
+local function component(model,bin)
+  for _,item in ipairs(model.components) do if item.bin==bin then return item end end
+  error('missing test frequency '..bin)
+end
+local fastHigh,slowHigh=component(fast,8),component(slow,8)
+local fastAmplitude=math.sqrt(fastHigh.real.z^2+fastHigh.imag.z^2)
+local slowAmplitude=math.sqrt(slowHigh.real.z^2+slowHigh.imag.z^2)
+assert(fastAmplitude<slowAmplitude*0.6)
+near(component(fast,1).real,component(slow,1).real)
+assert(TargetPrediction.predict(fast,'fourier',1).window.method=='frequency-exponential')
+local metadata=TargetPrediction.predict(fast,'fourier',1).window
+assert(metadata.minHalfLife==0.8 and metadata.maxHalfLife==6.4)
+TargetPrediction.update(fast,Vector3.zero,9)
+assert(not TargetPrediction.predict(fast,'fourier',1).ready)
 print('Target prediction numerical contracts passed')

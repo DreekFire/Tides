@@ -44,6 +44,20 @@ assert(not pcall(comparison.update,comparison,{[7]=Vector3(0/0,0,0)},1))
 assert(not pcall(comparison.update,comparison,nil,1))
 assert(not pcall(comparison.update,comparison,{},math.huge))
 
+-- Comparison copies/forwards the normalized window policy to each target.
+local windowOptions={windowSize=16,windowCycles=0.5,windowMinHalfLife=0.2,windowMaxHalfLife=1.2}
+local configured=TargetPredictionComparison.new(windowOptions)
+windowOptions.windowCycles=99
+local configuredReport
+for step=0,40 do
+  local stamp=step*0.1
+  configuredReport=configured:update({[2]=Vector3(math.cos(2*math.pi*step/16),0,math.sin(2*math.pi*step/16))},stamp)
+end
+local policy=configuredReport.byId[2].forecasts[1].models.fourier.window
+near(policy.cycles,0.5); near(policy.minHalfLife,0.2); near(policy.maxHalfLife,1.2)
+near(policy.components[1].halfLife,0.8)
+assert(policy.method=='frequency-exponential')
+
 -- Saved forecasts are scored by future observations, never by refitting.
 local causal=TargetPredictionComparison.new({windowSize=4,sampleInterval=1,maxGap=2,horizons={2}})
 local saved

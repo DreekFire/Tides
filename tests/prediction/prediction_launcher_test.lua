@@ -17,6 +17,9 @@ for step=0,170 do
 end
 assert(logCount>2 and report.byId[42].windowSize==128)
 assert(report.byId[42].status=='comparing')
+local policy=report.byId[42].forecasts[1].models.fourier.window
+assert(policy.method=='frequency-exponential' and policy.cycles==1)
+assert(policy.minHalfLife==1.6 and policy.maxHalfLife==12.8)
 for _,row in ipairs(report.byId[42].horizons) do
   assert(row.models.fourier.count>0 and row.models.fourier.rmse<1e-7)
 end
