@@ -15,3 +15,5 @@
 - Counterbattery contracts: `.venv/bin/python tests/counterbattery_target_aimpoint_test.py`, `.venv/bin/python tests/counterbattery_subobject_test.py`, `.venv/bin/python tests/counterbattery_orientation_test.py`, `.venv/bin/python tests/counterbattery_debug_visualization_test.py`.
 - Solver/rotation checks: `.venv/bin/python tests/run_counterbattery_solver_tests.py`, `.venv/bin/python tests/run_target_rotation_ransac_tests.py`.
 - Windows library builder: `Util/concat.bat` delegates to canonical `Util/concat.py` using `.venv\Scripts\python.exe`.
+- Standalone comparison runtime: paste `Header.lua` → `Full/TargetPredictionComparison.lua` → generated `Tides.lua`; `Update(I)` observes mainframe 0, logs every 5 s.
+- Prediction integration/numerical suite: `.venv/bin/python tests/run_target_prediction_tests.py` (`--ale` for Lua 5.1, `--report` for synthetic RMSE); also included by `tests/run_tests.sh`.

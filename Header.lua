@@ -18,3 +18,5 @@ local Targeting = {}
 local VectorN = {}
 local StreamingFourier = {}
 local Util = {}
+local TargetPrediction = {}
+local TargetPredictionComparison = {}

@@ -51,6 +51,9 @@ def main() -> int:
         header = (REPO_ROOT / "Header.lua").read_text(encoding="utf-8")
         lua.execute(header + "\n" + source.read_text(encoding="utf-8") + "\n" + contract)
 
+    from run_target_prediction_tests import run as run_prediction_tests
+    run_prediction_tests(LuaRuntime)
+
     run_chunk(COMBINED)
 
     scenarios = [

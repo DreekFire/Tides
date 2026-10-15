@@ -47,3 +47,10 @@ run through `tests/run_tests.sh` (also `--ale`). The suite rebuilds `Tides.lua`
 and checks both the standalone owner and `Header.lua` + the complete paste
 artifact against a direct DFT, including warmup, phase, odd sizes, long streams,
 reset, reused outputs, and invalid input rejection.
+
+Standalone target prediction contracts live in `prediction/` and run against
+the source modules, generated library, and `Full/TargetPredictionComparison.lua`
+in its documented paste order. Run `.venv/bin/python tests/run_target_prediction_tests.py`
+with `--ale` for Lua 5.1 or `--report` for synthetic per-horizon RMSE rows.
+These contracts are also part of `tests/run_tests.sh`. See
+`docs/TargetPrediction.md` for models, matched-origin scoring and limitations.

@@ -84,3 +84,31 @@ and even-N Nyquist). `real` and `imag` are reused tables; copy values to retain
 a snapshot. Inputs must be finite real numbers. Long-running recursive
 transforms accumulate floating-point error; reset when starting a new stream.
 The obsolete Fourier drafts and stale manually minified artifact were removed.
+
+## Target prediction comparison
+
+`Medium/TargetPrediction.lua` implements Fourier, linear, quadratic, and
+osculating-circle forecasts. `Medium/TargetPredictionComparison.lua` compares
+them against future observations using matched origins and fixed horizons.
+They are reusable library modules. The standalone FtD launcher is
+`Full/TargetPredictionComparison.lua`: paste `Header.lua`, the launcher, and
+`Tides.lua` in that order. It observes target CoM positions and logs RMSE every
+five seconds. Read the latest result with `GetTargetPredictionComparisonReport()`.
+
+For another caller, create `TargetPredictionComparison.new(options)` once,
+then call `comparison:update({[targetId] = worldPosition}, timestamp)` with the
+complete visible-target map each observation. Results live in
+`report.byId[targetId].forecasts` and `.horizons`. Initialization must happen
+after the library definitions execute; the standalone launcher initializes on
+its first `Update`.
+
+The default Fourier history is 12.8 seconds. This implementation uses fixed
+DFT bins, so off-bin periods and changing manoeuvres can produce large errors;
+it does not make circle or helical prediction redundant. See
+[the API and model contracts](docs/TargetPrediction.md).
+
+Reproduce the synthetic comparisons with:
+
+```sh
+.venv/bin/python tests/run_target_prediction_tests.py --report
+```
