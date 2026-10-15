@@ -21,6 +21,7 @@ local policy=report.byId[42].forecasts[1].models.fourier.window
 assert(policy.method=='frequency-exponential' and policy.cycles==1)
 assert(policy.minHalfLife==1.6 and policy.maxHalfLife==12.8)
 for _,row in ipairs(report.byId[42].horizons) do
+  assert(row.models.selector.count==row.models.fourier.count and row.models.selector.rmse<1e-7)
   assert(row.models.fourier.count>0 and row.models.fourier.rmse<1e-7)
 end
 local count=report.byId[42].horizons[1].models.fourier.count

@@ -20,7 +20,7 @@
 local comparison = TargetPredictionComparison.new({
     windowSize = 128, sampleInterval = 0.1, harmonics = 4,
     windowCycles = 1, windowMinHalfLife = 1.6, windowMaxHalfLife = 12.8,
-    minRelativePower = 0.01, maxGap = 0.5, horizons = {0.5, 1, 2},
+    minRelativePower = 0.01, maxGap = 0.5, horizons = {0.5, 1, 2}, selectorHalfLife = 3,
 })
 local report = comparison:update({[42] = Vector3(100, 20, 30)}, now)
 local target = report.byId[42]
@@ -136,7 +136,7 @@ after selection; it does not refine off-bin frequencies or guarantee lower noise
 
 Scoring rules:
 
-- Issue all four forecasts together only when all four models are ready;
+- Issue the four base forecasts and selector together only when all base models are ready;
   warmup is excluded for every model. At most one issue per dt.
 - Save forecast positions at issue time. Score only once the future due time
   has been bracketed by actual observations; interpolate that bracket.
@@ -180,3 +180,22 @@ Mathematical references: [NIST Fourier series](https://dlmf.nist.gov/1.8),
   fractional horizons, invalid inputs, duplicate/gap/clock handling, target
   isolation/loss, bounded queues, causal scoring, ties, snapshot preservation.
 - Results are synthetic validation, not live FtD accuracy measurements.
+
+## Recent-error selector
+
+The comparison owns `forecasts[i].models.selector` and matching aggregate metrics.
+It selects one of linear, quadratic, circle, Fourier independently per target and
+horizon. Matured saved forecasts update exponentially weighted squared errors:
+`E = decay*E + (1-decay)*error²`, `decay = 2^(-elapsedDueTime/selectorHalfLife)`.
+The first matured error initializes E; default half-life is 3 seconds (positive,
+configurable). Select the minimum E; exact ties prefer linear, quadratic, circle,
+then Fourier. Before any outcome matures, select linear. No oracle or scenario
+labels are used. Outcomes bracketed by the current observation are scored before
+selection; errors from forecasts still in flight are unavailable.
+
+The selector returns a copied selected position, `selectedModel`, `selection`
+(`initial-linear` or `recent-error`), and `selectorHalfLife`. Its saved forecasts
+are scored at the same origins as all base models, including initial selection
+and adaptation errors. Gap, loss and backwards-clock resets also clear recent
+errors. Duplicate timestamps leave selector state unchanged. Launcher logs
+include selector RMSE. This selects complete forecasts; it does not blend them.

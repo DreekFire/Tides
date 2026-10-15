@@ -14,3 +14,5 @@
 - Prediction input: complete target-ID → finite XYZ position map plus finite timestamp; no Counterbattery product required. Generated `Tides.lua` includes both prediction modules; no new persisted artifact.
 
 - Ready Fourier forecasts carry `window` diagnostics: frequency-exponential method, configured cycles/half-life bounds, DC half-life, selected bin frequencies and half-lives; seconds/Hz. No persisted window artifact.
+
+- Comparison v1 additive model `selector`: same matched-origin metrics; forecast includes `selectedModel`, `selection`, `selectorHalfLife`. No persisted selector artifact.

@@ -58,3 +58,6 @@ These contracts are also part of `tests/run_tests.sh`. See
 `prediction/fourier_window_test.lua` verifies frequency-dependent half-lives,
 weighted joint fits, phase, Nyquist, amplitude decay and invalid inputs. Prediction
 contracts verify configuration propagation and window diagnostics through the launcher.
+
+Selector contracts cover initial linear choice, selection from matured forecasts,
+matched score counts, reset lifecycle and invalid half-life rejection.

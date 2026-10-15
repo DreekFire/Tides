@@ -17,3 +17,5 @@
 - Windows library builder: `Util/concat.bat` delegates to canonical `Util/concat.py` using `.venv\Scripts\python.exe`.
 - Standalone comparison runtime: paste `Header.lua` → `Full/TargetPredictionComparison.lua` → generated `Tides.lua`; `Update(I)` observes mainframe 0, logs every 5 s.
 - Prediction integration/numerical suite (includes frequency-dependent weight, phase, decay, configuration and launcher contracts): `.venv/bin/python tests/run_target_prediction_tests.py` (`--ale` for Lua 5.1, `--report` for synthetic RMSE); also included by `tests/run_tests.sh`.
+
+- Selector measurement: `.venv/bin/python tests/run_target_prediction_tests.py --report`; reports selector alongside all base models on identical scenarios/origins.

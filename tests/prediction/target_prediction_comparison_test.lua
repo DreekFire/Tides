@@ -1,7 +1,7 @@
 local function near(actual,expected,tolerance)
   assert(math.abs(actual-expected)<(tolerance or 1e-7),tostring(actual)..' ~= '..tostring(expected))
 end
-local models={'fourier','linear','quadratic','circle'}
+local models={'fourier','linear','quadratic','circle','selector'}
 -- Standalone lifecycle and independent target ownership, with no host system.
 local comparison=TargetPredictionComparison.new({windowSize=16,horizons={0.5,1,2}})
 local report
@@ -17,7 +17,7 @@ for _,row in ipairs(report.byId[42].horizons) do
     assert(row.models[model].count>0 and row.models[model].count==row.models.fourier.count)
     near(row.models[model].rmse,0)
   end
-  assert(#row.winners==4 and row.winner==nil) -- report ties honestly
+  assert(#row.winners==5 and row.winner==nil) -- report ties honestly
 end
 local oldCount=report.byId[42].horizons[1].models.fourier.count
 local repeated=comparison:update({[42]=Vector3(999,0,0),[7]=Vector3(108,4,0)},8)
@@ -124,9 +124,9 @@ for _,case in ipairs(cases) do
       assert(row.models[model].rmse >= 0 and row.models[model].rmse < math.huge)
     end
     if PREDICTION_REPORT then
-      print(string.format('%-18s h=%3.1f n=%3d fourier=%9.4f linear=%9.4f quadratic=%9.4f circle=%9.4f winner=%s',
+      print(string.format('%-18s h=%3.1f n=%3d fourier=%9.4f linear=%9.4f quadratic=%9.4f circle=%9.4f selector=%9.4f winner=%s',
         case[1],row.horizon,row.models.fourier.count,row.models.fourier.rmse,
-        row.models.linear.rmse,row.models.quadratic.rmse,row.models.circle.rmse,table.concat(row.winners,",")))
+        row.models.linear.rmse,row.models.quadratic.rmse,row.models.circle.rmse,row.models.selector.rmse,table.concat(row.winners,",")))
     end
   end
 end
@@ -150,3 +150,14 @@ for step=0,120 do
   end
 end
 print('Standalone target prediction comparison contracts passed')
+
+-- Selection is causal: before the first matured forecast it uses linear.
+local selectionTest=TargetPredictionComparison.new({windowSize=4,sampleInterval=0.1,horizons={1}})
+for step=0,13 do
+  local frame=selectionTest:update({[1]=Vector3(step*step,0,0)},step*0.1).byId[1]
+  assert(frame.forecasts[1].models.selector.selectedModel=='linear')
+end
+local first=selectionTest:update({[1]=Vector3(196,0,0)},1.4).byId[1]
+assert(first.forecasts[1].models.selector.selectedModel=='quadratic')
+assert(first.horizons[1].models.selector.count==1)
+assert(not pcall(TargetPredictionComparison.new,{selectorHalfLife=0}))

@@ -3,7 +3,7 @@
 local comparisonConfig = {
     windowSize = 128, sampleInterval = 0.1, harmonics = 4,
     minRelativePower = 0.01, maxGap = 0.5, horizons = {0.5, 1, 2},
-    windowCycles = 1, windowMinHalfLife = 1.6, windowMaxHalfLife = 12.8,
+    selectorHalfLife = 3, windowCycles = 1, windowMinHalfLife = 1.6, windowMaxHalfLife = 12.8,
 }
 local comparisonMainframe = 0
 local comparisonLogInterval = 5
@@ -31,10 +31,10 @@ function Update(I)
             else
                 for _, row in ipairs(target.horizons) do
                     if #row.winners > 0 then
-                        I:Log(string.format('Prediction target=%s h=%.2fs n=%d RMSE Fourier=%.3f linear=%.3f quadratic=%.3f circle=%.3f best=%s',
+                        I:Log(string.format('Prediction target=%s h=%.2fs n=%d RMSE Fourier=%.3f linear=%.3f quadratic=%.3f circle=%.3f selector=%.3f best=%s',
                             tostring(id), row.horizon, row.models.fourier.count,
                             row.models.fourier.rmse, row.models.linear.rmse,
-                            row.models.quadratic.rmse, row.models.circle.rmse,
+                            row.models.quadratic.rmse, row.models.circle.rmse, row.models.selector.rmse,
                             table.concat(row.winners, ',')))
                     end
                 end

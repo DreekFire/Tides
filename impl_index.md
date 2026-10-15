@@ -26,3 +26,5 @@
 - `prediction-launcher`: `Full/TargetPredictionComparison.lua:Update`, `GetTargetPredictionComparisonReport`; detailed contracts in `docs/TargetPrediction.md`.
 
 - Frequency-dependent harmonic windows: `Low/FourierWindow.lua` (`new`, `halfLife`, `weight`, `fit`); canonical weighted least-squares owner, depends on NdArray/Linalg.
+
+- Recent-error selection: `Medium/TargetPredictionComparison.lua`; per-target/per-horizon causal exponentially weighted squared errors, selector forecasts and metrics.

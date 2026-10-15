@@ -4896,7 +4896,8 @@ end
 -- Standalone causal comparison. Dependencies: TargetPrediction, Vector3.
 -- Every call supplies the complete visible target-id -> world-position map.
 TargetPredictionComparison = {}
-local models = {"fourier", "linear", "quadratic", "circle"}
+local candidates = {"linear", "quadratic", "circle", "fourier"}
+local models = {"fourier", "linear", "quadratic", "circle", "selector"}
 local function finite(value)
     return type(value) == "number" and value == value and math.abs(value) < math.huge
 end
@@ -4909,7 +4910,7 @@ local function newState(predictor, horizons)
             metrics[i][model] = {count = 0, sum = 0, sumSquared = 0, max = 0}
         end
     end
-    return {predictor = predictor, epoch = predictor.epoch, pending = {}, metrics = metrics}
+    return {predictor = predictor, epoch = predictor.epoch, pending = {}, metrics = metrics, recent = {}}
 end
 
 local function snapshot(self, state)
@@ -4950,8 +4951,10 @@ function TargetPredictionComparison.new(config)
             "prediction horizons must be finite, positive and strictly increasing")
         copied[i], previous = value, value
     end
+    local halfLife = config.selectorHalfLife or 3
+    assert(finite(halfLife) and halfLife > 0, "selectorHalfLife must be positive")
     -- Retain normalized options rather than a mutable caller-owned config.
-    return setmetatable({horizons = copied, interval = validated.interval, states = {}, options = {
+    return setmetatable({horizons = copied, interval = validated.interval, selectorHalfLife = halfLife, states = {}, options = {
         windowSize = validated.size, sampleInterval = validated.interval,
         harmonics = validated.harmonics, maxGap = validated.maxGap,
         minRelativePower = validated.minRelativePower,
@@ -4960,7 +4963,7 @@ function TargetPredictionComparison.new(config)
     }}, {__index = TargetPredictionComparison})
 end
 
-local function score(state, position, stamp)
+local function score(self, state, position, stamp)
     local pending = {}
     for _, saved in ipairs(state.pending) do
         if saved.due <= stamp then
@@ -4975,7 +4978,14 @@ local function score(state, position, stamp)
                 metric.count, metric.sum = metric.count + 1, metric.sum + distance
                 metric.sumSquared = metric.sumSquared + distance^2
                 metric.max = math.max(metric.max, distance)
+                if model ~= "selector" then
+                    local recent = state.recent[saved.index] or {errors = {}}
+                    state.recent[saved.index] = recent
+                    local decay = recent.stamp and 2^(-(saved.due-recent.stamp)/self.selectorHalfLife) or 0
+                    recent.errors[model] = decay*(recent.errors[model] or 0)+(1-decay)*distance^2
+                end
             end
+            state.recent[saved.index].stamp = saved.due
         else pending[#pending+1] = saved end
     end
     state.pending = pending
@@ -4995,17 +5005,28 @@ function TargetPredictionComparison:update(positions, stamp)
         local accepted, reason = TargetPrediction.update(predictor, position, stamp)
         if not state or state.epoch ~= predictor.epoch then state = newState(predictor, self.horizons) end
         self.states[id] = state
+        if accepted then score(self, state, position, stamp) end
         local forecasts, ready = {}, true
         for i, horizon in ipairs(self.horizons) do
             local estimates = {}
-            for _, model in ipairs(models) do
+            for _, model in ipairs(candidates) do
                 estimates[model] = TargetPrediction.predict(predictor, model, horizon)
                 if not estimates[model].ready then ready = false end
             end
+            local recent, selected = state.recent[i], "linear"
+            if recent then
+                for _, model in ipairs(candidates) do
+                    if recent.errors[model] < recent.errors[selected] then selected = model end
+                end
+            end
+            local chosen = estimates[selected]
+            estimates.selector = {model = "selector", selectedModel = selected,
+                ready = chosen.ready, reason = chosen.reason, sourceStamp = chosen.sourceStamp,
+                horizon = horizon, position = chosen.position and Vector3(chosen.position.x, chosen.position.y, chosen.position.z),
+                selectorHalfLife = self.selectorHalfLife, selection = recent and "recent-error" or "initial-linear"}
             forecasts[i] = {horizon = horizon, models = estimates}
         end
         if accepted then
-            score(state, position, stamp)
             -- Matched origins: exclude warmup for every model, and issue at most
             -- once per resampling interval. Pending storage is horizon-bounded.
             if ready and (not state.lastIssued or stamp-state.lastIssued >= self.interval-1e-9) then

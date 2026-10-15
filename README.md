@@ -90,6 +90,8 @@ The obsolete Fourier drafts and stale manually minified artifact were removed.
 `Medium/TargetPrediction.lua` implements Fourier, linear, quadratic, and
 osculating-circle forecasts. `Medium/TargetPredictionComparison.lua` compares
 them against future observations using matched origins and fixed horizons.
+Its recent-error selector chooses a base model per target and horizon using
+only matured forecast errors (`selectorHalfLife`, default 3 seconds).
 They are reusable library modules. The standalone FtD launcher is
 `Full/TargetPredictionComparison.lua`: paste `Header.lua`, the launcher, and
 `Tides.lua` in that order. It observes target CoM positions and logs RMSE every
